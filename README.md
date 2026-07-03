@@ -8,23 +8,9 @@
 
 <!-- ESPACIO PARA LA CAPTURA DE PANTALLA -->
 
-\## 📱 Vista Previa de la Aplicación
+## 📱 Vista Previa de la Aplicación
 
-
-
-<!-- VISTA PREVIA DE LA APLICACIÓN -->
-
-<h2>📱 Vista Previa de la Aplicación</h2>
-
-<p align="center">
-
-&#x20; <img src="assets/screenshot.jpg" alt="Vista Principal de CertiSendPro" width="800">
-
-</p>
-
-
-
-
+![Vista Principal de CertiSendPro](assets/screenshot.jpg)
 
 
 
