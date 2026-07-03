@@ -12,7 +12,17 @@
 
 
 
-!\[Vista Principal de CertiSendPro](https://githubusercontent.com)
+<!-- VISTA PREVIA DE LA APLICACIÓN -->
+
+<h2>📱 Vista Previa de la Aplicación</h2>
+
+<p align="center">
+
+&#x20; <img src="assets/screenshot.jpg" alt="Vista Principal de CertiSendPro" width="800">
+
+</p>
+
+
 
 
 
@@ -82,9 +92,9 @@ Crea un archivo `.env` en la raíz del proyecto basándote en el archivo `.env.e
 
 ```env
 
-VITE\\\\\\\\\\\\\\\_FIREBASE\\\\\\\\\\\\\\\_API\\\\\\\\\\\\\\\_KEY=tu\\\\\\\\\\\\\\\_api\\\\\\\\\\\\\\\_key
+VITE\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_FIREBASE\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_API\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_KEY=tu\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_api\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_key
 
-VITE\\\\\\\\\\\\\\\_GOOGLE\\\\\\\\\\\\\\\_AI\\\\\\\\\\\\\\\_API\\\\\\\\\\\\\\\_KEY=tu\\\\\\\\\\\\\\\_ai\\\\\\\\\\\\\\\_studio\\\\\\\\\\\\\\\_key
+VITE\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_GOOGLE\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_AI\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_API\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_KEY=tu\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_ai\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_studio\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_key
 
 ```
 
