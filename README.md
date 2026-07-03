@@ -6,6 +6,16 @@
 
 
 
+<!-- ESPACIO PARA LA CAPTURA DE PANTALLA -->
+
+\## 📱 Vista Previa de la Aplicación
+
+
+
+!\[Vista Principal de CertiSendPro](assets/screenshot.png)
+
+
+
 \## 🛠️ Tecnologías Utilizadas
 
 
