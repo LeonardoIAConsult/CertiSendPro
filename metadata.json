@@ -1,0 +1,6 @@
+{
+  "name": "CertiSend Pro - Distribuidor de Certificados",
+  "description": "Divide certificados de Canva, extrae los nombres usando Inteligencia Artificial, los asocia con correos electrónicos de una hoja de cálculo y los envía por Gmail de forma automática.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
