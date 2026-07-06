@@ -1,1 +1,15 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Poppins:wght@600;700&display=swap");
 @import "tailwindcss";
+
+/* Tipografía oficial — Manual de Marca CertiSend Pro v1.0
+   Titulares/wordmark: Poppins · Cuerpo/UI: Inter */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Poppins", "Inter", sans-serif;
+}
+
+@layer base {
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+  }
+}

@@ -17,9 +17,9 @@ import {
   Coins,
   Send,
   Loader2,
-  TrendingUp,
-  Award
+  TrendingUp
 } from "lucide-react";
+import { LogoMark, AnimatedGlyph } from "./BrandLogo";
 import { translations, TranslationDict } from "../utils/translations";
 
 interface LandingPageProps {
@@ -107,11 +107,9 @@ export default function LandingPage({
           
           {/* Logo */}
           <div className="flex items-center gap-2">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-[#7D2AE8] flex items-center justify-center text-white shadow-md shadow-indigo-600/20">
-              <Award className="w-6 h-6 animate-pulse" />
-            </div>
+            <LogoMark className="w-10 h-10" />
             <div>
-              <span className="font-extrabold tracking-tight text-lg bg-gradient-to-r from-blue-500 via-indigo-500 to-[#7D2AE8] bg-clip-text text-transparent">
+              <span className="font-extrabold tracking-tight text-lg bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] bg-clip-text text-transparent">
                 {t.appName}
               </span>
             </div>
@@ -147,7 +145,7 @@ export default function LandingPage({
             <button
               onClick={onStart}
               disabled={isLoggingIn}
-              className="bg-gradient-to-r from-blue-600 to-[#7D2AE8] text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-md shadow-blue-900/10 hover:opacity-95"
+              className="bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-md shadow-blue-900/10 hover:opacity-95"
             >
               {isLoggingIn ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -165,22 +163,40 @@ export default function LandingPage({
       {/* Hero Section */}
       <section className="relative overflow-hidden py-20 lg:py-32">
         <div className="absolute inset-0 pointer-events-none overflow-hidden">
-          <div className={`absolute -top-40 -right-40 w-96 h-96 rounded-full blur-3xl opacity-30 ${
-            theme === "dark" ? "bg-[#7D2AE8]" : "bg-indigo-200"
-          }`}></div>
-          <div className={`absolute top-1/2 -left-40 w-96 h-96 rounded-full blur-3xl opacity-20 ${
-            theme === "dark" ? "bg-blue-600" : "bg-blue-200"
-          }`}></div>
+          <motion.div
+            animate={{ scale: [1, 1.18, 1], x: [0, -30, 0], y: [0, 20, 0] }}
+            transition={{ duration: 14, repeat: Infinity, ease: "easeInOut" }}
+            className={`absolute -top-40 -right-40 w-96 h-96 rounded-full blur-3xl opacity-30 ${
+            theme === "dark" ? "bg-[#8B5CF6]" : "bg-indigo-200"
+          }`}></motion.div>
+          <motion.div
+            animate={{ scale: [1, 1.12, 1], x: [0, 35, 0], y: [0, -25, 0] }}
+            transition={{ duration: 17, repeat: Infinity, ease: "easeInOut" }}
+            className={`absolute top-1/2 -left-40 w-96 h-96 rounded-full blur-3xl opacity-20 ${
+            theme === "dark" ? "bg-[#2563EB]" : "bg-blue-200"
+          }`}></motion.div>
+          {[0, 1, 2].map((i) => (
+            <motion.div
+              key={i}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: [0, 0.5, 0], x: [0, 130], y: [0, -110] }}
+              transition={{ duration: 5.5, repeat: Infinity, delay: 1.6 + i * 1.9, ease: "easeOut" }}
+              className={`absolute ${["left-[12%] top-[68%]", "left-[78%] top-[74%]", "left-[46%] top-[82%]"][i]}`}
+            >
+              <Send className={`w-5 h-5 -rotate-12 ${theme === "dark" ? "text-indigo-400/60" : "text-indigo-400/50"}`} />
+            </motion.div>
+          ))}
         </div>
 
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center space-y-8 relative">
+          <AnimatedGlyph className="w-20 h-20 sm:w-24 sm:h-24 mx-auto" />
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6 }}
             className="inline-flex items-center gap-1.5 bg-blue-500/10 border border-blue-500/30 text-blue-500 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider"
           >
-            <Sparkles className="w-3.5 h-3.5 animate-spin" />
+            <Sparkles className="w-3.5 h-3.5" />
             <span>{t.tagline}</span>
           </motion.div>
 
@@ -214,7 +230,7 @@ export default function LandingPage({
           >
             <button
               onClick={onStart}
-              className="w-full sm:w-auto px-8 py-4 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-blue-600 via-indigo-600 to-[#7D2AE8] hover:opacity-95 transition-all shadow-xl shadow-indigo-600/20 flex items-center justify-center gap-2 group"
+              className="w-full sm:w-auto px-8 py-4 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] hover:opacity-95 transition-all shadow-xl shadow-indigo-600/20 flex items-center justify-center gap-2 group"
             >
               <span>{t.loginWithGoogle}</span>
               <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
@@ -385,7 +401,7 @@ export default function LandingPage({
               <button
                 onClick={() => handlePurchasePlan("CertiSend Pro Monthly", 29.00)}
                 disabled={loadingPlan !== null}
-                className="w-full mt-8 py-3.5 rounded-xl font-extrabold text-xs bg-gradient-to-r from-blue-500 via-indigo-500 to-[#7D2AE8] text-white hover:opacity-95 transition-all shadow-md shadow-indigo-500/30 flex items-center justify-center gap-1.5"
+                className="w-full mt-8 py-3.5 rounded-xl font-extrabold text-xs bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white hover:opacity-95 transition-all shadow-md shadow-indigo-500/30 flex items-center justify-center gap-1.5"
               >
                 {loadingPlan === "CertiSend Pro Monthly" ? (
                   <Loader2 className="w-4 h-4 animate-spin" />

@@ -1,3 +1,4 @@
+import { LogoMark } from "./components/BrandLogo";
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -1214,9 +1215,7 @@ export default function App() {
       {/* Primary Header with High-Density Layout */}
       <header className={`flex justify-between items-center border-b pb-4 px-6 py-4 transition-colors duration-300 ${bgHeader}`}>
         <div className="flex items-center gap-4">
-          <div className="w-10 h-10 bg-gradient-to-br from-blue-600 via-indigo-600 to-[#7D2AE8] rounded-lg flex items-center justify-center shadow-lg shadow-indigo-600/20">
-            <span className="text-white font-black text-xl tracking-tight">C</span>
-          </div>
+          <LogoMark className="w-10 h-10" />
           <div>
             <h1 className={`text-base font-extrabold tracking-tight ${textTitle}`}>CertiSend Pro</h1>
             <p className="text-[10px] text-indigo-500 uppercase tracking-wider font-mono">
@@ -1283,7 +1282,7 @@ export default function App() {
             animate={{ opacity: 1, scale: 1 }}
             className="bg-[#16181D] p-8 max-w-sm w-full rounded-xl border border-[#2D2F36] text-center shadow-2xl"
           >
-            <div className="w-14 h-14 rounded-xl bg-gradient-to-tr from-[#7D2AE8] to-[#00C4CC] mx-auto flex items-center justify-center mb-5 shadow-lg shadow-[#7D2AE8]/10">
+            <div className="w-14 h-14 rounded-xl bg-gradient-to-tr from-[#2563EB] to-[#8B5CF6] mx-auto flex items-center justify-center mb-5 shadow-lg shadow-[#8B5CF6]/10">
               <Mail className="w-6 h-6 text-white" />
             </div>
             <h2 className="text-lg font-bold text-white tracking-tight mb-2">Conecta con tu Cuenta Google</h2>
@@ -1293,7 +1292,7 @@ export default function App() {
 
             <button
               onClick={handleLogin}
-              className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-[#00C4CC] to-[#7D2AE8] hover:opacity-95 text-white text-xs font-bold py-2.5 px-4 rounded-lg shadow-md transition-opacity"
+              className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] hover:opacity-95 text-white text-xs font-bold py-2.5 px-4 rounded-lg shadow-md transition-opacity"
               id="google-signin-btn"
               disabled={isLoggingIn}
             >
@@ -1322,7 +1321,7 @@ export default function App() {
                       placeholder="Pegar link del navegador..."
                       value={spreadsheetUrl}
                       onChange={(e) => setSpreadsheetUrl(e.target.value)}
-                      className="flex-1 bg-[#0B0C0E] border border-[#2D2F36] rounded px-2.5 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-[#7D2AE8] font-sans"
+                      className="flex-1 bg-[#0B0C0E] border border-[#2D2F36] rounded px-2.5 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-[#8B5CF6] font-sans"
                     />
                     <button
                       onClick={handleLoadSpreadsheet}
@@ -1383,7 +1382,7 @@ export default function App() {
                             <select
                               value={selectedEmailCol}
                               onChange={(e) => setSelectedEmailCol(Number(e.target.value))}
-                              className="bg-[#16181D] border border-[#2D2F36] text-[11px] text-[#7D2AE8] font-mono rounded px-1.5 py-1"
+                              className="bg-[#16181D] border border-[#2D2F36] text-[11px] text-[#8B5CF6] font-mono rounded px-1.5 py-1"
                             >
                               {headers.map((h, i) => (
                                 <option key={i} value={i}>
@@ -1403,7 +1402,7 @@ export default function App() {
             {/* STEP 2: Canva Connect and PDF Importer */}
             <div className="bg-[#16181D] border border-[#2D2F36] rounded-xl p-4 flex flex-col gap-3.5 flex-1 min-h-0">
               <div className="flex items-center gap-2 pb-2.5 border-b border-[#2D2F36]">
-                <FileText className="w-4 h-4 text-[#7D2AE8]" />
+                <FileText className="w-4 h-4 text-[#8B5CF6]" />
                 <h3 className="text-xs font-bold text-white uppercase tracking-wider font-mono">2. Importar Certificados</h3>
               </div>
 
@@ -1420,7 +1419,7 @@ export default function App() {
                 <button
                   onClick={() => setActiveUploadTab("canva")}
                   className={`text-[10px] font-bold uppercase py-1 px-2 rounded font-mono transition-all ${
-                    activeUploadTab === "canva" ? "bg-[#1A1D24] text-[#7D2AE8] shadow" : "text-slate-500 hover:text-slate-300"
+                    activeUploadTab === "canva" ? "bg-[#1A1D24] text-[#8B5CF6] shadow" : "text-slate-500 hover:text-slate-300"
                   }`}
                 >
                   Conectar Canva
@@ -1539,7 +1538,7 @@ export default function App() {
                     <button
                       onClick={handleCanvaDirectConnect}
                       disabled={isConnectingCanva}
-                      className="w-full bg-gradient-to-r from-[#00C4CC] to-[#7D2AE8] text-white text-xs font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 hover:opacity-95"
+                      className="w-full bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white text-xs font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 hover:opacity-95"
                     >
                       {isConnectingCanva ? (
                         <>
@@ -1684,7 +1683,7 @@ export default function App() {
                     value={emailBody}
                     onChange={(e) => setEmailBody(e.target.value)}
                     placeholder="Escribe tu mensaje interactivo aquí..."
-                    className="flex-1 bg-[#0B0C0E] border border-[#2D2F36] rounded p-3 text-xs text-white focus:outline-none focus:border-[#7D2AE8] font-sans resize-none"
+                    className="flex-1 bg-[#0B0C0E] border border-[#2D2F36] rounded p-3 text-xs text-white focus:outline-none focus:border-[#8B5CF6] font-sans resize-none"
                   />
                 </div>
 
@@ -1693,7 +1692,7 @@ export default function App() {
                   <span className="text-[#9CA3AF]">Sustituciones automáticas por destinatario:</span>
                   <span className="bg-[#16181D] text-[#00C4CC] px-1 rounded font-mono">{"{Nombre}"}</span>
                   <span className="text-slate-500">e</span>
-                  <span className="bg-[#16181D] text-[#7D2AE8] px-1 rounded font-mono">{"{Correo}"}</span>
+                  <span className="bg-[#16181D] text-[#8B5CF6] px-1 rounded font-mono">{"{Correo}"}</span>
                 </div>
               </div>
 
@@ -1705,7 +1704,7 @@ export default function App() {
                     <button
                       onClick={handleRunAIScan}
                       disabled={isProcessingAI}
-                      className="bg-gradient-to-r from-amber-500 to-[#7D2AE8] hover:opacity-95 text-white font-bold py-1 px-3 text-[10px] rounded flex items-center gap-1"
+                      className="bg-gradient-to-r from-amber-500 to-[#8B5CF6] hover:opacity-95 text-white font-bold py-1 px-3 text-[10px] rounded flex items-center gap-1"
                     >
                       <Sparkles className="w-3 h-3" />
                       {isProcessingAI ? "Escaneando..." : "Intentar Clasificar con IA"}
@@ -1753,7 +1752,7 @@ export default function App() {
                           <select
                             value={p.matchedRecipient?.name || "__none__"}
                             onChange={(e) => handleManualPairing(p.pageIndex, e.target.value)}
-                            className="bg-[#16181D] border border-[#2D2F36] text-[10px] text-white rounded w-full p-1 focus:outline-none focus:border-[#7D2AE8]"
+                            className="bg-[#16181D] border border-[#2D2F36] text-[10px] text-white rounded w-full p-1 focus:outline-none focus:border-[#8B5CF6]"
                           >
                             <option value="__none__">Ninguno (Ignorar)</option>
                             {recipients.map((rec) => (
@@ -1878,7 +1877,7 @@ export default function App() {
                 <button
                   onClick={handleSendEmails}
                   disabled={isDelivering || pages.filter((p) => p.matchedRecipient !== null).length === 0}
-                  className="w-full bg-gradient-to-r from-blue-600 to-[#7D2AE8] text-white font-extrabold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all text-xs shadow-lg shadow-blue-900/40 hover:opacity-95 disabled:opacity-40"
+                  className="w-full bg-gradient-to-r from-blue-600 to-[#8B5CF6] text-white font-extrabold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all text-xs shadow-lg shadow-blue-900/40 hover:opacity-95 disabled:opacity-40"
                 >
                   <Send className="w-4 h-4 shrink-0" />
                   <span>Enviar Correos Masivos</span>
