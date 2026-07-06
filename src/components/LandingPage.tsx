@@ -296,10 +296,10 @@ export default function LandingPage({
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
           {[
-            { title: t.feat1Title, desc: t.feat1Desc, icon: Layers, color: "from-blue-500 to-indigo-500" },
-            { title: t.feat2Title, desc: t.feat2Desc, icon: Globe, color: "from-indigo-500 to-purple-500" },
-            { title: t.feat3Title, desc: t.feat3Desc, icon: Sparkles, color: "from-purple-500 to-pink-500" },
-            { title: t.feat4Title, desc: t.feat4Desc, icon: Send, color: "from-pink-500 to-red-500" }
+            { title: t.feat1Title, desc: t.feat1Desc, icon: Layers, color: "from-[#2563EB] to-[#4F46E5]" },
+            { title: t.feat2Title, desc: t.feat2Desc, icon: Globe, color: "from-[#4F46E5] to-[#6D28D9]" },
+            { title: t.feat3Title, desc: t.feat3Desc, icon: Sparkles, color: "from-[#6D28D9] to-[#8B5CF6]" },
+            { title: t.feat4Title, desc: t.feat4Desc, icon: Send, color: "from-[#8B5CF6] to-[#A78BFA]" }
           ].map((feat, idx) => (
             <div 
               key={idx} 

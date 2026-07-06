@@ -242,9 +242,15 @@ export default function App() {
       if (isPopupClosed) {
         addLog("Inicio de sesión cancelado: Se cerró la ventana emergente de Google. Si deseas iniciar sesión (por ejemplo, con ejecutivosyemprendedores@casaroca.org), recuerda no cerrar la ventana emergente y permitir popups en tu navegador.", "warning");
         triggerBanner("info", "Has cerrado la ventana de inicio de sesión de Google.");
+      } else if (err.code === "auth/unauthorized-domain") {
+        addLog("Dominio no autorizado: agrega certisendpro.online en Firebase Console -> Authentication -> Settings -> Authorized domains.", "error");
+        triggerBanner("error", "Dominio no autorizado en Firebase (auth/unauthorized-domain).");
+      } else if (err.code === "auth/popup-blocked") {
+        addLog("El navegador bloqueó la ventana emergente. Permite popups para certisendpro.online e inténtalo de nuevo.", "error");
+        triggerBanner("error", "Popup bloqueado por el navegador. Permite ventanas emergentes.");
       } else {
-        addLog(`La autenticación de Google ha fallado o ha sido rechazada: ${err.message || err}`, "error");
-        triggerBanner("error", "No se pudo completar la autenticación con tu cuenta de Google.");
+        addLog(`La autenticación de Google falló [${err.code || "sin código"}]: ${err.message || err}`, "error");
+        triggerBanner("error", `No se pudo completar la autenticación (${err.code || "error desconocido"}).`);
       }
     } finally {
       setIsLoggingIn(false);
@@ -1308,7 +1314,7 @@ export default function App() {
             {/* STEP 1: Google Sheets Setup */}
             <div className="bg-[#16181D] border border-[#2D2F36] rounded-xl p-4 flex flex-col gap-3.5">
               <div className="flex items-center gap-2 pb-2.5 border-b border-[#2D2F36]">
-                <FileSpreadsheet className="w-4 h-4 text-[#00C4CC]" />
+                <FileSpreadsheet className="w-4 h-4 text-[#60A5FA]" />
                 <h3 className="text-xs font-bold text-white uppercase tracking-wider font-mono">1. Destinatarios (G-Sheets)</h3>
               </div>
 
@@ -1367,7 +1373,7 @@ export default function App() {
                             <select
                               value={selectedNameCol}
                               onChange={(e) => setSelectedNameCol(Number(e.target.value))}
-                              className="bg-[#16181D] border border-[#2D2F36] text-[11px] text-[#00C4CC] font-mono rounded px-1.5 py-1"
+                              className="bg-[#16181D] border border-[#2D2F36] text-[11px] text-[#60A5FA] font-mono rounded px-1.5 py-1"
                             >
                               {headers.map((h, i) => (
                                 <option key={i} value={i}>
@@ -1411,7 +1417,7 @@ export default function App() {
                 <button
                   onClick={() => setActiveUploadTab("upload")}
                   className={`text-[10px] font-bold uppercase py-1 px-2 rounded font-mono transition-all ${
-                    activeUploadTab === "upload" ? "bg-[#1A1D24] text-[#00C4CC] shadow" : "text-slate-500 hover:text-slate-300"
+                    activeUploadTab === "upload" ? "bg-[#1A1D24] text-[#60A5FA] shadow" : "text-slate-500 hover:text-slate-300"
                   }`}
                 >
                   Subir PDF
@@ -1446,7 +1452,7 @@ export default function App() {
                     }}
                     className={`border-2 border-dashed rounded-lg p-4 flex flex-col items-center justify-center text-center cursor-pointer transition-colors flex-1 min-h-[140px] max-h-[220px] ${
                       isDragging
-                        ? "border-[#00C4CC] bg-[#00C4CC]/5"
+                        ? "border-[#8B5CF6] bg-[#8B5CF6]/5"
                         : pdfFile
                         ? "border-emerald-500/40 bg-emerald-500/5"
                         : "border-[#2D2F36] hover:border-slate-500 bg-[#0B0C0E]"
@@ -1485,7 +1491,7 @@ export default function App() {
                     <button
                       onClick={() => handleSplitPDF()}
                       disabled={isSplitting}
-                      className="w-full bg-[#00C4CC] hover:opacity-95 text-slate-950 font-bold text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all mt-auto"
+                      className="w-full bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] hover:opacity-95 text-white font-bold text-xs py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all mt-auto"
                     >
                       {isSplitting ? (
                         <>
@@ -1556,7 +1562,7 @@ export default function App() {
 
                   {/* Manual guidelines in case they are not technical as helper */}
                   <div className="bg-gradient-to-br from-[#1A1D24] to-[#121419] p-2.5 rounded-lg border border-[#2D2F36] text-[10px] space-y-1.5 mt-auto">
-                    <span className="text-[#00C4CC] font-bold block uppercase tracking-wider font-mono">¿No tienes clave de desarrollador?</span>
+                    <span className="text-[#60A5FA] font-bold block uppercase tracking-wider font-mono">¿No tienes clave de desarrollador?</span>
                     <p className="text-[#9CA3AF] leading-relaxed">
                       ¡No te preocupes! Canva te permite descargar tus 127 páginas en 2 clics:
                       Click en <b>Compartir</b> → <b>Descargar</b> → Elige <b>"PDF Estándar"</b>.
@@ -1595,7 +1601,7 @@ export default function App() {
             <div className="bg-[#16181D] border border-[#2D2F36] rounded-xl flex flex-col min-h-[220px] max-h-[300px] overflow-hidden">
               <div className="p-3 border-b border-[#2D2F36] flex justify-between items-center bg-[#0F1115]">
                 <div className="flex items-center gap-2">
-                  <Terminal className="w-4 h-4 text-[#00C4CC]" />
+                  <Terminal className="w-4 h-4 text-[#60A5FA]" />
                   <span className="text-xs font-bold text-white uppercase tracking-wider font-mono">Monitor de Ejecución en Vivo</span>
                 </div>
                 {isProcessingAI || isDelivering ? (
@@ -1644,7 +1650,7 @@ export default function App() {
                   </div>
                   <div className="w-full bg-[#1A1C21] h-1 rounded-full overflow-hidden">
                     <div
-                      className="bg-[#00C4CC] h-full transition-all duration-300"
+                      className="bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] h-full transition-all duration-300"
                       style={{
                         width: isProcessingAI ? `${(aiStepProgress / pages.length) * 100}%` : "50%"
                       }}
@@ -1657,7 +1663,7 @@ export default function App() {
             {/* Step 3: Mail content customizer & bulk manual dispatcher */}
             <div className="bg-[#16181D] border border-[#2D2F36] rounded-xl p-4 flex flex-col gap-4 flex-1 min-h-0">
               <div className="flex items-center gap-2 pb-2 border-b border-[#2D2F36]">
-                <Mail className="w-4 h-4 text-[#00C4CC]" />
+                <Mail className="w-4 h-4 text-[#60A5FA]" />
                 <h3 className="text-xs font-bold text-white uppercase tracking-wider font-mono">3. Diseñador de Correo Electrónico</h3>
               </div>
 
@@ -1669,7 +1675,7 @@ export default function App() {
                     value={emailSubject}
                     onChange={(e) => setEmailSubject(e.target.value)}
                     placeholder="ej. Tu Certificado de Participación"
-                    className="bg-[#0B0C0E] border border-[#2D2F36] rounded px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#00C4CC]"
+                    className="bg-[#0B0C0E] border border-[#2D2F36] rounded px-3 py-1.5 text-xs text-white focus:outline-none focus:border-[#8B5CF6]"
                   />
                   <div className="flex justify-between text-[9px] text-slate-500 mt-0.5">
                     <span>Admite el marcador dinámico {'{Nombre}'} para personalizar</span>
@@ -1688,9 +1694,9 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 bg-[#0B0C0E] p-2 rounded border border-[#2D2F36] text-[10px]">
-                  <Info className="w-3.5 h-3.5 text-[#00C4CC]" />
+                  <Info className="w-3.5 h-3.5 text-[#60A5FA]" />
                   <span className="text-[#9CA3AF]">Sustituciones automáticas por destinatario:</span>
-                  <span className="bg-[#16181D] text-[#00C4CC] px-1 rounded font-mono">{"{Nombre}"}</span>
+                  <span className="bg-[#16181D] text-[#60A5FA] px-1 rounded font-mono">{"{Nombre}"}</span>
                   <span className="text-slate-500">e</span>
                   <span className="bg-[#16181D] text-[#8B5CF6] px-1 rounded font-mono">{"{Correo}"}</span>
                 </div>
@@ -1704,7 +1710,7 @@ export default function App() {
                     <button
                       onClick={handleRunAIScan}
                       disabled={isProcessingAI}
-                      className="bg-gradient-to-r from-amber-500 to-[#8B5CF6] hover:opacity-95 text-white font-bold py-1 px-3 text-[10px] rounded flex items-center gap-1"
+                      className="bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] hover:opacity-95 text-white font-bold py-1 px-3 text-[10px] rounded flex items-center gap-1"
                     >
                       <Sparkles className="w-3 h-3" />
                       {isProcessingAI ? "Escaneando..." : "Intentar Clasificar con IA"}
@@ -1740,7 +1746,7 @@ export default function App() {
                         </div>
 
                         <div className="bg-[#16181D] p-1.5 rounded text-center relative overflow-hidden shrink-0">
-                          <div className={`absolute top-0 inset-x-0 h-1 ${p.status === "send_error" || p.status === "error" ? "bg-rose-500" : "bg-[#00C4CC]"}`}></div>
+                          <div className={`absolute top-0 inset-x-0 h-1 ${p.status === "send_error" || p.status === "error" ? "bg-rose-500" : "bg-[#2563EB]"}`}></div>
                           <span className="text-[9px] text-[#9CA3AF] block uppercase tracking-wider font-mono">Nombre IA</span>
                           <span className="text-[10px] font-bold text-white block truncate" title={p.extractedName}>
                             {p.extractedName || "Pendiente"}
@@ -1781,7 +1787,7 @@ export default function App() {
           <section className="col-span-12 xl:col-span-3 flex flex-col bg-[#16181D] border border-[#2D2F36] rounded-xl overflow-hidden shadow-xl min-h-[400px]">
             <div className="p-4 border-b border-[#2D2F36] bg-[#0F1115] shrink-0">
               <h3 className="text-xs font-bold text-white uppercase tracking-wider font-mono flex items-center gap-1.5">
-                <TableProperties className="w-4 h-4 text-[#00C4CC]" />
+                <TableProperties className="w-4 h-4 text-[#60A5FA]" />
                 Cola de Destinatarios ({recipients.length})
               </h3>
               <input
@@ -1818,7 +1824,7 @@ export default function App() {
                       if (matchedPage) {
                         if (matchedPage.status === "sent") {
                           statusLabel = "ENVIADO";
-                          statusClass = "text-[#00C4CC]";
+                          statusClass = "text-[#60A5FA]";
                         } else if (matchedPage.status === "sending") {
                           statusLabel = "ENTREGANDO";
                           statusClass = "text-indigo-400 animate-pulse";
@@ -1870,7 +1876,7 @@ export default function App() {
                   disabled={pages.length === 0}
                   className="w-full bg-[#1C1E24] hover:bg-[#252830] border border-[#2D2F36] text-white font-bold py-2 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all text-xs disabled:opacity-40"
                 >
-                  <FileDown className="w-4 h-4 text-[#00C4CC]" />
+                  <FileDown className="w-4 h-4 text-[#60A5FA]" />
                   <span>Descargar Lote (ZIP)</span>
                 </button>
 
@@ -1892,7 +1898,7 @@ export default function App() {
       <footer className="shrink-0 border-t border-[#2D2F36] text-[10px] font-mono text-slate-500 py-3.5 px-6 flex justify-between items-center bg-[#0F1115]">
         <div className="flex items-center gap-1.5">
           <span>Integración con Google Workspace (OAuth 2.0)</span>
-          <span className="text-[#00C4CC]">● Active</span>
+          <span className="text-[#60A5FA]">● Active</span>
         </div>
         <div className="flex items-center gap-4">
           <span>© 2026 CertiSend Pro. Todos los derechos reservados.</span>
