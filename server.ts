@@ -12,6 +12,64 @@ const PORT = 3000;
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
+// ── Blindaje de la API (2026-09-16) ──────────────────────────────────────────
+// Hoy este servidor solo corre en local: Firebase Hosting sirve unicamente el
+// estatico de dist/, asi que /api/* no esta expuesto a internet. Pero el dia que
+// se despliegue el backend, /api/analyze-page queda abierto gastando la clave de
+// Gemini del SERVIDOR con PDF de hasta 50 MB por peticion — es decir, un tercero
+// controlando la factura. Esto se pone AHORA, mientras no cuesta nada, en vez de
+// el dia del despliegue, que es cuando se olvida.
+// Sin dependencias nuevas a proposito: menos superficie y nada que auditar.
+
+// Solo se aceptan navegadores de origenes conocidos. Las llamadas sin cabecera
+// Origin (curl, el propio front servido desde este mismo servidor) pasan igual.
+const ORIGENES_OK = (process.env.ALLOWED_ORIGINS ||
+  "http://localhost:3000,http://localhost:5173").split(",").map(o => o.trim());
+app.use((req, res, next) => {
+  const origen = req.headers.origin;
+  if (origen) {
+    if (!ORIGENES_OK.includes(origen)) {
+      return res.status(403).json({ error: "Origen no permitido" });
+    }
+    res.setHeader("Access-Control-Allow-Origin", origen);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  }
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
+// Limite de peticiones por IP y minuto, en memoria. No pretende ser un WAF: es el
+// tope que evita que alguien queme la cuota de Gemini o de Mercado Pago en bucle.
+// Se limpia solo para no crecer sin fin.
+const VENTANA_MS = 60_000;
+const MAX_POR_VENTANA = Number(process.env.RATE_LIMIT_PER_MIN || 30);
+const visitas = new Map<string, { n: number; desde: number }>();
+app.use("/api", (req, res, next) => {
+  const ip = req.ip || req.socket.remoteAddress || "desconocida";
+  const ahora = Date.now();
+  const v = visitas.get(ip);
+  if (!v || ahora - v.desde > VENTANA_MS) {
+    visitas.set(ip, { n: 1, desde: ahora });
+  } else if (++v.n > MAX_POR_VENTANA) {
+    res.setHeader("Retry-After", Math.ceil((VENTANA_MS - (ahora - v.desde)) / 1000));
+    return res.status(429).json({ error: "Demasiadas peticiones. Espera un momento." });
+  }
+  if (visitas.size > 5000) {
+    for (const [k, val] of visitas) if (ahora - val.desde > VENTANA_MS) visitas.delete(k);
+  }
+  next();
+});
+
+// Cabeceras basicas: nada de esto rompe una API JSON y cierra clases enteras de abuso.
+app.use((_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
+});
+// ─────────────────────────────────────────────────────────────────────────────
+
 interface PdfCacheEntry {
   buffer: Buffer;
   pageCount: number;
