@@ -35,6 +35,13 @@ const CUENTA_GRATIS_BASE: Omit<Cuenta, "actualizado"> = {
   mpSuscripcionId: null,
 };
 
+// NOTA para la Tarea 6 (webhook de Mercado Pago, pendiente de implementar): al activar un plan
+// "pro", el webhook DEBE escribir `vence` en la MISMA escritura (mismo tx.update/tx.set) que
+// `plan: "pro"`. `decidirLote` solo trata "pro" como vigente si `vence` queda en el futuro
+// (ver `vigente` abajo): un `plan: "pro"` escrito sin `vence`, o con `vence` actualizado en un
+// paso aparte, deja una ventana donde la cuenta ya cobrada se trata como Gratis, o donde una
+// falla a mitad de camino deja "pro" con una fecha de vencimiento vieja o inexistente.
+
 /**
  * Devuelve la cuenta del usuario; si no existe todavia, la crea como Gratis.
  * Unico punto de lectura/creacion de `cuentas/{uid}` — nunca lo llama el navegador.
@@ -85,7 +92,14 @@ export type MotivoRechazoLote = "limite_gratis" | "saldo_insuficiente";
 export interface DecisionLote {
   permitido: boolean;
   motivo?: MotivoRechazoLote;
+  /** Plan REAL de la cuenta (para mostrarlo en la UI: "Mi plan", mensajes, etc). */
   plan: Plan;
+  /**
+   * Plan EFECTIVO aplicado a ESTE lote: lo que se guarda en `lotes/{loteId}` y lo que usan
+   * `reservarEnvio`/`confirmarEnvioExitoso` para decidir si descuentan saldo. Nunca es el plan
+   * de la cuenta a secas (ver regla R3-1 abajo).
+   */
+  planEfectivo: Plan;
   enviosRestantes: number;
   vence: Timestamp | null;
 }
@@ -93,57 +107,83 @@ export interface DecisionLote {
 const LIMITE_GRATIS = 15;
 
 /**
- * Decide si un lote de `cantidad` certificados cabe en el plan de `cuenta`, a la fecha `ahora`.
- * - Gratis: permitido hasta 15.
- * - Paquete vigente (vence > ahora) con saldo (enviosRestantes > 0): permitido si el saldo
- *   alcanza; si no alcanza, rechazo especifico "saldo_insuficiente" (hay plan pagado, solo no
- *   cabe ESTE lote).
- * - Pro vigente (vence > ahora): permitido sin limite de cantidad.
- * - Cualquier otro caso — Paquete o Pro vencidos, `vence` null, o Paquete vigente pero con el
- *   saldo en 0 — se trata exactamente igual que Gratis (rechazo "limite_gratis" si no alcanza).
+ * Decide si un lote de `cantidad` certificados cabe en el plan de `cuenta`, a la fecha `ahora`,
+ * y que `planEfectivo` le corresponde a ESE lote.
+ *
+ * Regla R3-1 (decision del Brain, 2026-10-05, mas favorable al cliente — corrige M21): un lote
+ * de 15 o menos SIEMPRE es Gratis, aunque la cuenta tenga un Paquete vigente con saldo: nunca
+ * descuenta del saldo. Por eso esta comprobacion va ANTES de mirar el plan de la cuenta.
+ *
+ * Para lotes de mas de 15:
+ * - Pro vigente (vence > ahora): permitido sin limite de cantidad, planEfectivo "pro".
+ * - Paquete vigente (vence > ahora) con saldo que alcanza (enviosRestantes >= cantidad):
+ *   permitido, planEfectivo "paquete". Si el Paquete esta vigente pero el saldo NO alcanza,
+ *   rechazo especifico "saldo_insuficiente" (hay plan pagado, solo no cabe ESTE lote).
+ * - Cualquier otro caso — Paquete o Pro vencidos, `vence` null, o Paquete vigente con saldo 0 —
+ *   se trata exactamente igual que Gratis: rechazado por "limite_gratis" (ya se sabe que
+ *   cantidad > 15, porque el caso <= 15 se resolvio arriba).
  */
 export function decidirLote(cuenta: Cuenta, cantidad: number, ahora: Date): DecisionLote {
   const base = { plan: cuenta.plan, enviosRestantes: cuenta.enviosRestantes, vence: cuenta.vence };
   const vigente = cuenta.vence !== null && cuenta.vence.toMillis() > ahora.getTime();
 
+  if (cantidad <= LIMITE_GRATIS) {
+    return { permitido: true, planEfectivo: "gratis", ...base };
+  }
+
   if (cuenta.plan === "pro" && vigente) {
-    return { permitido: true, ...base };
+    return { permitido: true, planEfectivo: "pro", ...base };
   }
 
   if (cuenta.plan === "paquete" && vigente && cuenta.enviosRestantes > 0) {
-    if (cuenta.enviosRestantes >= cantidad) return { permitido: true, ...base };
-    return { permitido: false, motivo: "saldo_insuficiente", ...base };
+    if (cuenta.enviosRestantes >= cantidad) return { permitido: true, planEfectivo: "paquete", ...base };
+    return { permitido: false, motivo: "saldo_insuficiente", planEfectivo: "paquete", ...base };
   }
 
-  if (cantidad <= LIMITE_GRATIS) return { permitido: true, ...base };
-  return { permitido: false, motivo: "limite_gratis", ...base };
+  return { permitido: false, motivo: "limite_gratis", planEfectivo: "gratis", ...base };
 }
 
 export interface Lote {
   uid: string;
   cantidad: number;
-  plan: Plan;
+  /** Plan EFECTIVO de este lote (de `decidirLote.planEfectivo`), no el plan de la cuenta. */
+  planEfectivo: Plan;
   enviados: number;
+  /**
+   * Cupos reservados para envios EN CURSO (M19, corregido vuelta 18): se reservan ANTES de
+   * llamar a Gmail y se confirman (pasan a `enviados`) o se liberan segun el resultado. Un envio
+   * nunca descuenta cupo/saldo hasta que Gmail confirmo, pero tampoco deja que envios paralelos
+   * se cuelen por encima del cupo mientras Gmail todavia esta en vuelo.
+   */
+  reservados: number;
   creado: Timestamp;
   expira: Timestamp;
 }
 
 // Mismo plazo que la sesion del PDF en memoria (server.ts): un lote autorizado no sobrevive
-// mas que eso, para no arrastrar un permiso viejo sobre un plan/TRM que ya cambio.
+// mas que eso, para no arrastrar un permiso viejo sobre un plan/TRM que ya cambio. Tambien es la
+// red de seguridad de las reservas (ver `reservarEnvioTx`): una reserva que nunca se confirma ni
+// se libera (el proceso murio a mitad del envio) no bloquea el cupo para siempre porque, pasadas
+// las 2 h, el lote entero deja de aceptar reservas y confirmaciones nuevas.
 const DURACION_LOTE_MS = 2 * 3600_000;
 
 /**
- * Crea `lotes/{loteId}` ya autorizado para `cantidad` envios bajo el plan que `decidirLote`
- * aprobo. El id lo genera Firestore (aleatorio, no adivinable ni secuencial).
+ * Crea `lotes/{loteId}` ya autorizado para `cantidad` envios bajo el `planEfectivo` que
+ * `decidirLote` resolvio. El id lo genera Firestore (aleatorio, no adivinable ni secuencial).
  */
-export async function crearLote(uid: string, cantidad: number, plan: Plan): Promise<{ loteId: string; lote: Lote }> {
+export async function crearLote(
+  uid: string,
+  cantidad: number,
+  planEfectivo: Plan
+): Promise<{ loteId: string; lote: Lote }> {
   const ref = db().collection("lotes").doc();
   const ahora = Timestamp.now();
   const lote: Lote = {
     uid,
     cantidad,
-    plan,
+    planEfectivo,
     enviados: 0,
+    reservados: 0,
     creado: ahora,
     expira: Timestamp.fromMillis(ahora.toMillis() + DURACION_LOTE_MS),
   };
@@ -151,50 +191,127 @@ export async function crearLote(uid: string, cantidad: number, plan: Plan): Prom
   return { loteId: ref.id, lote };
 }
 
+// ── Transacciones de reserva/confirmacion/liberacion (Tarea 3, corregida vuelta 18) ─────────
+// Interfaz minima de una transaccion de Firestore (get/update/set) que necesitan las funciones
+// `*Tx` de abajo. Se declara aqui — en vez de importar el tipo `Transaction` de firebase-admin —
+// para poder probarlas con un doble en tests/ sin tocar Firestore real: el doble reproduce la
+// regla real (lecturas antes de escrituras) sin credenciales ni red. En produccion, la
+// `Transaction` real de firebase-admin cumple esta misma forma.
+export interface TransaccionLike {
+  get(ref: any): Promise<{ exists: boolean; data(): any }>;
+  update(ref: any, data: Record<string, any>): void;
+  set(ref: any, data: Record<string, any>): void;
+}
+
 /**
- * Comprueba, ANTES de intentar el envio por Gmail, que el lote exista, sea del usuario que
- * llama, no haya expirado y todavia tenga cupo. `/api/send-email` nunca envia sin esto.
+ * Cuerpo transaccional de la reserva (M19): comprueba, ANTES de llamar a Gmail, que el lote
+ * exista, sea del usuario que llama, no haya expirado, todavia tenga cupo (`enviados +
+ * reservados < cantidad`) y, si su `planEfectivo` es Paquete, que el saldo de la cuenta alcance
+ * para cubrir las reservas ya pendientes de este lote. Si todo eso se cumple, reserva 1 cupo.
+ *
+ * TODAS las lecturas (`tx.get`) ocurren antes de la unica escritura (`tx.update`) — ver G3 en
+ * `confirmarEnvioExitosoTx` para el bug que esto evita. La transaccion completa (lectura +
+ * comprobacion + reserva) es atomica: si dos envios del mismo lote llegan en paralelo, Firestore
+ * serializa/reintenta y nunca deja que ambos reserven por encima del cupo o del saldo.
  */
-export async function validarLotePendiente(
-  loteId: string,
+export async function reservarEnvioTx(
+  tx: TransaccionLike,
+  loteRef: any,
+  cuentaRef: any,
   uid: string
 ): Promise<{ ok: true; lote: Lote } | { ok: false; error: string }> {
-  const snap = await db().collection("lotes").doc(loteId).get();
-  if (!snap.exists) {
+  const loteSnap = await tx.get(loteRef);
+  if (!loteSnap.exists) {
     return { ok: false, error: "El lote de envio no existe o ya expiro. Vuelve a iniciar el envio masivo." };
   }
-  const lote = snap.data() as Lote;
+  const lote = loteSnap.data() as Lote;
   if (lote.uid !== uid) {
     return { ok: false, error: "Este lote de envio no pertenece a tu cuenta." };
   }
   if (lote.expira.toMillis() <= Date.now()) {
     return { ok: false, error: "Este lote de envio expiro. Vuelve a iniciar el envio masivo." };
   }
-  if (lote.enviados >= lote.cantidad) {
+  if (lote.enviados + lote.reservados >= lote.cantidad) {
     return { ok: false, error: "Este lote de envio ya alcanzo su cupo autorizado." };
   }
+
+  if (lote.planEfectivo === "paquete") {
+    // Sigue siendo una lectura: todavia no se ejecuto ningun tx.update/tx.set en esta transaccion.
+    const cuentaSnap = await tx.get(cuentaRef);
+    const restantes = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta).enviosRestantes : 0;
+    if (restantes <= lote.reservados) {
+      return { ok: false, error: "Tu Paquete ya no tiene saldo disponible para este envio." };
+    }
+  }
+
+  tx.update(loteRef, { reservados: lote.reservados + 1 });
   return { ok: true, lote };
 }
 
-/**
- * Tras un envio EXITOSO (nunca si Gmail fallo): descuenta 1 del lote y, si el plan del lote es
- * Paquete, 1 del saldo de la cuenta — en una sola transaccion, para que envios concurrentes
- * nunca descuenten de mas ni de menos (Tarea 3: 10 exitos + 2 fallos ⇒ el saldo baja
- * exactamente 10; el saldo nunca baja de 0).
- */
-export async function registrarEnvioExitoso(loteId: string, uid: string, plan: Plan): Promise<void> {
+/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
+export async function reservarEnvio(
+  loteId: string,
+  uid: string
+): Promise<{ ok: true; lote: Lote } | { ok: false; error: string }> {
   const loteRef = db().collection("lotes").doc(loteId);
   const cuentaRef = db().collection("cuentas").doc(uid);
-  await db().runTransaction(async (tx) => {
-    const loteSnap = await tx.get(loteRef);
-    if (!loteSnap.exists) return; // el lote desaparecio entre la validacion y el envio: nada que descontar.
-    tx.update(loteRef, { enviados: (loteSnap.data() as Lote).enviados + 1 });
-    if (plan === "paquete") {
-      const cuentaSnap = await tx.get(cuentaRef);
-      if (cuentaSnap.exists) {
-        const restantes = (cuentaSnap.data() as Cuenta).enviosRestantes;
-        tx.update(cuentaRef, { enviosRestantes: Math.max(0, restantes - 1) });
-      }
-    }
+  return db().runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, uid));
+}
+
+/**
+ * Cuerpo transaccional de la confirmacion: tras un envio EXITOSO de Gmail (nunca si fallo),
+ * pasa 1 cupo de `reservados` a `enviados` y, si el `planEfectivo` recibido es Paquete,
+ * descuenta 1 del saldo de la cuenta.
+ *
+ * Fix de G3 (NO-GO del REVISOR_EXTERNO_LAP, vuelta 18): ANTES, esta funcion hacia
+ * `tx.update(loteRef)` y LUEGO `tx.get(cuentaRef)` — Firestore exige que TODAS las lecturas de
+ * una transaccion ocurran antes de CUALQUIER escritura, y lanzaba
+ * "Firestore transactions require all reads to be executed before all writes." en cada envio
+ * exitoso de un Paquete. El usuario reintentaba (correo duplicado) y el saldo nunca bajaba.
+ * Ahora las DOS lecturas (lote y, si aplica, cuenta) van primero; las escrituras, despues.
+ */
+export async function confirmarEnvioExitosoTx(
+  tx: TransaccionLike,
+  loteRef: any,
+  cuentaRef: any,
+  planEfectivo: Plan
+): Promise<void> {
+  const loteSnap = await tx.get(loteRef);
+  const cuentaSnap = planEfectivo === "paquete" ? await tx.get(cuentaRef) : null; // lectura, no escritura.
+
+  if (!loteSnap.exists) return; // el lote desaparecio entre la reserva y el envio: nada que confirmar.
+  const lote = loteSnap.data() as Lote;
+  tx.update(loteRef, {
+    enviados: lote.enviados + 1,
+    reservados: Math.max(0, lote.reservados - 1),
   });
+  if (planEfectivo === "paquete" && cuentaSnap && cuentaSnap.exists) {
+    const restantes = (cuentaSnap.data() as Cuenta).enviosRestantes;
+    tx.update(cuentaRef, { enviosRestantes: Math.max(0, restantes - 1) });
+  }
+}
+
+/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
+export async function confirmarEnvioExitoso(loteId: string, uid: string, planEfectivo: Plan): Promise<void> {
+  const loteRef = db().collection("lotes").doc(loteId);
+  const cuentaRef = db().collection("cuentas").doc(uid);
+  await db().runTransaction((tx) => confirmarEnvioExitosoTx(tx, loteRef, cuentaRef, planEfectivo));
+}
+
+/**
+ * Cuerpo transaccional de la liberacion: cuando Gmail FALLO (nunca se envio de verdad), resta 1
+ * de `reservados` sin tocar `enviados` ni el saldo, para que ese envio fallido no deje el cupo
+ * bloqueado hasta que el lote expire.
+ */
+export async function liberarReservaTx(tx: TransaccionLike, loteRef: any): Promise<void> {
+  const loteSnap = await tx.get(loteRef);
+  if (!loteSnap.exists) return;
+  const lote = loteSnap.data() as Lote;
+  tx.update(loteRef, { reservados: Math.max(0, lote.reservados - 1) });
+}
+
+/** Envoltorio real: abre la transaccion de Firestore y le pasa la referencia real. */
+export async function liberarReserva(loteId: string): Promise<void> {
+  const loteRef = db().collection("lotes").doc(loteId);
+  await db().runTransaction((tx) => liberarReservaTx(tx, loteRef));
 }

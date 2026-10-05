@@ -75,3 +75,41 @@ test("pro con vence null: se trata como gratis (no vigente)", () => {
   assert.equal(d.permitido, false);
   assert.equal(d.motivo, "limite_gratis");
 });
+
+// ── planEfectivo (R3-1, corregida tras M21 en la vuelta 18 del REVISOR) ─────────────────────
+// decidirLote ahora devuelve `planEfectivo`: lo que se guarda en el lote y lo que usan
+// reservarEnvio/confirmarEnvioExitoso para decidir si descuentan saldo. Un lote de 15 o menos
+// SIEMPRE es "gratis" en planEfectivo, aunque la cuenta tenga un Paquete vigente con saldo de
+// sobra: nunca debe descontar.
+
+test("planEfectivo: lote <=15 con Paquete vigente y saldo de sobra -> gratis (R3-1, no descuenta)", () => {
+  const d = decidirLote(cuenta({ plan: "paquete", enviosRestantes: 100, vence: futuro }), 15, ahora);
+  assert.equal(d.permitido, true);
+  assert.equal(d.planEfectivo, "gratis");
+  assert.equal(d.plan, "paquete"); // el plan REAL de la cuenta se sigue informando para la UI.
+});
+
+test("planEfectivo: lote <=15 con Pro vigente -> igual gratis (R3-1)", () => {
+  const d = decidirLote(cuenta({ plan: "pro", vence: futuro }), 10, ahora);
+  assert.equal(d.permitido, true);
+  assert.equal(d.planEfectivo, "gratis");
+});
+
+test("planEfectivo: lote >15 con Paquete vigente y saldo justo (exacto) -> paquete", () => {
+  const d = decidirLote(cuenta({ plan: "paquete", enviosRestantes: 20, vence: futuro }), 20, ahora);
+  assert.equal(d.permitido, true);
+  assert.equal(d.planEfectivo, "paquete");
+});
+
+test("planEfectivo: lote >15 con Paquete VENCIDO -> gratis, y >15 se rechaza (nunca pro/paquete)", () => {
+  const d = decidirLote(cuenta({ plan: "paquete", enviosRestantes: 999, vence: pasado }), 16, ahora);
+  assert.equal(d.permitido, false);
+  assert.equal(d.motivo, "limite_gratis");
+  assert.equal(d.planEfectivo, "gratis");
+});
+
+test("planEfectivo: lote >15 con Pro vigente -> pro", () => {
+  const d = decidirLote(cuenta({ plan: "pro", vence: futuro }), 500, ahora);
+  assert.equal(d.permitido, true);
+  assert.equal(d.planEfectivo, "pro");
+});

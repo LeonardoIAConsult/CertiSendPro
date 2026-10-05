@@ -10,8 +10,9 @@ import {
   obtenerCuenta,
   decidirLote,
   crearLote,
-  validarLotePendiente,
-  registrarEnvioExitoso,
+  reservarEnvio,
+  confirmarEnvioExitoso,
+  liberarReserva,
 } from "./server/cuentas";
 
 const app = express();
@@ -480,6 +481,10 @@ Reglas de respuesta:
 
 // Endpoint to send MIME-compliant Gmail with PDF attachment
 app.post("/api/send-email", exigirAuth, async (req, res) => {
+  // Cupo reservado por reservarEnvio() mas abajo (M19); si el envio no llega a confirmarse
+  // (cualquier salida de esta ruta antes de confirmarEnvioExitoso), el catch de abajo lo libera
+  // para que no quede bloqueado hasta que el lote expire.
+  let loteReservado: string | null = null;
   try {
     const { accessToken, to, subject, body, pdfBase64, sessionId, pageIndex, filename, loteId } = req.body;
 
@@ -488,14 +493,23 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
     if (!loteId) {
       return res.status(403).json({ error: "Falta el lote de envio autorizado. Vuelve a iniciar el envio masivo." });
     }
-    const loteValidado = await validarLotePendiente(String(loteId), req.uid!);
-    // Nota: se compara con `=== false` (no `!loteValidado.ok`) porque TS 5.8 no angosta el
-    // tipo union con un discriminante booleano mediante negacion/truthiness, solo con `===`.
-    if (loteValidado.ok === false) {
-      return res.status(403).json({ error: loteValidado.error });
+
+    // Reserva el cupo ANTES de llamar a Gmail (M19, corregido vuelta 18 del REVISOR): antes, el
+    // cupo se comprobaba fuera de transaccion y envios paralelos del mismo lote podian superarlo
+    // (Gmail ya habia salido para mas correos de los que el plan permitia). La reserva es
+    // transaccional: solo entran los que caben en el cupo del lote y, si es Paquete, en el saldo.
+    const reserva = await reservarEnvio(String(loteId), req.uid!);
+    // Nota: se compara con `=== false` (no `!reserva.ok`) porque TS 5.8 no angosta el tipo union
+    // con un discriminante booleano mediante negacion/truthiness, solo con `===`.
+    if (reserva.ok === false) {
+      return res.status(403).json({ error: reserva.error });
     }
+    loteReservado = String(loteId);
+    const planEfectivoLote = reserva.lote.planEfectivo;
 
     if (!accessToken) {
+      await liberarReserva(loteReservado);
+      loteReservado = null;
       return res.status(400).json({ error: "No access token provided" });
     }
 
@@ -504,11 +518,15 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       try {
         activePdfBase64 = await getPageBase64(sessionId, Number(pageIndex));
       } catch (err: any) {
+        await liberarReserva(loteReservado);
+        loteReservado = null;
         return res.status(404).json({ error: `Fallo al extraer el certificado PDF: ${err.message}` });
       }
     }
 
     if (!to || !subject || !body || !activePdfBase64 || !filename) {
+      await liberarReserva(loteReservado);
+      loteReservado = null;
       return res.status(400).json({ error: "Faltan parámetros obligatorios del correo o el archivo PDF" });
     }
 
@@ -522,6 +540,8 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
     // If the user mapped columns incorrectly, this will fail-fast with an informative error.
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(cleanTo)) {
+      await liberarReserva(loteReservado);
+      loteReservado = null;
       return res.status(400).json({
         error: `La dirección de correo "${cleanTo}" no tiene un formato válido (p. ej., usuario@dominio.com). Por favor, en el PASO 1 (Configuración de Columnas), asegúrate de haber mapeado la 'COLUMNA DE CORREO' con la columna de tu Google Sheet que contiene los correos electrónicos reales.`
       });
@@ -601,13 +621,35 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
 
     const data = await gmailResponse.json();
 
-    // Solo se descuenta tras el OK de Gmail (Tarea 3): si el envio hubiera fallado, el `throw`
-    // de arriba ya habria saltado al catch sin pasar por aqui, y no se descuenta nada.
-    await registrarEnvioExitoso(String(loteId), req.uid!, loteValidado.lote.plan);
+    // Solo se confirma (pasa de reservado a descontado) tras el OK de Gmail (Tarea 3): si el
+    // envio hubiera fallado, el `throw` de arriba ya habria saltado al catch, que libera la
+    // reserva sin pasar por aqui.
+    try {
+      await confirmarEnvioExitoso(loteReservado, req.uid!, planEfectivoLote);
+    } catch (contabError: any) {
+      // Gmail YA ENVIO el correo de verdad (M20): nunca responder 500 aqui, porque el navegador
+      // reintentaria la llamada y duplicaria un correo que ya salio. El detalle queda en el log
+      // del servidor (solo loteId/uid, nunca el destinatario ni otro dato del correo) para
+      // revisar el saldo a mano.
+      console.error(
+        `[CONTABILIDAD] Gmail envio el correo pero no se pudo descontar el cupo. loteId=${loteReservado} uid=${req.uid}:`,
+        contabError
+      );
+      return res.json({ success: true, enviado: true, contabilizado: false, messageId: data.id });
+    }
 
-    res.json({ success: true, messageId: data.id });
+    res.json({ success: true, enviado: true, contabilizado: true, messageId: data.id });
   } catch (error: any) {
     console.error("Error sending email:", error);
+    if (loteReservado) {
+      // El envio no llego a confirmarse (fallo antes de o durante la llamada a Gmail): liberar
+      // el cupo reservado para que no bloquee otros envios del mismo lote (M19).
+      try {
+        await liberarReserva(loteReservado);
+      } catch (liberarError) {
+        console.error(`[CONTABILIDAD] No se pudo liberar la reserva. loteId=${loteReservado}:`, liberarError);
+      }
+    }
     res.status(500).json({ error: error.message || "Failed to send email" });
   }
 });
@@ -754,7 +796,10 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
       });
     }
 
-    const { loteId } = await crearLote(req.uid!, cantidad, decision.plan);
+    // Se guarda el plan EFECTIVO de este lote (R3-1: un lote <=15 es Gratis aunque la cuenta
+    // tenga Paquete vigente), no el plan real de la cuenta — eso es lo que decide si se
+    // descuenta saldo (ver decidirLote/reservarEnvioTx/confirmarEnvioExitosoTx).
+    const { loteId } = await crearLote(req.uid!, cantidad, decision.planEfectivo);
     res.json({
       permitido: true,
       loteId,
