@@ -533,42 +533,83 @@ app.post("/api/send-email", async (req, res) => {
 });
 
 // Endpoint to generate Mercado Pago checkout preference link
-app.post("/api/mercadopago/create-preference", async (req, res) => {
+// --- Cobro (2026-10-05) ------------------------------------------------------------------
+// El PRECIO lo fija el servidor, nunca el navegador (antes llegaba `amount` del cliente y
+// cualquiera podia pagar $1). La cuenta de Mercado Pago es de Colombia: se cobra en COP con la
+// TRM oficial del dia (Superfinanciera, datos.gov.co 32sa-8pi3), igual que Faro.
+const PLANES_USD: Record<string, number> = {
+  "CertiSend Pro Monthly": 29,
+  "CertiSend Pay-as-you-go Bundle": 15,
+};
+const TRM_MIN = 2000, TRM_MAX = 8000;
+let trmCache: { valor: number; fecha: string; hasta: number } | null = null;
+
+async function trmHoy(): Promise<{ valor: number; fecha: string } | null> {
+  if (trmCache && trmCache.hasta > Date.now()) return trmCache;
   try {
-    const { planName, amount, currency } = req.body;
+    const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Bogota" }); // yyyy-mm-dd
+    const url = "https://www.datos.gov.co/resource/32sa-8pi3.json?$order=vigenciadesde%20DESC&$limit=1"
+      + "&$where=vigenciadesde%3C%3D%27" + hoy + "T00:00:00%27";
+    const r = await fetch(url);
+    const fila = r.ok ? (await r.json())[0] : null;
+    const valor = Number(fila && fila.valor);
+    if (valor >= TRM_MIN && valor <= TRM_MAX) {
+      // Si ya habia una TRM y la nueva salta >10%, se descarta (dato roto o envenenado).
+      if (trmCache && Math.abs(valor - trmCache.valor) > trmCache.valor * 0.10) return trmCache;
+      trmCache = { valor, fecha: String(fila.vigenciadesde).slice(0, 10), hasta: Date.now() + 3 * 3600_000 };
+      return trmCache;
+    }
+  } catch (e) { console.error("[TRM] datos.gov.co no respondio:", e); }
+  return trmCache; // ultima conocida (o null si nunca hubo)
+}
+
+app.post("/api/mercadopago/create-preference", async (req, res) => {
+  // APAGADO hasta que Leonardo defina la entrega (05-oct): la landing manda a contacto. Encender
+  // con PAGOS_ACTIVOS=1 en Cloud Run cuando exista que activar tras el pago (ver memoria).
+  if (process.env.PAGOS_ACTIVOS !== "1") {
+    return res.status(503).json({ error: "Pagos no disponibles por ahora. Escribenos a contacto@leonardoantolinez.com." });
+  }
+  try {
+    const { planName } = req.body;   // `amount` y `currency` del cliente se ignoran a proposito
+    if (!Object.prototype.hasOwnProperty.call(PLANES_USD, String(planName))) {
+      return res.status(400).json({ error: "Plan no valido" });
+    }
     const mpAccessToken = process.env.MERCADO_PAGO_ACCESS_TOKEN;
 
     if (!mpAccessToken) {
-      console.warn("[MERCADO PAGO] MERCADO_PAGO_ACCESS_TOKEN is not configured. Returning simulation marker.");
-      return res.json({ 
-        success: true, 
-        simulated: true, 
-        initPoint: null,
-        message: "No MP Access Token configured."
-      });
+      // Antes devolvia success:true "simulado" y la landing mostraba "pago exitoso" sin cobrar.
+      console.warn("[MERCADO PAGO] MERCADO_PAGO_ACCESS_TOKEN no configurado.");
+      return res.status(503).json({ error: "Pagos no disponibles en este momento." });
     }
+    const trm = await trmHoy();
+    if (!trm) return res.status(503).json({ error: "No se pudo obtener la TRM del dia. Intenta en unos minutos." });
 
-    const response = await fetch("https://api.mercadopago.com/v1/preferences", {
+    const usd = PLANES_USD[planName];
+    const cop = Math.round(usd * trm.valor);
+    const base = process.env.APP_URL || "http://localhost:3000";
+    const ahora = Date.now();
+    // La ruta correcta es /checkout/preferences; /v1/preferences no existe ("resource not found"),
+    // asi que el cobro de CertiSend nunca funciono hasta este cambio.
+    const response = await fetch("https://api.mercadopago.com/checkout/preferences", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${mpAccessToken}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        items: [
-          {
-            title: planName || "Suscripción CertiSend Pro",
-            quantity: 1,
-            unit_price: Number(amount) || 29.00,
-            currency_id: currency || "USD"
-          }
-        ],
+        items: [{ title: planName, quantity: 1, unit_price: cop, currency_id: "COP" }],
+        external_reference: `CERTISEND|${planName}|${cop}`,
         back_urls: {
-          success: process.env.APP_URL || "http://localhost:3000",
-          failure: process.env.APP_URL || "http://localhost:3000",
-          pending: process.env.APP_URL || "http://localhost:3000"
+          success: `${base}/?pago=ok`,
+          failure: `${base}/?pago=error`,
+          pending: `${base}/?pago=pendiente`
         },
-        auto_return: "approved"
+        auto_return: "approved",
+        // Vence en 2 h: un cobro guardado no se paga despues a una TRM vieja.
+        expires: true,
+        expiration_date_from: new Date(ahora).toISOString(),
+        expiration_date_to: new Date(ahora + 2 * 3600_000).toISOString(),
+        statement_descriptor: "CERTISEND PRO"
       })
     });
 
@@ -580,11 +621,13 @@ app.post("/api/mercadopago/create-preference", async (req, res) => {
     const data = await response.json();
     res.json({
       success: true,
-      initPoint: data.init_point
+      initPoint: data.init_point,
+      cop, usd, trm: trm.valor, fechaTrm: trm.fecha
     });
   } catch (error: any) {
+    // El detalle (respuesta de MP) va al log del servidor, no al navegador.
     console.error("Error al crear preferencia de Mercado Pago:", error);
-    res.status(500).json({ error: error.message || "Fallo al iniciar checkout de Mercado Pago" });
+    res.status(500).json({ error: "No se pudo iniciar el pago con Mercado Pago." });
   }
 });
 

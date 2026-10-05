@@ -45,8 +45,6 @@ export default function LandingPage({
   const [certsCount, setCertsCount] = useState<number>(150);
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null);
-  const [paymentSuccess, setPaymentSuccess] = useState<boolean>(false);
-  const [selectedPlanDetails, setSelectedPlanDetails] = useState<{name: string, price: string} | null>(null);
 
   // Calculate estimated monthly pricing
   const isProRecommended = certsCount > 200;
@@ -54,44 +52,16 @@ export default function LandingPage({
   const proPrice = "29.00";
   const finalPrice = isProRecommended ? proPrice : payAsYouGoPrice;
 
-  const handlePurchasePlan = async (planName: string, amount: number) => {
-    try {
-      setLoadingPlan(planName);
-      // Call real Mercado Pago endpoint
-      const response = await fetch("/api/mercadopago/create-preference", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          planName,
-          amount,
-          currency: "USD"
-        })
-      });
-
-      const data = await response.json();
-      if (response.ok && data.initPoint) {
-        // Redirect to Mercado Pago real checkout URL
-        window.open(data.initPoint, "_blank");
-      } else {
-        // Fallback simulated success modal if API is not fully configured with production tokens
-        setSelectedPlanDetails({
-          name: planName,
-          price: `$${amount.toFixed(2)} USD`
-        });
-        setPaymentSuccess(true);
-      }
-    } catch (err) {
-      console.error("Mercado Pago error:", err);
-      setSelectedPlanDetails({
-        name: planName,
-        price: `$${amount.toFixed(2)} USD`
-      });
-      setPaymentSuccess(true);
-    } finally {
-      setLoadingPlan(null);
-    }
+  // Compra por contacto (2026-10-05, decision de Leonardo). El cobro esta arreglado en el
+  // servidor pero APAGADO (PAGOS_ACTIVOS) hasta definir que recibe quien paga: hoy la app no
+  // tiene planes, y la web promete "/mes" con un pago unico. Antes, este boton fallaba y aun asi
+  // mostraba "Mercado Pago Conectado" con instrucciones de desarrollador al cliente.
+  const handlePurchasePlan = (planName: string, precioMostrado: number) => {
+    const asunto = `CertiSend: ${planName}`;
+    const cuerpo = language === "en"
+      ? `Hi, I'm interested in ${planName} (US$${precioMostrado}). `
+      : `Hola, me interesa ${planName} (US$${precioMostrado}). `;
+    window.location.href = `mailto:contacto@leonardoantolinez.com?subject=${encodeURIComponent(asunto)}&body=${encodeURIComponent(cuerpo)}`;
   };
 
   return (
@@ -451,7 +421,7 @@ export default function LandingPage({
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <>
-                    <span>{t.buyNow} (Carga $15)</span>
+                    <span>{t.buyNow}</span>
                     <Coins className="w-4 h-4 text-yellow-500" />
                   </>
                 )}
@@ -549,46 +519,6 @@ export default function LandingPage({
           ))}
         </div>
       </section>
-
-      {/* Mercado Pago Sandbox Success Alert Modal */}
-      <AnimatePresence>
-        {paymentSuccess && selectedPlanDetails && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-[100]">
-            <motion.div 
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className={`p-8 rounded-3xl border max-w-md w-full text-center space-y-6 ${
-                theme === "dark" ? "bg-[#13151F] border-[#222530]" : "bg-white border-gray-100 shadow-2xl"
-              }`}
-            >
-              <div className="w-16 h-16 rounded-full bg-emerald-500/10 text-emerald-500 flex items-center justify-center mx-auto">
-                <ShieldCheck className="w-10 h-10 animate-bounce" />
-              </div>
-              <div className="space-y-2">
-                <h3 className="text-xl font-extrabold text-emerald-500">¡Mercado Pago Conectado!</h3>
-                <p className="text-xs text-slate-500 leading-relaxed">
-                  Has iniciado el flujo para adquirir el plan <strong>{selectedPlanDetails.name}</strong> por <strong>{selectedPlanDetails.price}</strong>.
-                </p>
-                <div className="text-left bg-blue-500/5 border border-blue-500/20 p-4 rounded-xl space-y-2 mt-4">
-                  <span className="text-[10px] uppercase font-bold text-blue-500 block">Soporte Técnico Colombia</span>
-                  <p className="text-[11px] text-slate-500 leading-normal">
-                    La pasarela se ha inicializado correctamente. Para procesar transacciones en vivo con Mercado Pago en Colombia, agrega tu Access Token de producción en tu archivo <code>.env</code> bajo la variable <code>MERCADO_PAGO_ACCESS_TOKEN</code>.
-                  </p>
-                </div>
-              </div>
-              <div className="flex gap-3">
-                <button
-                  onClick={() => setPaymentSuccess(false)}
-                  className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 rounded-xl text-xs transition-all"
-                >
-                  Entendido, Continuar
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
 
       {/* Sticky Footer */}
       <footer className={`py-8 text-center text-xs border-t ${

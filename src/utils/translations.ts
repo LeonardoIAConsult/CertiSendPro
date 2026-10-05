@@ -129,7 +129,7 @@ export const translations: Record<"es" | "en", TranslationDict> = {
     calcTotalEstimate: "Costo estimado mensual:",
     calcPayAsYouGo: "Te recomendamos el plan Pago por Uso",
     calcProPlan: "Te recomendamos el plan CertiSend Pro",
-    buyNow: "Adquirir Plan",
+    buyNow: "Hablemos de este plan",
     
     planFreeName: "Plan Gratuito",
     planFreePrice: "$0 USD",
@@ -208,7 +208,7 @@ export const translations: Record<"es" | "en", TranslationDict> = {
     calcTotalEstimate: "Estimated monthly cost:",
     calcPayAsYouGo: "We recommend the Pay-as-you-go Plan",
     calcProPlan: "We recommend the CertiSend Pro Plan",
-    buyNow: "Purchase Plan",
+    buyNow: "Let's talk about this plan",
     
     planFreeName: "Free Plan",
     planFreePrice: "$0 USD",
