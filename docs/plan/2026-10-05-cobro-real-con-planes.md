@@ -40,6 +40,8 @@ Hoy no hay planes ni base de datos: todo es gratis y en memoria. El cobro nunca 
 | Ronda 2 (Abogado_LAP sobre borradores): N2 textos públicos falsos | Tarea 11 (retirar «precisión humana», «nunca persistidos», «máxima entregabilidad», USD; reemplazar `PrivacyPolicy.tsx` por la v2.0) |
 | Ronda 2: N3 cláusula de envío equivocado | **Tarea 15** (condiciones de producto) |
 | Ronda 2: H3 en código (TRM vieja/caché vencida) | Tarea 4 (nada de TRM se publica antes) |
+| Ronda 3: R3-1 Paquete vs Gratis | **Decisión del Brain (más favorable al cliente):** lotes de 15 o menos nunca descuentan del saldo del Paquete → ajustar `decidirLote` (Tarea 3, corrección) |
+| Ronda 3: PayPal con rol equivocado en proveedores | **Pendiente aparte:** auditar el legal ya publicado de Faro (cobra con PayPal) |
 | Ronda 2: N6 precio distinto entre tarjeta y resumen | Tareas 7, 8 y 10 (avisar y reconfirmar si sube) |
 
 ### Tarea 1 — Identidad del usuario en el servidor
