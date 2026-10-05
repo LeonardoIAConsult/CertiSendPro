@@ -4,6 +4,9 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { PDFDocument } from "pdf-lib";
+import { getAuth } from "firebase-admin/auth";
+import { obtenerFirebaseApp } from "./server/firebaseAdmin";
+import { obtenerCuenta } from "./server/cuentas";
 
 const app = express();
 // Cloud Run inyecta PORT; en local sigue siendo 3000.
@@ -75,6 +78,58 @@ app.use((_req, res, next) => {
 });
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Identidad del usuario en el servidor (Tarea 1, 2026-10-05) ───────────────────────────────
+// El navegador manda el ID token de Firebase del usuario logueado (no el access token de
+// Google para Gmail/Sheets, que es otro) como "Authorization: Bearer <idToken>". Se verifica
+// aqui con firebase-admin (credenciales por defecto de Cloud Run) y de ahi sale el `uid` en el
+// que confia el resto del servidor — nunca un uid que mande el propio navegador en el body.
+declare global {
+  namespace Express {
+    interface Request {
+      uid?: string;
+      email?: string | null;
+    }
+  }
+}
+
+async function verificarIdToken(req: express.Request): Promise<{ uid: string; email: string | null } | null> {
+  const encabezado = req.headers.authorization || "";
+  const match = /^Bearer\s+(.+)$/.exec(encabezado);
+  if (!match) return null;
+  try {
+    const decoded = await getAuth(obtenerFirebaseApp()).verifyIdToken(match[1]);
+    return { uid: decoded.uid, email: decoded.email || null };
+  } catch (error) {
+    // Token ausente, falso, expirado, o sin red/credenciales para verificarlo: en todos los
+    // casos es "no autenticado", nunca un error 500. El detalle va solo al log del servidor.
+    console.warn("[AUTH] ID token invalido o no verificable:", (error as any)?.message || error);
+    return null;
+  }
+}
+
+// Rutas de cobro y de envio: sin un token valido, 401. El uid nunca llega por el body.
+const exigirAuth: express.RequestHandler = async (req, res, next) => {
+  const identidad = await verificarIdToken(req);
+  if (!identidad) {
+    return res.status(401).json({ error: "Se requiere iniciar sesion para usar esta funcion." });
+  }
+  req.uid = identidad.uid;
+  req.email = identidad.email;
+  next();
+};
+
+// Rutas que hoy funcionan sin exigir login (no romper el flujo actual de dividir/analizar
+// PDF): si llega un token valido se adjunta el uid; si no, se sigue igual sin bloquear.
+const adjuntarAuthSiExiste: express.RequestHandler = async (req, _res, next) => {
+  const identidad = await verificarIdToken(req);
+  if (identidad) {
+    req.uid = identidad.uid;
+    req.email = identidad.email;
+  }
+  next();
+};
+// ─────────────────────────────────────────────────────────────────────────────
+
 interface PdfCacheEntry {
   buffer: Buffer;
   pageCount: number;
@@ -123,7 +178,7 @@ async function getPageBase64(sessionId: string, pageIndex: number): Promise<stri
 }
 
 // Endpoint to split multi-page PDF (Metadata only / Register Session)
-app.post("/api/split-pdf", async (req, res) => {
+app.post("/api/split-pdf", adjuntarAuthSiExiste, async (req, res) => {
   try {
     const { pdfBase64 } = req.body;
     if (!pdfBase64) {
@@ -162,7 +217,7 @@ app.post("/api/split-pdf", async (req, res) => {
 });
 
 // Endpoint to retrieve a single page's PDF base64 on-demand
-app.post("/api/get-page-pdf", async (req, res) => {
+app.post("/api/get-page-pdf", adjuntarAuthSiExiste, async (req, res) => {
   try {
     const { sessionId, pageIndex } = req.body;
     if (!sessionId || pageIndex === undefined) {
@@ -178,7 +233,7 @@ app.post("/api/get-page-pdf", async (req, res) => {
 });
 
 // Endpoint to trigger Canva Connect API Export & Download flow
-app.post("/api/canva/export-design", async (req, res) => {
+app.post("/api/canva/export-design", adjuntarAuthSiExiste, async (req, res) => {
   try {
     const { designId, canvaToken } = req.body;
     if (!designId) {
@@ -277,7 +332,7 @@ app.post("/api/canva/export-design", async (req, res) => {
 });
 
 // Endpoint to analyze a single PDF page with Gemini to extract the person's name
-app.post("/api/analyze-page", async (req, res) => {
+app.post("/api/analyze-page", adjuntarAuthSiExiste, async (req, res) => {
   try {
     const { pdfPageBase64, sessionId, pageIndex, recipientNames } = req.body;
     let activePageBase64 = pdfPageBase64;
@@ -416,7 +471,7 @@ Reglas de respuesta:
 });
 
 // Endpoint to send MIME-compliant Gmail with PDF attachment
-app.post("/api/send-email", async (req, res) => {
+app.post("/api/send-email", exigirAuth, async (req, res) => {
   try {
     const { accessToken, to, subject, body, pdfBase64, sessionId, pageIndex, filename } = req.body;
 
@@ -563,7 +618,7 @@ async function trmHoy(): Promise<{ valor: number; fecha: string } | null> {
   return trmCache; // ultima conocida (o null si nunca hubo)
 }
 
-app.post("/api/mercadopago/create-preference", async (req, res) => {
+app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
   // APAGADO hasta que Leonardo defina la entrega (05-oct): la landing manda a contacto. Encender
   // con PAGOS_ACTIVOS=1 en Cloud Run cuando exista que activar tras el pago (ver memoria).
   if (process.env.PAGOS_ACTIVOS !== "1") {
@@ -628,6 +683,24 @@ app.post("/api/mercadopago/create-preference", async (req, res) => {
     // El detalle (respuesta de MP) va al log del servidor, no al navegador.
     console.error("Error al crear preferencia de Mercado Pago:", error);
     res.status(500).json({ error: "No se pudo iniciar el pago con Mercado Pago." });
+  }
+});
+
+// Endpoint para que el usuario vea su plan, saldo y vencimiento (Tarea 2, 2026-10-05).
+// La cuenta la lee/crea el servidor desde Firestore; el navegador nunca accede directo
+// (ver firestore.rules). Requiere sesion: sin token valido, 401.
+app.get("/api/cuenta", exigirAuth, async (req, res) => {
+  try {
+    const cuenta = await obtenerCuenta(req.uid!);
+    res.json({
+      plan: cuenta.plan,
+      enviosRestantes: cuenta.enviosRestantes,
+      vence: cuenta.vence ? cuenta.vence.toDate().toISOString() : null,
+      renueva: cuenta.renueva,
+    });
+  } catch (error: any) {
+    console.error("Error al obtener la cuenta:", error);
+    res.status(500).json({ error: "No se pudo obtener tu cuenta en este momento." });
   }
 });
 

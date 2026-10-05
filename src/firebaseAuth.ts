@@ -64,6 +64,21 @@ export const getAccessToken = async (): Promise<string | null> => {
   return cachedAccessToken;
 };
 
+// ID token de Firebase del usuario logueado (Tarea 1, 2026-10-05). Es DISTINTO del access
+// token de Google de arriba (ese es para Gmail/Sheets); este es el que el servidor verifica
+// para saber quien llama. El SDK lo renueva solo; null si no hay sesion real de Firebase
+// (p. ej. el Modo Invitado, que no tiene `auth.currentUser`).
+export const getIdToken = async (): Promise<string | null> => {
+  const user = auth.currentUser;
+  if (!user) return null;
+  try {
+    return await user.getIdToken();
+  } catch (error) {
+    console.error("No se pudo obtener el ID token de Firebase:", error);
+    return null;
+  }
+};
+
 export const logout = async () => {
   await auth.signOut();
   cachedAccessToken = null;

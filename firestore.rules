@@ -1,0 +1,20 @@
+// Reglas de Firestore para la base de datos nombrada de CertiSend (Tarea 2, 2026-10-05).
+// Las colecciones de cuentas y pagos solo las toca el servidor con firebase-admin, que las
+// reglas de seguridad NO le aplican. El navegador (SDK cliente) queda denegado por completo:
+// el plan y el saldo del usuario se consultan via /api/cuenta, nunca leyendo el documento.
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // cuentas/{uid}: plan, saldo de envios, vencimiento, renovacion, suscripcion de MP.
+    match /cuentas/{uid} {
+      allow read, write: if false;
+    }
+
+    // pagosProcesados/{mpId}: idempotencia del webhook de Mercado Pago.
+    match /pagosProcesados/{mpId} {
+      allow read, write: if false;
+    }
+  }
+}

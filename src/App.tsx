@@ -33,7 +33,7 @@ import {
   Sun,
   Moon
 } from "lucide-react";
-import { initAuth, googleSignIn, logout, getAccessToken } from "./firebaseAuth";
+import { initAuth, googleSignIn, logout, getAccessToken, getIdToken } from "./firebaseAuth";
 import { Recipient, CertificatePage } from "./types";
 import {
   extractSpreadsheetId,
@@ -58,6 +58,14 @@ function extractCanvaDesignId(url: string): string | null {
     return url.trim();
   }
   return null;
+}
+
+// Encabezado de autenticacion para las llamadas a /api (Tarea 1, 2026-10-05): el ID token de
+// Firebase identifica al usuario ante el servidor. Si no hay sesion real de Firebase (p. ej.
+// el Modo Invitado), se omite; cada ruta decide si lo exige o no.
+async function construirAuthHeader(): Promise<Record<string, string>> {
+  const idToken = await getIdToken();
+  return idToken ? { Authorization: `Bearer ${idToken}` } : {};
 }
 
 export default function App() {
@@ -545,6 +553,7 @@ export default function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...(await construirAuthHeader()),
         },
         body: JSON.stringify({ pdfBase64: activeBase64 }),
       });
@@ -610,6 +619,7 @@ export default function App() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...(await construirAuthHeader()),
         },
         body: JSON.stringify({
           designId,
@@ -803,8 +813,9 @@ export default function App() {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              ...(await construirAuthHeader()),
             },
-            body: JSON.stringify({ 
+            body: JSON.stringify({
               sessionId: sessionIdRef.current || sessionId || undefined,
               pageIndex: page.pageIndex,
               pdfPageBase64: page.base64 || undefined,
@@ -951,6 +962,7 @@ export default function App() {
               headers: {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
+                ...(await construirAuthHeader()),
               },
               body: JSON.stringify({
                 sessionId: currentSessionId,
@@ -1091,6 +1103,7 @@ export default function App() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            ...(await construirAuthHeader()),
           },
           body: JSON.stringify({
             accessToken: token,
