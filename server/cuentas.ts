@@ -74,3 +74,127 @@ export async function marcarProcesado(mpId: string): Promise<boolean> {
     return true;
   });
 }
+
+// ── Limites de lotes de envio en el servidor (Tarea 3, 2026-10-05) ──────────────────────────
+// El navegador nunca decide cuanto puede enviar: pide permiso con la cantidad del lote y el
+// servidor responde segun el plan. `decidirLote` es una funcion PURA (sin Firestore) para
+// poder probarla con node:test; las funciones de abajo son las unicas que tocan la base de datos.
+
+export type MotivoRechazoLote = "limite_gratis" | "saldo_insuficiente";
+
+export interface DecisionLote {
+  permitido: boolean;
+  motivo?: MotivoRechazoLote;
+  plan: Plan;
+  enviosRestantes: number;
+  vence: Timestamp | null;
+}
+
+const LIMITE_GRATIS = 15;
+
+/**
+ * Decide si un lote de `cantidad` certificados cabe en el plan de `cuenta`, a la fecha `ahora`.
+ * - Gratis: permitido hasta 15.
+ * - Paquete vigente (vence > ahora) con saldo (enviosRestantes > 0): permitido si el saldo
+ *   alcanza; si no alcanza, rechazo especifico "saldo_insuficiente" (hay plan pagado, solo no
+ *   cabe ESTE lote).
+ * - Pro vigente (vence > ahora): permitido sin limite de cantidad.
+ * - Cualquier otro caso — Paquete o Pro vencidos, `vence` null, o Paquete vigente pero con el
+ *   saldo en 0 — se trata exactamente igual que Gratis (rechazo "limite_gratis" si no alcanza).
+ */
+export function decidirLote(cuenta: Cuenta, cantidad: number, ahora: Date): DecisionLote {
+  const base = { plan: cuenta.plan, enviosRestantes: cuenta.enviosRestantes, vence: cuenta.vence };
+  const vigente = cuenta.vence !== null && cuenta.vence.toMillis() > ahora.getTime();
+
+  if (cuenta.plan === "pro" && vigente) {
+    return { permitido: true, ...base };
+  }
+
+  if (cuenta.plan === "paquete" && vigente && cuenta.enviosRestantes > 0) {
+    if (cuenta.enviosRestantes >= cantidad) return { permitido: true, ...base };
+    return { permitido: false, motivo: "saldo_insuficiente", ...base };
+  }
+
+  if (cantidad <= LIMITE_GRATIS) return { permitido: true, ...base };
+  return { permitido: false, motivo: "limite_gratis", ...base };
+}
+
+export interface Lote {
+  uid: string;
+  cantidad: number;
+  plan: Plan;
+  enviados: number;
+  creado: Timestamp;
+  expira: Timestamp;
+}
+
+// Mismo plazo que la sesion del PDF en memoria (server.ts): un lote autorizado no sobrevive
+// mas que eso, para no arrastrar un permiso viejo sobre un plan/TRM que ya cambio.
+const DURACION_LOTE_MS = 2 * 3600_000;
+
+/**
+ * Crea `lotes/{loteId}` ya autorizado para `cantidad` envios bajo el plan que `decidirLote`
+ * aprobo. El id lo genera Firestore (aleatorio, no adivinable ni secuencial).
+ */
+export async function crearLote(uid: string, cantidad: number, plan: Plan): Promise<{ loteId: string; lote: Lote }> {
+  const ref = db().collection("lotes").doc();
+  const ahora = Timestamp.now();
+  const lote: Lote = {
+    uid,
+    cantidad,
+    plan,
+    enviados: 0,
+    creado: ahora,
+    expira: Timestamp.fromMillis(ahora.toMillis() + DURACION_LOTE_MS),
+  };
+  await ref.set(lote);
+  return { loteId: ref.id, lote };
+}
+
+/**
+ * Comprueba, ANTES de intentar el envio por Gmail, que el lote exista, sea del usuario que
+ * llama, no haya expirado y todavia tenga cupo. `/api/send-email` nunca envia sin esto.
+ */
+export async function validarLotePendiente(
+  loteId: string,
+  uid: string
+): Promise<{ ok: true; lote: Lote } | { ok: false; error: string }> {
+  const snap = await db().collection("lotes").doc(loteId).get();
+  if (!snap.exists) {
+    return { ok: false, error: "El lote de envio no existe o ya expiro. Vuelve a iniciar el envio masivo." };
+  }
+  const lote = snap.data() as Lote;
+  if (lote.uid !== uid) {
+    return { ok: false, error: "Este lote de envio no pertenece a tu cuenta." };
+  }
+  if (lote.expira.toMillis() <= Date.now()) {
+    return { ok: false, error: "Este lote de envio expiro. Vuelve a iniciar el envio masivo." };
+  }
+  if (lote.enviados >= lote.cantidad) {
+    return { ok: false, error: "Este lote de envio ya alcanzo su cupo autorizado." };
+  }
+  return { ok: true, lote };
+}
+
+/**
+ * Tras un envio EXITOSO (nunca si Gmail fallo): descuenta 1 del lote y, si el plan del lote es
+ * Paquete, 1 del saldo de la cuenta — en una sola transaccion, para que envios concurrentes
+ * nunca descuenten de mas ni de menos (Tarea 3: 10 exitos + 2 fallos ⇒ el saldo baja
+ * exactamente 10; el saldo nunca baja de 0).
+ */
+export async function registrarEnvioExitoso(loteId: string, uid: string, plan: Plan): Promise<void> {
+  const loteRef = db().collection("lotes").doc(loteId);
+  const cuentaRef = db().collection("cuentas").doc(uid);
+  await db().runTransaction(async (tx) => {
+    const loteSnap = await tx.get(loteRef);
+    if (!loteSnap.exists) return; // el lote desaparecio entre la validacion y el envio: nada que descontar.
+    tx.update(loteRef, { enviados: (loteSnap.data() as Lote).enviados + 1 });
+    if (plan === "paquete") {
+      const cuentaSnap = await tx.get(cuentaRef);
+      if (cuentaSnap.exists) {
+        const restantes = (cuentaSnap.data() as Cuenta).enviosRestantes;
+        tx.update(cuentaRef, { enviosRestantes: Math.max(0, restantes - 1) });
+      }
+    }
+  });
+}

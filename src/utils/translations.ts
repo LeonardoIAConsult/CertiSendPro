@@ -82,6 +82,11 @@ export interface TranslationDict {
   // Footer
   footerText: string;
   footerRights: string;
+
+  // Limites de plan al enviar un lote (Tarea 3, cobro real con planes, 2026-10-05).
+  // batchLimitSaldo usa los marcadores {restantes} y {lote}, reemplazados en App.tsx.
+  batchLimitFree: string;
+  batchLimitSaldo: string;
 }
 
 export const translations: Record<"es" | "en", TranslationDict> = {
@@ -162,7 +167,10 @@ export const translations: Record<"es" | "en", TranslationDict> = {
     faq4A: "Para Colombia y Latinoamérica, ofrecemos integraciones de pago seguras mediante Mercado Pago, soportando tarjetas de crédito, PSE y transferencias bancarias locales tanto en COP como en USD.",
     
     footerText: "CertiSend Pro es un servicio independiente de automatización segura de diplomas.",
-    footerRights: "Todos los derechos reservados."
+    footerRights: "Todos los derechos reservados.",
+
+    batchLimitFree: "El plan Gratis permite hasta 15 certificados por lote. Divide el lote o pasa a Paquete o Pro.",
+    batchLimitSaldo: "Tienes {restantes} envíos y el lote es de {lote}."
   },
   en: {
     appName: "CertiSend Pro",
@@ -241,6 +249,9 @@ export const translations: Record<"es" | "en", TranslationDict> = {
     faq4A: "For Colombia and Latin America, we offer secure checkout integrations through Mercado Pago, supporting major credit cards, bank transfers, and local payment methods in USD and COP.",
     
     footerText: "CertiSend Pro is an independent, secure certificate automation utility.",
-    footerRights: "All rights reserved."
+    footerRights: "All rights reserved.",
+
+    batchLimitFree: "The Free plan allows up to 15 certificates per batch. Split the batch or upgrade to the Bundle or Pro plan.",
+    batchLimitSaldo: "You have {restantes} sends left and this batch has {lote}."
   }
 };

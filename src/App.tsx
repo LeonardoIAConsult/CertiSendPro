@@ -1082,6 +1082,41 @@ export default function App() {
       return;
     }
 
+    // Límites de plan en el servidor (Tarea 3, cobro real con planes, 2026-10-05): antes de
+    // enviar un solo correo real, se pide permiso para el tamaño exacto del lote. El servidor
+    // decide y cuenta; si no alcanza, no se envía nada todavía.
+    let loteId: string;
+    try {
+      const resLote = await fetch("/api/lote/iniciar", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(await construirAuthHeader()),
+        },
+        body: JSON.stringify({ cantidad: matchedCount }),
+      });
+      const dataLote = await resLote.json().catch(() => ({} as any));
+
+      if (!resLote.ok || !dataLote.permitido) {
+        const mensaje = dataLote.motivo === "saldo_insuficiente"
+          ? translations[language].batchLimitSaldo
+              .replace("{restantes}", String(dataLote.enviosRestantes ?? 0))
+              .replace("{lote}", String(matchedCount))
+          : translations[language].batchLimitFree;
+        addLog(mensaje, "error");
+        triggerBanner("error", mensaje);
+        setIsDelivering(false);
+        return;
+      }
+      loteId = dataLote.loteId;
+    } catch (err: any) {
+      console.error("Error al iniciar el lote de envío:", err);
+      addLog(`Error al validar tu lote de envío: ${err.message}`, "error");
+      triggerBanner("error", "No se pudo validar tu lote de envío. Intenta de nuevo.");
+      setIsDelivering(false);
+      return;
+    }
+
     for (let i = 0; i < updatedPages.length; i++) {
       const page = updatedPages[i];
       if (!page.matchedRecipient) continue;
@@ -1114,6 +1149,7 @@ export default function App() {
             sessionId: sessionIdRef.current || sessionId || undefined,
             pageIndex: page.pageIndex,
             filename: filename,
+            loteId,
           }),
         });
 

@@ -6,7 +6,13 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { PDFDocument } from "pdf-lib";
 import { getAuth } from "firebase-admin/auth";
 import { obtenerFirebaseApp } from "./server/firebaseAdmin";
-import { obtenerCuenta } from "./server/cuentas";
+import {
+  obtenerCuenta,
+  decidirLote,
+  crearLote,
+  validarLotePendiente,
+  registrarEnvioExitoso,
+} from "./server/cuentas";
 
 const app = express();
 // Cloud Run inyecta PORT; en local sigue siendo 3000.
@@ -475,7 +481,19 @@ Reglas de respuesta:
 // Endpoint to send MIME-compliant Gmail with PDF attachment
 app.post("/api/send-email", exigirAuth, async (req, res) => {
   try {
-    const { accessToken, to, subject, body, pdfBase64, sessionId, pageIndex, filename } = req.body;
+    const { accessToken, to, subject, body, pdfBase64, sessionId, pageIndex, filename, loteId } = req.body;
+
+    // Lote autorizado por /api/lote/iniciar (Tarea 3, 2026-10-05): sin el, no se envia nada.
+    // Esto es lo que impide que el navegador salte el limite del plan llamando esta ruta directo.
+    if (!loteId) {
+      return res.status(403).json({ error: "Falta el lote de envio autorizado. Vuelve a iniciar el envio masivo." });
+    }
+    const loteValidado = await validarLotePendiente(String(loteId), req.uid!);
+    // Nota: se compara con `=== false` (no `!loteValidado.ok`) porque TS 5.8 no angosta el
+    // tipo union con un discriminante booleano mediante negacion/truthiness, solo con `===`.
+    if (loteValidado.ok === false) {
+      return res.status(403).json({ error: loteValidado.error });
+    }
 
     if (!accessToken) {
       return res.status(400).json({ error: "No access token provided" });
@@ -582,6 +600,11 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
     }
 
     const data = await gmailResponse.json();
+
+    // Solo se descuenta tras el OK de Gmail (Tarea 3): si el envio hubiera fallado, el `throw`
+    // de arriba ya habria saltado al catch sin pasar por aqui, y no se descuenta nada.
+    await registrarEnvioExitoso(String(loteId), req.uid!, loteValidado.lote.plan);
+
     res.json({ success: true, messageId: data.id });
   } catch (error: any) {
     console.error("Error sending email:", error);
@@ -703,6 +726,45 @@ app.get("/api/cuenta", exigirAuth, async (req, res) => {
   } catch (error: any) {
     console.error("Error al obtener la cuenta:", error);
     res.status(500).json({ error: "No se pudo obtener tu cuenta en este momento." });
+  }
+});
+
+// Endpoint para pedir permiso de envio ANTES de empezar un lote (Tarea 3, 2026-10-05). El
+// navegador manda cuantos certificados quiere enviar; el servidor decide segun el plan real de
+// la cuenta (nunca segun lo que diga el navegador) y, si lo aprueba, crea un lote autorizado que
+// `/api/send-email` exigira en cada envio. Requiere sesion: sin token valido, 401.
+app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
+  try {
+    const cantidad = Number(req.body?.cantidad);
+    if (!Number.isFinite(cantidad) || cantidad <= 0) {
+      return res.status(400).json({ error: "Falta una cantidad valida de certificados a enviar." });
+    }
+
+    const cuenta = await obtenerCuenta(req.uid!);
+    const decision = decidirLote(cuenta, cantidad, new Date());
+    const venceISO = decision.vence ? decision.vence.toDate().toISOString() : null;
+
+    if (!decision.permitido) {
+      return res.json({
+        permitido: false,
+        motivo: decision.motivo,
+        plan: decision.plan,
+        enviosRestantes: decision.enviosRestantes,
+        vence: venceISO,
+      });
+    }
+
+    const { loteId } = await crearLote(req.uid!, cantidad, decision.plan);
+    res.json({
+      permitido: true,
+      loteId,
+      plan: decision.plan,
+      enviosRestantes: decision.enviosRestantes,
+      vence: venceISO,
+    });
+  } catch (error: any) {
+    console.error("Error al iniciar lote de envio:", error);
+    res.status(500).json({ error: "No se pudo validar tu lote de envio en este momento." });
   }
 });
 

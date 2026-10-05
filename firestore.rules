@@ -16,5 +16,11 @@ service cloud.firestore {
     match /pagosProcesados/{mpId} {
       allow read, write: if false;
     }
+
+    // lotes/{loteId}: lotes de envio autorizados por /api/lote/iniciar (Tarea 3, 2026-10-05).
+    // El saldo y el cupo los cuenta solo el servidor; el navegador nunca lee ni escribe esto.
+    match /lotes/{loteId} {
+      allow read, write: if false;
+    }
   }
 }
