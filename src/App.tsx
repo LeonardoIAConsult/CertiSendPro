@@ -45,6 +45,16 @@ import JSZip from "jszip";
 import LandingPage from "./components/LandingPage";
 import PrivacyPolicy from "./components/PrivacyPolicy";
 import { translations } from "./utils/translations";
+import {
+  type CuentaInfo,
+  type EstadoSondeoPago,
+  type PagoParam,
+  decidirEstadoSondeo,
+  formatearEstadoPlan,
+  formatearMotivoRechazoLote,
+  leerPagoParam,
+  INTERVALO_SONDEO_MS,
+} from "./utils/plan";
 
 // Helper to extract clean Canva Design ID from link
 function extractCanvaDesignId(url: string): string | null {
@@ -199,6 +209,88 @@ export default function App() {
     );
     return () => unsubscribe();
   }, []);
+
+  // ── Mi plan y regreso de Mercado Pago (Tarea 10, cobro real con planes, 2026-10-05) ────────
+  // `cuenta` es lo que devuelve GET /api/cuenta (plan/saldo/vencimiento); se refresca al cargar
+  // la app (con sesion real) y despues de cada lote enviado. La logica de texto/decision es pura
+  // y vive en src/utils/plan.ts (probada con node:test sin React).
+  const [cuenta, setCuenta] = useState<CuentaInfo | null>(null);
+  const cuentaRef = useRef<CuentaInfo | null>(null);
+  useEffect(() => {
+    cuentaRef.current = cuenta;
+  }, [cuenta]);
+
+  const fetchCuenta = async () => {
+    // Modo Invitado no tiene sesion real de Firebase (sin ID token, el servidor respondería 401):
+    // se queda sin "Mi plan" en vez de pedir permiso de todos modos.
+    if (user?.isGuest) return;
+    try {
+      const authHeader = await construirAuthHeader();
+      if (!authHeader.Authorization) return;
+      const res = await fetch("/api/cuenta", { headers: authHeader });
+      if (!res.ok) return;
+      const data = await res.json();
+      setCuenta({
+        plan: data.plan,
+        enviosRestantes: data.enviosRestantes,
+        vence: data.vence,
+        renueva: data.renueva,
+      });
+    } catch (err) {
+      console.error("No se pudo obtener tu cuenta:", err);
+    }
+  };
+
+  // Recarga al iniciar sesion (spec §5: "el plan se refresca al cargar la app").
+  useEffect(() => {
+    if (!needsAuth && user && !user.isGuest) {
+      fetchCuenta();
+    }
+  }, [needsAuth, user]);
+
+  // `?pago=...` al volver de Mercado Pago: se lee UNA sola vez al montar (viene de la URL con la
+  // que cargo la pagina, nunca cambia dentro de la misma sesion de la app).
+  const [pagoParam] = useState<PagoParam>(() => leerPagoParam(window.location.search));
+  const [pagoEstado, setPagoEstado] = useState<EstadoSondeoPago | null>(null);
+
+  useEffect(() => {
+    if (pagoParam === "error") {
+      // Mercado Pago ya dijo que no se cobro nada: no hace falta sondear.
+      setPagoEstado("rechazado");
+      return;
+    }
+    if (pagoParam !== "ok" && pagoParam !== "pendiente") return;
+
+    const inicio = Date.now();
+    let detenido = false;
+    setPagoEstado("confirmando");
+
+    // El exito NUNCA lo decide la URL: cada "revisar" vuelve a pedir /api/cuenta y
+    // `decidirEstadoSondeo` solo marca "activo" si el SERVIDOR dice que el plan ya esta activo.
+    const revisar = async () => {
+      await fetchCuenta();
+      if (detenido) return;
+      const estado = decidirEstadoSondeo({
+        pago: pagoParam,
+        cuenta: cuentaRef.current,
+        msTranscurridos: Date.now() - inicio,
+      });
+      if (estado) setPagoEstado(estado);
+      if (estado === "activo" || estado === "revision") {
+        detenido = true;
+        clearInterval(timerId);
+      }
+    };
+
+    const timerId = setInterval(revisar, INTERVALO_SONDEO_MS);
+    revisar(); // primera consulta inmediata, sin esperar los primeros 5 s.
+
+    return () => {
+      detenido = true;
+      clearInterval(timerId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pagoParam]);
 
   // Update sheet linkage status badge
   useEffect(() => {
@@ -1098,11 +1190,9 @@ export default function App() {
       const dataLote = await resLote.json().catch(() => ({} as any));
 
       if (!resLote.ok || !dataLote.permitido) {
-        const mensaje = dataLote.motivo === "saldo_insuficiente"
-          ? translations[language].batchLimitSaldo
-              .replace("{restantes}", String(dataLote.enviosRestantes ?? 0))
-              .replace("{lote}", String(matchedCount))
-          : translations[language].batchLimitFree;
+        // Lenguaje claro + opciones (dividir el lote o ver planes) en una sola funcion pura
+        // (src/utils/plan.ts), probada con node:test (Tarea 10). Nada se envia en este caso.
+        const mensaje = formatearMotivoRechazoLote(dataLote.motivo, dataLote.enviosRestantes, matchedCount, language);
         addLog(mensaje, "error");
         triggerBanner("error", mensaje);
         setIsDelivering(false);
@@ -1181,6 +1271,7 @@ export default function App() {
     const successCount = updatedPages.filter((p) => p.status === "sent").length;
     addLog(`Resumen final: ${successCount} correos despachados con éxito.`, "success");
     triggerBanner("success", `¡Proceso completado! Se enviaron con éxito ${successCount} correos de Gmail.`);
+    fetchCuenta(); // Tarea 10: el saldo/vencimiento se refresca despues de cada lote.
   };
 
   // Drag over handler for visuals
@@ -1317,6 +1408,19 @@ export default function App() {
             <span className="text-[10px] font-mono">Gmail: {isGmailActive ? "Active" : "Locked"}</span>
           </div>
 
+          {!needsAuth && user && !user.isGuest && cuenta && (() => {
+            const estadoPlan = formatearEstadoPlan(cuenta, language);
+            return (
+              <div
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition-colors ${isDark ? "bg-[#16181D] border border-[#2D2F36]" : "bg-gray-50 border border-gray-200"}`}
+                title={estadoPlan.nota || ""}
+              >
+                <Shield className="w-3.5 h-3.5 text-indigo-400" />
+                <span className="text-[10px] font-mono">{estadoPlan.titulo}</span>
+              </div>
+            );
+          })()}
+
           {!needsAuth && user && (
             <div className={`flex items-center gap-2.5 px-3 py-1 rounded-md transform scale-95 origin-right ${isDark ? "bg-[#1A1D24] border border-[#2D2F36]" : "bg-gray-50 border border-gray-200"}`}>
               {user.photoURL && <img src={user.photoURL} referrerPolicy="no-referrer" className="w-4 h-4 rounded-full" alt="User" />}
@@ -1328,6 +1432,39 @@ export default function App() {
           )}
         </div>
       </header>
+
+      {/* Regreso de Mercado Pago (Tarea 10, 2026-10-05): estado del sondeo contra /api/cuenta.
+          El exito NUNCA lo decide la URL (?pago=ok): solo decidirEstadoSondeo, con la respuesta
+          real del servidor, puede marcar "activo". Persiste hasta resolverse (no es el banner
+          que se autodescarta a los 6s). */}
+      {pagoEstado && (
+        <div
+          className={`mx-6 mt-4 rounded-lg border px-4 py-3 flex items-center gap-2 text-xs font-semibold ${
+            pagoEstado === "activo"
+              ? "bg-[#061C14] border-emerald-500/50 text-emerald-100"
+              : pagoEstado === "rechazado"
+              ? "bg-[#1C0606] border-rose-500/50 text-rose-100"
+              : pagoEstado === "revision"
+              ? "bg-[#1C1606] border-amber-500/50 text-amber-100"
+              : "bg-[#06101C] border-blue-500/50 text-blue-100"
+          }`}
+        >
+          {pagoEstado === "confirmando" && <Loader2 className="w-4 h-4 shrink-0 animate-spin" />}
+          {pagoEstado === "activo" && <CheckCircle2 className="w-4 h-4 shrink-0" />}
+          {(pagoEstado === "revision" || pagoEstado === "rechazado") && <AlertCircle className="w-4 h-4 shrink-0" />}
+          <span>
+            {translations[language][
+              pagoEstado === "confirmando"
+                ? "pagoConfirmando"
+                : pagoEstado === "activo"
+                ? "pagoActivo"
+                : pagoEstado === "revision"
+                ? "pagoRevision"
+                : "pagoRechazado"
+            ]}
+          </span>
+        </div>
+      )}
 
       {/* Main Workspace Grid - High-Density columns Arrangement */}
       {needsAuth ? (

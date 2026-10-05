@@ -87,9 +87,26 @@ export interface TranslationDict {
   // batchLimitSaldo usa los marcadores {restantes} y {lote}, reemplazados en App.tsx.
   batchLimitFree: string;
   batchLimitSaldo: string;
+  // Opciones cuando se rechaza un lote (Tarea 10): dividirlo o ver los planes disponibles.
+  batchLimitOpciones: string;
+
+  // Vista "Mi plan" (Tarea 10, cobro real con planes, 2026-10-05). miPlanPaquete usa {restantes}
+  // y {fecha}; miPlanPro usa {fecha} (reemplazados en src/utils/plan.ts).
+  miPlanGratis: string;
+  miPlanPaquete: string;
+  miPlanPaqueteNota: string;
+  miPlanPro: string;
+
+  // Volver de Mercado Pago (Tarea 10): estados del sondeo contra /api/cuenta.
+  pagoConfirmando: string;
+  pagoActivo: string;
+  pagoRevision: string;
+  pagoRechazado: string;
 }
 
-export const translations: Record<"es" | "en", TranslationDict> = {
+export type Lang = "es" | "en";
+
+export const translations: Record<Lang, TranslationDict> = {
   es: {
     appName: "CertiSend Pro",
     loginWithGoogle: "Ingresar con Google",
@@ -170,7 +187,18 @@ export const translations: Record<"es" | "en", TranslationDict> = {
     footerRights: "Todos los derechos reservados.",
 
     batchLimitFree: "El plan Gratis permite hasta 15 certificados por lote. Divide el lote o pasa a Paquete o Pro.",
-    batchLimitSaldo: "Tienes {restantes} envíos y el lote es de {lote}."
+    batchLimitSaldo: "Tienes {restantes} envíos y el lote es de {lote}.",
+    batchLimitOpciones: "Puedes dividir el lote en partes de 15 o menos, o escribirnos a contacto@leonardoantolinez.com para ver los planes.",
+
+    miPlanGratis: "Plan Gratis · hasta 15 certificados por lote",
+    miPlanPaquete: "Paquete · te quedan {restantes} envíos · vencen el {fecha}",
+    miPlanPaqueteNota: "Los lotes de 15 certificados o menos no gastan tu saldo.",
+    miPlanPro: "Pro · envíos ilimitados · hasta {fecha}",
+
+    pagoConfirmando: "Estamos confirmando tu pago…",
+    pagoActivo: "¡Pago confirmado! Tu plan ya está activo.",
+    pagoRevision: "Tu pago está en revisión; te avisamos por correo.",
+    pagoRechazado: "No se realizó ningún cobro."
   },
   en: {
     appName: "CertiSend Pro",
@@ -252,6 +280,17 @@ export const translations: Record<"es" | "en", TranslationDict> = {
     footerRights: "All rights reserved.",
 
     batchLimitFree: "The Free plan allows up to 15 certificates per batch. Split the batch or upgrade to the Bundle or Pro plan.",
-    batchLimitSaldo: "You have {restantes} sends left and this batch has {lote}."
+    batchLimitSaldo: "You have {restantes} sends left and this batch has {lote}.",
+    batchLimitOpciones: "You can split the batch into parts of 15 or fewer, or email us at contacto@leonardoantolinez.com to see the plans.",
+
+    miPlanGratis: "Free plan · up to 15 certificates per batch",
+    miPlanPaquete: "Bundle · {restantes} sends left · expires {fecha}",
+    miPlanPaqueteNota: "Batches of 15 or fewer never spend your balance.",
+    miPlanPro: "Pro · unlimited sends · until {fecha}",
+
+    pagoConfirmando: "We're confirming your payment…",
+    pagoActivo: "Payment confirmed! Your plan is now active.",
+    pagoRevision: "Your payment is under review; we'll email you.",
+    pagoRechazado: "No charge was made."
   }
 };
