@@ -24,6 +24,17 @@ export interface Cuenta {
   vence: Timestamp | null;
   renueva: boolean;
   mpSuscripcionId: string | null;
+  /**
+   * Cupos del Paquete reservados AHORA MISMO, sumando TODOS los lotes abiertos de este usuario
+   * (M23, corregido vuelta 19 del REVISOR_EXTERNO_LAP): antes, `reservarEnvioTx` solo comparaba
+   * el saldo contra `lote.reservados` (reservas del MISMO lote), asi que dos lotes Paquete
+   * abiertos a la vez podian reservar cada uno hasta el saldo completo y superarlo entre los dos.
+   * Se incrementa en `reservarEnvioTx` cuando el lote es Paquete y se decrementa en
+   * `confirmarEnvioExitosoTx` (la reserva se consume) o en `liberarReservaTx` (Gmail fallo), en
+   * la MISMA transaccion que el resto de la escritura. Puede faltar en cuentas creadas antes de
+   * este cambio: se lee siempre con `?? 0`.
+   */
+  reservadosPaquete: number;
   actualizado: Timestamp;
 }
 
@@ -33,6 +44,7 @@ const CUENTA_GRATIS_BASE: Omit<Cuenta, "actualizado"> = {
   vence: null,
   renueva: false,
   mpSuscripcionId: null,
+  reservadosPaquete: 0,
 };
 
 // NOTA para la Tarea 6 (webhook de Mercado Pago, pendiente de implementar): al activar un plan
@@ -204,15 +216,18 @@ export interface TransaccionLike {
 }
 
 /**
- * Cuerpo transaccional de la reserva (M19): comprueba, ANTES de llamar a Gmail, que el lote
- * exista, sea del usuario que llama, no haya expirado, todavia tenga cupo (`enviados +
- * reservados < cantidad`) y, si su `planEfectivo` es Paquete, que el saldo de la cuenta alcance
- * para cubrir las reservas ya pendientes de este lote. Si todo eso se cumple, reserva 1 cupo.
+ * Cuerpo transaccional de la reserva (M19, corregido vuelta 19 — M23): comprueba, ANTES de
+ * llamar a Gmail, que el lote exista, sea del usuario que llama, no haya expirado, todavia tenga
+ * cupo (`enviados + reservados < cantidad`) y, si su `planEfectivo` es Paquete, que el saldo de
+ * la cuenta alcance para cubrir TODAS las reservas pendientes del usuario (`reservadosPaquete`
+ * en `cuentas/{uid}`, no solo las de este lote — ver M23 en el tipo `Cuenta`). Si todo eso se
+ * cumple, reserva 1 cupo en el lote y, si es Paquete, 1 cupo a nivel de cuenta.
  *
- * TODAS las lecturas (`tx.get`) ocurren antes de la unica escritura (`tx.update`) — ver G3 en
+ * TODAS las lecturas (`tx.get`) ocurren antes de cualquier escritura (`tx.update`) — ver G3 en
  * `confirmarEnvioExitosoTx` para el bug que esto evita. La transaccion completa (lectura +
- * comprobacion + reserva) es atomica: si dos envios del mismo lote llegan en paralelo, Firestore
- * serializa/reintenta y nunca deja que ambos reserven por encima del cupo o del saldo.
+ * comprobacion + reserva) es atomica: si dos envios en paralelo —del mismo lote o de dos lotes
+ * distintos del mismo usuario— compiten por el mismo saldo, Firestore serializa/reintenta y
+ * nunca deja que ambos reserven por encima del cupo o del saldo.
  */
 export async function reservarEnvioTx(
   tx: TransaccionLike,
@@ -235,16 +250,22 @@ export async function reservarEnvioTx(
     return { ok: false, error: "Este lote de envio ya alcanzo su cupo autorizado." };
   }
 
+  let cuenta: Cuenta | null = null;
   if (lote.planEfectivo === "paquete") {
     // Sigue siendo una lectura: todavia no se ejecuto ningun tx.update/tx.set en esta transaccion.
     const cuentaSnap = await tx.get(cuentaRef);
-    const restantes = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta).enviosRestantes : 0;
-    if (restantes <= lote.reservados) {
+    cuenta = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
+    const restantes = cuenta ? cuenta.enviosRestantes : 0;
+    const reservadosPaquete = cuenta ? cuenta.reservadosPaquete ?? 0 : 0;
+    if (restantes <= reservadosPaquete) {
       return { ok: false, error: "Tu Paquete ya no tiene saldo disponible para este envio." };
     }
   }
 
   tx.update(loteRef, { reservados: lote.reservados + 1 });
+  if (lote.planEfectivo === "paquete" && cuenta) {
+    tx.update(cuentaRef, { reservadosPaquete: (cuenta.reservadosPaquete ?? 0) + 1 });
+  }
   return { ok: true, lote };
 }
 
@@ -286,8 +307,13 @@ export async function confirmarEnvioExitosoTx(
     reservados: Math.max(0, lote.reservados - 1),
   });
   if (planEfectivo === "paquete" && cuentaSnap && cuentaSnap.exists) {
-    const restantes = (cuentaSnap.data() as Cuenta).enviosRestantes;
-    tx.update(cuentaRef, { enviosRestantes: Math.max(0, restantes - 1) });
+    const cuenta = cuentaSnap.data() as Cuenta;
+    // M23: la reserva se CONSUME (sale de `reservadosPaquete` ademas de bajar el saldo), para
+    // que otro lote del mismo usuario pueda volver a reservar ese cupo si queda saldo.
+    tx.update(cuentaRef, {
+      enviosRestantes: Math.max(0, cuenta.enviosRestantes - 1),
+      reservadosPaquete: Math.max(0, (cuenta.reservadosPaquete ?? 0) - 1),
+    });
   }
 }
 
@@ -301,17 +327,25 @@ export async function confirmarEnvioExitoso(loteId: string, uid: string, planEfe
 /**
  * Cuerpo transaccional de la liberacion: cuando Gmail FALLO (nunca se envio de verdad), resta 1
  * de `reservados` sin tocar `enviados` ni el saldo, para que ese envio fallido no deje el cupo
- * bloqueado hasta que el lote expire.
+ * bloqueado hasta que el lote expire. Si el lote era Paquete, tambien libera el cupo reservado a
+ * nivel de cuenta (M23: `reservadosPaquete`), para que otro lote del mismo usuario pueda usarlo.
  */
-export async function liberarReservaTx(tx: TransaccionLike, loteRef: any): Promise<void> {
+export async function liberarReservaTx(tx: TransaccionLike, loteRef: any, cuentaRef: any): Promise<void> {
   const loteSnap = await tx.get(loteRef);
   if (!loteSnap.exists) return;
   const lote = loteSnap.data() as Lote;
+  const cuentaSnap = lote.planEfectivo === "paquete" ? await tx.get(cuentaRef) : null; // lectura, no escritura.
+
   tx.update(loteRef, { reservados: Math.max(0, lote.reservados - 1) });
+  if (lote.planEfectivo === "paquete" && cuentaSnap && cuentaSnap.exists) {
+    const cuenta = cuentaSnap.data() as Cuenta;
+    tx.update(cuentaRef, { reservadosPaquete: Math.max(0, (cuenta.reservadosPaquete ?? 0) - 1) });
+  }
 }
 
-/** Envoltorio real: abre la transaccion de Firestore y le pasa la referencia real. */
-export async function liberarReserva(loteId: string): Promise<void> {
+/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
+export async function liberarReserva(loteId: string, uid: string): Promise<void> {
   const loteRef = db().collection("lotes").doc(loteId);
-  await db().runTransaction((tx) => liberarReservaTx(tx, loteRef));
+  const cuentaRef = db().collection("cuentas").doc(uid);
+  await db().runTransaction((tx) => liberarReservaTx(tx, loteRef, cuentaRef));
 }

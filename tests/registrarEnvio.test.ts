@@ -45,6 +45,7 @@ function cuentaBase(parcial: Partial<Cuenta>): Cuenta {
     vence: venceFuturo,
     renueva: false,
     mpSuscripcionId: null,
+    reservadosPaquete: 0,
     actualizado: Timestamp.fromDate(ahora),
     ...parcial,
   };
@@ -117,7 +118,7 @@ test("10 exitos + 2 fallos: el saldo del Paquete baja exactamente 10 (ni mas, ni
   }
   // Las otras 2 fallan en Gmail (nunca se enviaron de verdad) -> se liberan, no se descuenta nada.
   for (let i = 0; i < 2; i++) {
-    await db.runTransaction((tx) => liberarReservaTx(tx, loteRef));
+    await db.runTransaction((tx) => liberarReservaTx(tx, loteRef, cuentaRef));
   }
 
   const lote = db.leer("lotes/L1") as Lote;
@@ -166,4 +167,56 @@ test("M19 (concurrencia + saldo): Paquete con saldo 3, 5 reservas en paralelo ->
 
   const aceptadas = resultados.filter((r) => r.ok === true);
   assert.equal(aceptadas.length, 3, "no se debe reservar mas de lo que el saldo del Paquete alcanza");
+});
+
+// ── M23 (vuelta 19 del REVISOR_EXTERNO_LAP): el saldo del Paquete se comparte entre TODOS los
+// lotes abiertos del usuario, no solo entre reservas del MISMO lote ────────────────────────────
+
+test("M23: saldo 1 y DOS lotes Paquete abiertos a la vez -> solo 1 reserva aceptada (entre los dos)", async () => {
+  const db = new FirestoreFalso();
+  // Dos lotes DISTINTOS del mismo usuario, cada uno con cupo de sobra (10): antes del fix, cada
+  // uno comparaba el saldo solo contra sus propias reservas (0), asi que ambos aceptaban.
+  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete" }));
+  db.seed("lotes/L2", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete" }));
+  db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 1 }));
+  const lote1Ref = db.doc("lotes/L1");
+  const lote2Ref = db.doc("lotes/L2");
+  const cuentaRef = db.doc("cuentas/u1");
+
+  const r1 = await db.runTransaction((tx) => reservarEnvioTx(tx, lote1Ref, cuentaRef, "u1"));
+  const r2 = await db.runTransaction((tx) => reservarEnvioTx(tx, lote2Ref, cuentaRef, "u1"));
+
+  assert.equal(r1.ok, true, "la primera reserva (lote L1) debe aceptarse: hay 1 de saldo");
+  assert.equal(r2.ok, false, "la segunda reserva (lote L2, OTRO lote) debe rechazarse: el saldo ya esta reservado por L1");
+  if (r2.ok === false) {
+    assert.equal(r2.error, "Tu Paquete ya no tiene saldo disponible para este envio.");
+  }
+
+  const cuenta = db.leer("cuentas/u1") as Cuenta;
+  assert.equal(cuenta.reservadosPaquete, 1, "la cuenta debe contar 1 reserva, sumando los dos lotes");
+
+  const lote1 = db.leer("lotes/L1") as Lote;
+  const lote2 = db.leer("lotes/L2") as Lote;
+  assert.equal(lote1.reservados, 1);
+  assert.equal(lote2.reservados, 0, "L2 nunca llego a reservar: el rechazo fue antes de escribir");
+});
+
+test("M23: tras confirmar el envio de L1, el cupo liberado SI alcanza para L2", async () => {
+  const db = new FirestoreFalso();
+  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete", reservados: 1 }));
+  db.seed("lotes/L2", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete" }));
+  db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 1, reservadosPaquete: 1 }));
+  const lote1Ref = db.doc("lotes/L1");
+  const lote2Ref = db.doc("lotes/L2");
+  const cuentaRef = db.doc("cuentas/u1");
+
+  // L1 se confirma (envio exitoso): el saldo baja a 0 y la reserva de cuenta vuelve a 0.
+  await db.runTransaction((tx) => confirmarEnvioExitosoTx(tx, lote1Ref, cuentaRef, "paquete"));
+  const cuentaTrasConfirmar = db.leer("cuentas/u1") as Cuenta;
+  assert.equal(cuentaTrasConfirmar.enviosRestantes, 0);
+  assert.equal(cuentaTrasConfirmar.reservadosPaquete, 0);
+
+  // Con el saldo ya en 0, L2 ya no puede reservar (correcto: no queda nada que reservar).
+  const r2 = await db.runTransaction((tx) => reservarEnvioTx(tx, lote2Ref, cuentaRef, "u1"));
+  assert.equal(r2.ok, false, "sin saldo restante, L2 debe rechazarse");
 });

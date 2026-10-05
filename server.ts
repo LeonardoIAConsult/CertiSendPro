@@ -485,6 +485,9 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
   // (cualquier salida de esta ruta antes de confirmarEnvioExitoso), el catch de abajo lo libera
   // para que no quede bloqueado hasta que el lote expire.
   let loteReservado: string | null = null;
+  // true desde que Gmail confirmo el envio (justo tras gmailResponse.ok, bajo vuelta 19): si algo
+  // lanza despues, el catch nunca debe liberar la reserva ni responder 500 (el correo ya salio).
+  let gmailEnvio = false;
   try {
     const { accessToken, to, subject, body, pdfBase64, sessionId, pageIndex, filename, loteId } = req.body;
 
@@ -508,7 +511,7 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
     const planEfectivoLote = reserva.lote.planEfectivo;
 
     if (!accessToken) {
-      await liberarReserva(loteReservado);
+      await liberarReserva(loteReservado, req.uid!);
       loteReservado = null;
       return res.status(400).json({ error: "No access token provided" });
     }
@@ -518,14 +521,14 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       try {
         activePdfBase64 = await getPageBase64(sessionId, Number(pageIndex));
       } catch (err: any) {
-        await liberarReserva(loteReservado);
+        await liberarReserva(loteReservado, req.uid!);
         loteReservado = null;
         return res.status(404).json({ error: `Fallo al extraer el certificado PDF: ${err.message}` });
       }
     }
 
     if (!to || !subject || !body || !activePdfBase64 || !filename) {
-      await liberarReserva(loteReservado);
+      await liberarReserva(loteReservado, req.uid!);
       loteReservado = null;
       return res.status(400).json({ error: "Faltan parámetros obligatorios del correo o el archivo PDF" });
     }
@@ -540,7 +543,7 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
     // If the user mapped columns incorrectly, this will fail-fast with an informative error.
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(cleanTo)) {
-      await liberarReserva(loteReservado);
+      await liberarReserva(loteReservado, req.uid!);
       loteReservado = null;
       return res.status(400).json({
         error: `La dirección de correo "${cleanTo}" no tiene un formato válido (p. ej., usuario@dominio.com). Por favor, en el PASO 1 (Configuración de Columnas), asegúrate de haber mapeado la 'COLUMNA DE CORREO' con la columna de tu Google Sheet que contiene los correos electrónicos reales.`
@@ -619,6 +622,12 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       throw new Error(friendlyError);
     }
 
+    // Gmail YA confirmo el envio (bajo, corregido vuelta 19 del REVISOR_EXTERNO_LAP): se marca
+    // ANTES de `gmailResponse.json()` para que, si esa llamada lanzara (JSON invalido, conexion
+    // cortada a mitad de la respuesta), el catch de abajo sepa que el correo SI salio y nunca
+    // libere la reserva ni responda 500 por un correo que el destinatario ya recibio.
+    gmailEnvio = true;
+
     const data = await gmailResponse.json();
 
     // Solo se confirma (pasa de reservado a descontado) tras el OK de Gmail (Tarea 3): si el
@@ -641,11 +650,21 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
     res.json({ success: true, enviado: true, contabilizado: true, messageId: data.id });
   } catch (error: any) {
     console.error("Error sending email:", error);
+    if (gmailEnvio) {
+      // Gmail ya envio el correo de verdad (bajo): algo lanzo DESPUES (p. ej. gmailResponse.json())
+      // sin llegar a confirmarse/descontarse. Nunca liberar la reserva (el correo si salio, el
+      // cupo si se gasto) ni responder 500 (el navegador reintentaria y duplicaria el envio).
+      console.error(
+        `[CONTABILIDAD] Gmail envio el correo pero algo fallo despues, antes de confirmar. loteId=${loteReservado} uid=${req.uid}:`,
+        error
+      );
+      return res.json({ success: true, enviado: true, contabilizado: false });
+    }
     if (loteReservado) {
       // El envio no llego a confirmarse (fallo antes de o durante la llamada a Gmail): liberar
       // el cupo reservado para que no bloquee otros envios del mismo lote (M19).
       try {
-        await liberarReserva(loteReservado);
+        await liberarReserva(loteReservado, req.uid!);
       } catch (liberarError) {
         console.error(`[CONTABILIDAD] No se pudo liberar la reserva. loteId=${loteReservado}:`, liberarError);
       }

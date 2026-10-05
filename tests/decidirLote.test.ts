@@ -18,6 +18,7 @@ function cuenta(parcial: Partial<Cuenta>): Cuenta {
     vence: null,
     renueva: false,
     mpSuscripcionId: null,
+    reservadosPaquete: 0,
     actualizado: Timestamp.fromDate(ahora),
     ...parcial,
   };
