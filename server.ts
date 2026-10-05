@@ -14,6 +14,7 @@ import {
   confirmarEnvioExitoso,
   liberarReserva,
 } from "./server/cuentas";
+import { trmHoy } from "./server/trm";
 
 const app = express();
 // Cloud Run inyecta PORT; en local sigue siendo 3000.
@@ -682,27 +683,8 @@ const PLANES_USD: Record<string, number> = {
   "CertiSend Pro Monthly": 29,
   "CertiSend Pay-as-you-go Bundle": 15,
 };
-const TRM_MIN = 2000, TRM_MAX = 8000;
-let trmCache: { valor: number; fecha: string; hasta: number } | null = null;
-
-async function trmHoy(): Promise<{ valor: number; fecha: string } | null> {
-  if (trmCache && trmCache.hasta > Date.now()) return trmCache;
-  try {
-    const hoy = new Date().toLocaleDateString("en-CA", { timeZone: "America/Bogota" }); // yyyy-mm-dd
-    const url = "https://www.datos.gov.co/resource/32sa-8pi3.json?$order=vigenciadesde%20DESC&$limit=1"
-      + "&$where=vigenciadesde%3C%3D%27" + hoy + "T00:00:00%27";
-    const r = await fetch(url);
-    const fila = r.ok ? (await r.json())[0] : null;
-    const valor = Number(fila && fila.valor);
-    if (valor >= TRM_MIN && valor <= TRM_MAX) {
-      // Si ya habia una TRM y la nueva salta >10%, se descarta (dato roto o envenenado).
-      if (trmCache && Math.abs(valor - trmCache.valor) > trmCache.valor * 0.10) return trmCache;
-      trmCache = { valor, fecha: String(fila.vigenciadesde).slice(0, 10), hasta: Date.now() + 3 * 3600_000 };
-      return trmCache;
-    }
-  } catch (e) { console.error("[TRM] datos.gov.co no respondio:", e); }
-  return trmCache; // ultima conocida (o null si nunca hubo)
-}
+// TRM del dia: validacion, timeout y cacheo robustos viven en server/trm.ts (Tarea 4, 2026-10-05)
+// — igual que cuentas.ts, separado de este archivo para poder probarse con node:test sin red.
 
 app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
   // APAGADO hasta que Leonardo defina la entrega (05-oct): la landing manda a contacto. Encender
@@ -723,7 +705,7 @@ app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
       return res.status(503).json({ error: "Pagos no disponibles en este momento." });
     }
     const trm = await trmHoy();
-    if (!trm) return res.status(503).json({ error: "No se pudo obtener la TRM del dia. Intenta en unos minutos." });
+    if (!trm) return res.status(503).json({ error: "No podemos calcular el precio de hoy; intenta más tarde." });
 
     const usd = PLANES_USD[planName];
     const cop = Math.round(usd * trm.valor);
