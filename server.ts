@@ -6,7 +6,12 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { PDFDocument } from "pdf-lib";
 
 const app = express();
-const PORT = 3000;
+// Cloud Run inyecta PORT; en local sigue siendo 3000.
+const PORT = Number(process.env.PORT || 3000);
+// Detras de Firebase Hosting + Cloud Run hay 2 proxies de Google. Sin esto req.ip es la IP
+// del proxy y TODOS los usuarios comparten el mismo cupo del limite por minuto. Con `true`
+// se tomaria la IP mas a la izquierda de X-Forwarded-For, que el cliente puede falsificar.
+app.set("trust proxy", 2);
 
 // Setup JSON and body parsing with standard limits for PDF processing
 app.use(express.json({ limit: "50mb" }));
