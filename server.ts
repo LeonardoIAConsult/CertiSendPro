@@ -14,7 +14,7 @@ import {
   confirmarEnvioExitoso,
   liberarReserva,
 } from "./server/cuentas";
-import { trmHoy } from "./server/trm";
+import { trmHoy, copDesdeUsd } from "./server/trm";
 
 const app = express();
 // Cloud Run inyecta PORT; en local sigue siendo 3000.
@@ -708,7 +708,7 @@ app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
     if (!trm) return res.status(503).json({ error: "No podemos calcular el precio de hoy; intenta más tarde." });
 
     const usd = PLANES_USD[planName];
-    const cop = Math.round(usd * trm.valor);
+    const cop = copDesdeUsd(usd, trm.valor); // misma formula que /api/precios (D3): no se duplica.
     const base = process.env.APP_URL || "http://localhost:3000";
     const ahora = Date.now();
     // La ruta correcta es /checkout/preferences; /v1/preferences no existe ("resource not found"),
@@ -745,12 +745,39 @@ app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
     res.json({
       success: true,
       initPoint: data.init_point,
-      cop, usd, trm: trm.valor, fechaTrm: trm.fecha
+      cop, usd, trm: trm.valor, fechaTrm: trm.fechaDesde
     });
   } catch (error: any) {
     // El detalle (respuesta de MP) va al log del servidor, no al navegador.
     console.error("Error al crear preferencia de Mercado Pago:", error);
     res.status(500).json({ error: "No se pudo iniciar el pago con Mercado Pago." });
+  }
+});
+
+// Endpoint publico de precios del dia (D3, decision del Brain 2026-10-05, Tarea 4): la web lo usa
+// para mostrar "≈ $X COP hoy" ANTES de pagar, sin exigir sesion. Vive bajo /api, asi que hereda el
+// limitador de peticiones por IP ya montado arriba (`app.use("/api", ...)`) sin duplicar logica.
+// El COP de cada plan sale de la MISMA formula que /api/mercadopago/create-preference
+// (`copDesdeUsd`), para que nunca se muestre un precio distinto del que de verdad se cobra.
+app.get("/api/precios", async (_req, res) => {
+  try {
+    const trm = await trmHoy();
+    if (!trm) {
+      return res.status(503).json({ error: "No podemos calcular el precio de hoy; intenta más tarde." });
+    }
+    const usdPaquete = PLANES_USD["CertiSend Pay-as-you-go Bundle"];
+    const usdPro = PLANES_USD["CertiSend Pro Monthly"];
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.json({
+      trm: trm.valor,
+      fechaDesde: trm.fechaDesde,
+      fechaHasta: trm.fechaHasta,
+      paquete: { usd: usdPaquete, cop: copDesdeUsd(usdPaquete, trm.valor) },
+      pro: { usd: usdPro, cop: copDesdeUsd(usdPro, trm.valor) },
+    });
+  } catch (error: any) {
+    console.error("Error al calcular /api/precios:", error);
+    res.status(503).json({ error: "No podemos calcular el precio de hoy; intenta más tarde." });
   }
 });
 

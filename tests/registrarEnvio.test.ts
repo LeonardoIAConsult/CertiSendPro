@@ -1,9 +1,11 @@
 // Pruebas de las funciones TRANSACCIONALES de server/cuentas.ts (Tarea 3, corregida tras el
-// NO-GO del REVISOR_EXTERNO_LAP, vuelta 18, 2026-10-05). Usan el doble de Firestore de
+// NO-GO del REVISOR_EXTERNO_LAP, vuelta 18 y vuelta 20, 2026-10-05). Usan el doble de Firestore de
 // tests/_fakeFirestore.ts: nunca tocan la base de datos real ni la red (mismo patron que
 // tests/decidirLote.test.ts). Cubren:
 //   G3  — confirmarEnvioExitosoTx lee TODO antes de escribir (y la mutacion que demuestra el bug).
 //   M19 — reservarEnvioTx no deja que envios paralelos superen el cupo del lote.
+//   M26 — contador `reservadosPaquete` desincronizado: se recalcula antes de rechazar (D4).
+//   B23 — un Paquete VENCIDO nunca reserva, aunque el saldo nominal diga que hay (D5).
 //   "10 exitos + 2 fallos ⇒ el saldo baja exactamente 10" sobre cuentas.ts con el doble.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -219,4 +221,59 @@ test("M23: tras confirmar el envio de L1, el cupo liberado SI alcanza para L2", 
   // Con el saldo ya en 0, L2 ya no puede reservar (correcto: no queda nada que reservar).
   const r2 = await db.runTransaction((tx) => reservarEnvioTx(tx, lote2Ref, cuentaRef, "u1"));
   assert.equal(r2.ok, false, "sin saldo restante, L2 debe rechazarse");
+});
+
+// ── D4/M26 (NO-GO vuelta 20): contador reservadosPaquete desincronizado se recalcula ──────────
+
+test("M26: reservadosPaquete desincronizado (dice 5, el real son 2) se recalcula y acepta", async () => {
+  const db = new FirestoreFalso();
+  // El contador de la cuenta dice que no queda saldo (5 restantes, 5 "reservados"), pero sumando
+  // de verdad los lotes Paquete no expirados de este uid solo hay 2 reservados.
+  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete", reservados: 2 }));
+  db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 5, reservadosPaquete: 5 }));
+  const loteRef = db.doc("lotes/L1");
+  const cuentaRef = db.doc("cuentas/u1");
+
+  const recalcular = async (uid: string, ahora: Date) => {
+    assert.equal(uid, "u1");
+    const lote = db.leer("lotes/L1") as Lote;
+    return lote.expira.toMillis() > ahora.getTime() ? lote.reservados : 0;
+  };
+
+  const r = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1", recalcular));
+  assert.equal(r.ok, true, "con el numero real (2), 5 > 2: debe haber saldo y aceptar");
+
+  const cuenta = db.leer("cuentas/u1") as Cuenta;
+  assert.equal(cuenta.reservadosPaquete, 3, "se guarda el recalculo (2) + 1, corrigiendo el contador desincronizado");
+});
+
+test("M26 (mutacion): sin `recalcularReservadosPaquete`, el mismo caso se rechaza (contador viejo manda)", async () => {
+  const db = new FirestoreFalso();
+  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete", reservados: 2 }));
+  db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 5, reservadosPaquete: 5 }));
+  const loteRef = db.doc("lotes/L1");
+  const cuentaRef = db.doc("cuentas/u1");
+
+  const r = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
+  assert.equal(r.ok, false, "sin recalculo, el contador viejo (5<=5) rechaza, aunque el real sea 2");
+});
+
+// ── D5/B23 (NO-GO vuelta 20): un Paquete VENCIDO nunca reserva ─────────────────────────────────
+
+test("B23: un Paquete VENCIDO rechaza la reserva aunque enviosRestantes muestre saldo", async () => {
+  const db = new FirestoreFalso();
+  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete" }));
+  const venceAyer = Timestamp.fromMillis(Date.now() - 24 * 3600_000);
+  db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 50, vence: venceAyer }));
+  const loteRef = db.doc("lotes/L1");
+  const cuentaRef = db.doc("cuentas/u1");
+
+  const r = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
+  assert.equal(r.ok, false, "un Paquete vencido no debe reservar aunque el saldo nominal diga 50");
+  if (r.ok === false) {
+    assert.equal(r.error, "Tu Paquete ya vencio. Renueva para seguir enviando.");
+  }
+
+  const lote = db.leer("lotes/L1") as Lote;
+  assert.equal(lote.reservados, 0, "el rechazo debe ser antes de escribir nada");
 });

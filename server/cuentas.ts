@@ -216,24 +216,53 @@ export interface TransaccionLike {
 }
 
 /**
- * Cuerpo transaccional de la reserva (M19, corregido vuelta 19 — M23): comprueba, ANTES de
- * llamar a Gmail, que el lote exista, sea del usuario que llama, no haya expirado, todavia tenga
- * cupo (`enviados + reservados < cantidad`) y, si su `planEfectivo` es Paquete, que el saldo de
- * la cuenta alcance para cubrir TODAS las reservas pendientes del usuario (`reservadosPaquete`
- * en `cuentas/{uid}`, no solo las de este lote — ver M23 en el tipo `Cuenta`). Si todo eso se
- * cumple, reserva 1 cupo en el lote y, si es Paquete, 1 cupo a nivel de cuenta.
+ * Recalcula `reservadosPaquete` sumando `reservados` de TODOS los lotes Paquete NO expirados de
+ * `uid` (D4/M26, decision del Brain 2026-10-05, corrige el contador de `cuentas/{uid}` cuando
+ * quedo desincronizado — p. ej. una reserva que quedo huerfana sin liberarse). Es una consulta
+ * NORMAL de Firestore (`.get()`, no `tx.get()`): corre FUERA de la transaccion a proposito, para
+ * no violar "todas las lecturas antes de cualquier escritura" (ver G3 en `confirmarEnvioExitosoTx`)
+ * ni atar el resultado al reintento optimista de la transaccion que la llama.
+ */
+export async function contarReservadosPaqueteVigentes(uid: string, ahora: Date): Promise<number> {
+  const snap = await db()
+    .collection("lotes")
+    .where("uid", "==", uid)
+    .where("planEfectivo", "==", "paquete")
+    .get();
+  let total = 0;
+  for (const doc of snap.docs) {
+    const lote = doc.data() as Lote;
+    if (lote.expira.toMillis() > ahora.getTime()) total += lote.reservados;
+  }
+  return total;
+}
+
+/**
+ * Cuerpo transaccional de la reserva (M19, corregido vuelta 19 — M23; vuelta 20 — D4/D5):
+ * comprueba, ANTES de llamar a Gmail, que el lote exista, sea del usuario que llama, no haya
+ * expirado, todavia tenga cupo (`enviados + reservados < cantidad`) y, si su `planEfectivo` es
+ * Paquete, que el Paquete no haya vencido (D5/B23: un Paquete vencido nunca reserva, aunque
+ * `enviosRestantes` todavia marque saldo nominal) y que el saldo alcance para cubrir TODAS las
+ * reservas pendientes del usuario (`reservadosPaquete` en `cuentas/{uid}`, no solo las de este
+ * lote — ver M23 en el tipo `Cuenta`). Si el contador de la cuenta parece decir que no hay saldo,
+ * y se recibio `recalcularReservadosPaquete`, se recalcula el numero real (D4/M26) ANTES de
+ * rechazar — y, si al final si se reserva, se guarda el numero corregido. Si todo eso se cumple,
+ * reserva 1 cupo en el lote y, si es Paquete, 1 cupo a nivel de cuenta.
  *
  * TODAS las lecturas (`tx.get`) ocurren antes de cualquier escritura (`tx.update`) — ver G3 en
- * `confirmarEnvioExitosoTx` para el bug que esto evita. La transaccion completa (lectura +
- * comprobacion + reserva) es atomica: si dos envios en paralelo —del mismo lote o de dos lotes
- * distintos del mismo usuario— compiten por el mismo saldo, Firestore serializa/reintenta y
- * nunca deja que ambos reserven por encima del cupo o del saldo.
+ * `confirmarEnvioExitosoTx` para el bug que esto evita. `recalcularReservadosPaquete` (D4) no usa
+ * `tx`: es una consulta normal de Firestore, fuera de esta transaccion, asi que tampoco rompe esa
+ * regla. La transaccion completa (lectura + comprobacion + reserva) es atomica: si dos envios en
+ * paralelo —del mismo lote o de dos lotes distintos del mismo usuario— compiten por el mismo
+ * saldo, Firestore serializa/reintenta y nunca deja que ambos reserven por encima del cupo o del
+ * saldo.
  */
 export async function reservarEnvioTx(
   tx: TransaccionLike,
   loteRef: any,
   cuentaRef: any,
-  uid: string
+  uid: string,
+  recalcularReservadosPaquete?: (uid: string, ahora: Date) => Promise<number>
 ): Promise<{ ok: true; lote: Lote } | { ok: false; error: string }> {
   const loteSnap = await tx.get(loteRef);
   if (!loteSnap.exists) {
@@ -251,32 +280,52 @@ export async function reservarEnvioTx(
   }
 
   let cuenta: Cuenta | null = null;
+  let reservadosPaqueteParaGuardar = 0;
   if (lote.planEfectivo === "paquete") {
     // Sigue siendo una lectura: todavia no se ejecuto ningun tx.update/tx.set en esta transaccion.
     const cuentaSnap = await tx.get(cuentaRef);
     cuenta = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
-    const restantes = cuenta ? cuenta.enviosRestantes : 0;
-    const reservadosPaquete = cuenta ? cuenta.reservadosPaquete ?? 0 : 0;
+
+    // D5/B23: un Paquete VENCIDO nunca reserva, aunque `enviosRestantes` todavia marque saldo.
+    const vencido = !cuenta || cuenta.vence === null || cuenta.vence.toMillis() <= Date.now();
+    if (vencido) {
+      return { ok: false, error: "Tu Paquete ya vencio. Renueva para seguir enviando." };
+    }
+
+    const restantes = cuenta.enviosRestantes;
+    let reservadosPaquete = cuenta.reservadosPaquete ?? 0;
+    if (restantes <= reservadosPaquete && recalcularReservadosPaquete) {
+      // D4/M26: el contador de la cuenta dice que no hay saldo; antes de rechazar, se recalcula
+      // el numero REAL sumando los lotes Paquete no expirados del usuario (fuera de esta
+      // transaccion) y se vuelve a evaluar con ese numero.
+      reservadosPaquete = await recalcularReservadosPaquete(uid, new Date());
+    }
     if (restantes <= reservadosPaquete) {
       return { ok: false, error: "Tu Paquete ya no tiene saldo disponible para este envio." };
     }
+    reservadosPaqueteParaGuardar = reservadosPaquete;
   }
 
   tx.update(loteRef, { reservados: lote.reservados + 1 });
   if (lote.planEfectivo === "paquete" && cuenta) {
-    tx.update(cuentaRef, { reservadosPaquete: (cuenta.reservadosPaquete ?? 0) + 1 });
+    // Se guarda `reservadosPaqueteParaGuardar + 1`: si hubo recalculo (D4/M26), esta escritura
+    // tambien corrige el contador desincronizado de la cuenta, no solo desbloquea esta reserva.
+    tx.update(cuentaRef, { reservadosPaquete: reservadosPaqueteParaGuardar + 1 });
   }
   return { ok: true, lote };
 }
 
-/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
+/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales, con el
+ * recalculo real (D4) por si el contador de la cuenta esta desincronizado. */
 export async function reservarEnvio(
   loteId: string,
   uid: string
 ): Promise<{ ok: true; lote: Lote } | { ok: false; error: string }> {
   const loteRef = db().collection("lotes").doc(loteId);
   const cuentaRef = db().collection("cuentas").doc(uid);
-  return db().runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, uid));
+  return db().runTransaction((tx) =>
+    reservarEnvioTx(tx, loteRef, cuentaRef, uid, contarReservadosPaqueteVigentes)
+  );
 }
 
 /**
