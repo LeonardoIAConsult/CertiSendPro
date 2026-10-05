@@ -1,5 +1,5 @@
 # Cobro real con planes en CertiSend Pro
-**Fecha:** 2026-10-05 · **Autor:** Leonardo Antolinez · **Estado:** borrador v1
+**Fecha:** 2026-10-05 · **Autor:** Leonardo Antolinez · **Estado:** aprobado v1 (Leonardo, 2026-10-05)
 
 ## 1. Overview
 CertiSend pasa de "todo gratis con botones de compra que no cobran" a tres planes reales: **Gratis**, **Paquete de 150 envíos** (US$15, un mes) y **Pro ilimitado** (US$29 al mes, suscripción). Quien paga recibe de verdad lo que compró, la app lo respeta al enviar, y se cobra en pesos colombianos a la TRM oficial. Para qué: que CertiSend genere ingresos sin prometer nada que no entrega.
