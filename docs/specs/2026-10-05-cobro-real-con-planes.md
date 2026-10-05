@@ -1,5 +1,5 @@
 # Cobro real con planes en CertiSend Pro
-**Fecha:** 2026-10-05 · **Autor:** Leonardo Antolinez · **Estado:** aprobado v1 (Leonardo, 2026-10-05)
+**Fecha:** 2026-10-05 · **Autor:** Leonardo Antolinez · **Estado:** aprobado v2 (Leonardo, 2026-10-05: "aplícalo todo" — v1 + requisitos del dictamen de Abogado_LAP, `Brain_Master_Business/OUTPUTS/legal/certisend-cobro-2026-10-05/`)
 
 ## 1. Overview
 CertiSend pasa de "todo gratis con botones de compra que no cobran" a tres planes reales: **Gratis**, **Paquete de 150 envíos** (US$15, un mes) y **Pro ilimitado** (US$29 al mes, suscripción). Quien paga recibe de verdad lo que compró, la app lo respeta al enviar, y se cobra en pesos colombianos a la TRM oficial. Para qué: que CertiSend genere ingresos sin prometer nada que no entrega.
@@ -19,14 +19,22 @@ CertiSend pasa de "todo gratis con botones de compra que no cobran" a tres plane
   - Plan **Gratis**: hasta 15 certificados por lote, para siempre.
   - **Paquete**: 150 envíos con éxito por US$15, válidos 1 mes desde el pago o hasta gastarlos, lo que ocurra primero. Al pagar, el usuario elige si se **renueva solo cada mes** o es un pago único.
   - **Pro**: envíos ilimitados por US$29 al mes, suscripción que se cobra cada mes en pesos, con el monto **ajustado cada mes a la TRM oficial** y aviso al cliente antes del cobro.
-  - Cobro siempre en **pesos colombianos**; la web muestra el precio en dólares **y** el equivalente en pesos del día antes de pagar.
+  - Cobro siempre en **pesos colombianos**. El **precio principal es el monto exacto en COP** (con impuestos, según confirme el contador); el dólar se muestra solo como referencia ("equivale a US$29 a la TRM del DD/MM"). El resumen antes de pagar muestra el monto exacto en COP.
+  - **Términos y condiciones de venta y suscripción** publicados en todo momento y aceptados con una casilla sin marcar antes de pagar; se guarda la prueba de aceptación (usuario, versión, fecha y hora, monto, referencia de pago).
+  - **Precio de Pro por fórmula pactada:** US$29 × TRM certificada vigente el día del aviso, redondeada al peso. Aviso por correo al menos 5 días hábiles antes del cobro con el monto exacto, la TRM y su fecha. **Se cobra exactamente lo avisado**, nunca más. Si el monto sube más del 10 % frente al mes anterior, se pide aceptación expresa antes de cobrar. El Paquete renovable sigue las mismas reglas.
+  - Excepción del derecho de retracto declarada en el checkout (el plan se activa de inmediato con su acuerdo) y guardada como prueba; si el plan no llega a activarse, el retracto se mantiene.
+  - **Correo de confirmación al comprador** tras cada compra o renovación (plan, monto en COP, TRM, vigencia, cómo cancelar, enlace a los términos).
+  - Si Mercado Pago reversa un pago (contracargo), el plan vuelve a Gratis y Leonardo recibe aviso.
+  - Cancelar desde la app cancela también la suscripción en Mercado Pago y no pide más pasos que suscribirse.
+  - **Identidad del proveedor** visible (nombre, documento, dirección de notificación, teléfono) y un único correo de contacto: contacto@leonardoantolinez.com.
+  - Política de privacidad actualizada (cuenta, plan y pagos guardados; Mercado Pago como encargado) antes de cobrar.
   - El plan se **activa solo cuando Mercado Pago confirma el pago** (no por volver a la página).
   - El usuario ve su **plan, envíos restantes y fecha de vencimiento** dentro de la app.
   - El usuario puede **cancelar** la renovación del paquete o la suscripción Pro desde la app; conserva lo pagado hasta su fecha.
   - Leonardo recibe un **aviso por cada venta, renovación, cancelación y pago fallido**.
   - Textos de planes alineados a lo real: Pro = ilimitado + soporte prioritario por correo; asunto y cuerpo personalizados se anuncian como disponibles en todos los planes; se retira "escaneo prioritario" y "24/7".
 - **NO incluye (v1):**
-  - Facturación electrónica DIAN (se emite aparte, manual).
+  - Facturación electrónica DIAN automatizada. **Antes de la primera venta un contador confirma** régimen, IVA y cómo facturar.
   - Cupones, descuentos, prueba gratis de Pro, planes por equipo o varios usuarios por cuenta.
   - Cobro en dólares o con PayPal.
   - Reembolsos automáticos (se gestionan a mano desde Mercado Pago).
@@ -35,7 +43,7 @@ CertiSend pasa de "todo gratis con botones de compra que no cobran" a tres plane
 
 ## 5. Comportamiento esperado
 **Elegir y pagar**
-- Cuando el usuario abre los planes → ve Gratis, Paquete y Pro con el precio en dólares y "≈ $X COP hoy, se cobra en pesos a la TRM oficial".
+- Cuando el usuario abre los planes → ve Gratis, Paquete y Pro con el **precio exacto en pesos del día** y, como referencia, el equivalente en dólares. El Paquete dice "150 envíos · 1 mes · los no usados vencen y no se acumulan".
 - Cuando el usuario pulsa **Comprar paquete** → elige "pago único" o "renovar cada mes" → va a Mercado Pago con el monto en pesos del día.
 - Cuando el usuario pulsa **Suscribirme a Pro** → ve el monto de este mes en pesos y el aviso "el monto se ajusta cada mes a la TRM; te avisamos antes de cada cobro" → va a Mercado Pago a autorizar la suscripción.
 - Cuando el usuario vuelve de Mercado Pago → la app dice "Estamos confirmando tu pago"; cuando llega la confirmación, el plan aparece activo con su fecha. Si no llega en unos minutos, dice "Tu pago está en revisión; te avisamos por correo".
@@ -49,7 +57,7 @@ CertiSend pasa de "todo gratis con botones de compra que no cobran" a tres plane
 - Cuando un usuario Pro envía → no hay límite.
 
 **Renovaciones, cambios y cancelación**
-- Cada mes, antes de cobrar Pro → el usuario recibe un aviso con el monto en pesos de ese mes.
+- Cada mes, al menos 5 días hábiles antes de cobrar Pro (o el Paquete renovable) → el usuario recibe el aviso con el monto exacto en pesos, la TRM y su fecha, y un enlace para cancelar; se cobra exactamente ese monto. Si subió más del 10 %, no se cobra hasta que el usuario lo acepte.
 - Cuando el cobro mensual falla → el usuario recibe aviso y conserva el plan hasta la fecha pagada; si no se resuelve, vuelve a Gratis.
 - Cuando el usuario cancela → sigue con su plan hasta la fecha pagada y luego vuelve a Gratis; no se le cobra de nuevo.
 
@@ -68,4 +76,7 @@ CertiSend pasa de "todo gratis con botones de compra que no cobran" a tres plane
 | Envío a medias en un lote | Al usuario de Paquete no le alcanzan los envíos | Se valida el saldo antes de empezar el lote |
 | Abuso de las rutas de cobro | Peticiones masivas para crear cobros | Tope global de solicitudes de cobro por minuto, además del límite por usuario |
 | El plan se ofrece pero el cobro está apagado | Falta configuración en producción | El interruptor de pagos sigue existiendo; la web solo muestra "Comprar" cuando está encendido |
+| Cobro distinto del avisado | La TRM cambia entre el aviso y el cobro, o falla el dato | El monto se calcula y se guarda el día del aviso y se cobra ese; sin TRM válida no se avisa ni se cobra con un dato viejo (se reintenta) |
+| Contracargo o reversión | El cliente pide la reversión a su banco | Plan a Gratis, aviso a Leonardo; política de reembolsos en los términos (≤ 30 días) |
+| Cobro sin contrato aceptado | El usuario paga sin aceptar los términos | No se crea el cobro sin la casilla aceptada; se guarda la prueba |
 | Promesas que no se cumplen | Textos de planes desalineados | Los textos de planes se revisan contra lo que la app hace antes de lanzar |

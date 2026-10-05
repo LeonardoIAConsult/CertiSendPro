@@ -25,6 +25,19 @@ Hoy no hay planes ni base de datos: todo es gratis y en memoria. El cobro nunca 
 - **Depende de:** ninguna (corre en paralelo con 1-3; **bloquea la Tarea 13**).
 - **Criterio de hecho:** cada hallazgo del dictamen tiene destino escrito (tarea, cambio de spec u orden a Legal_LAP); los de severidad alta están resueltos antes del lanzamiento.
 
+#### Destino de cada hallazgo del dictamen (Tarea 0, resuelta 2026-10-05)
+| Hallazgo | Destino |
+|---|---|
+| H1 términos, H10 prueba de aceptación, H7 retracto | Legal_LAP redacta `docs/legal/` + **Tarea 14** (páginas, casilla, registro de aceptación) |
+| H11 privacidad, H9 identidad | Legal_LAP (`politica-de-privacidad.md`) + Tarea 11 (bloque de identidad, un solo correo) |
+| H5 textos del Paquete, H4 precio principal en COP, H14/H15/H16 | Tarea 11 |
+| H2 fórmula pactada, H3 cobrar lo avisado, H8 renovación del Paquete | Tareas 7 y 8 (monto calculado y guardado el día del aviso; aviso ≥ 5 días hábiles; tope 10 % con aceptación expresa) |
+| H6 contracargos y cancelación en un paso | Tarea 9 |
+| H10 confirmación al comprador | Tareas 5 y 6 |
+| H13 reembolsos | Legal_LAP (términos) |
+| H12 IVA/DIAN | Fuera del código: **contador antes de la primera venta** (bloquea Tarea 13) |
+| Vía plena | Abogado colegiado revisa `docs/legal/` antes de Tarea 13 |
+
 ### Tarea 1 — Identidad del usuario en el servidor
 - **Qué:** que el servidor sepa quién llama. El navegador manda el ID token de Firebase en cada `/api` sensible; el servidor lo verifica (firebase-admin con las credenciales por defecto de Cloud Run) y obtiene el `uid`. Sin token válido, las rutas de cobro y de envío responden 401.
 - **Dónde:** `server.ts` (middleware), `src/firebaseAuth.ts` (obtener ID token), llamadas `fetch` de `src/App.tsx`.
@@ -71,7 +84,8 @@ Hoy no hay planes ni base de datos: todo es gratis y en memoria. El cobro nunca 
 - **Qué:** alta de suscripción Pro en COP del día; una tarea programada mensual (Cloud Scheduler → ruta protegida) recalcula el monto con la TRM, lo actualiza en Mercado Pago **antes** del cobro y avisa al cliente con el nuevo monto. Mientras la suscripción esté al día, el usuario es Pro.
 - **Dónde:** `server.ts` (alta, `/api/cron/ajuste-pro` protegido), Cloud Scheduler, webhook.
 - **Depende de:** Tareas 4, 5, 6 y 0 (las condiciones legales del cambio de monto).
-- **Criterio de hecho:** al autorizar la suscripción, el usuario aparece como Pro; ejecutar el ajuste a mano cambia el monto de la suscripción y el cliente recibe el aviso con el monto nuevo; la ruta del ajuste rechaza llamadas sin la credencial de Scheduler.
+- **Requisitos legales (H2/H3/H8):** el aviso sale al menos 5 días hábiles antes del cobro con monto exacto, TRM y fecha; ese monto se guarda y es exactamente el que se cobra; si sube > 10 % frente al mes anterior no se cobra hasta aceptación expresa; sin TRM válida no se avisa ni se cobra (se reintenta). Mismas reglas para el Paquete renovable (Tarea 7).
+- **Criterio de hecho:** al autorizar la suscripción, el usuario aparece como Pro; ejecutar el ajuste a mano cambia el monto de la suscripción y el cliente recibe el aviso con el monto nuevo; el cobro siguiente es igual al avisado; con una subida > 10 % simulada no se cobra sin aceptación; la ruta del ajuste rechaza llamadas sin la credencial de Scheduler.
 
 ### Tarea 9 — Cancelación y pagos fallidos
 - **Qué:** botón "Cancelar renovación" para Paquete con renovación y para Pro; el usuario conserva su plan hasta la fecha pagada. Si Mercado Pago informa cobro fallido, aviso al cliente y a Leonardo; si no se regulariza a la fecha de vencimiento, vuelve a Gratis.
@@ -97,8 +111,14 @@ Hoy no hay planes ni base de datos: todo es gratis y en memoria. El cobro nunca 
 - **Depende de:** Tarea 1.
 - **Criterio de hecho:** 61 peticiones de cobro en un minuto → a partir del tope responde 429, aun rotando `X-Forwarded-For` contra la URL `*.run.app`.
 
+### Tarea 14 — Términos, retracto y prueba de aceptación
+- **Qué:** publicar en la app (y enlazar desde el footer y el checkout) los términos y la política de privacidad redactados por Legal_LAP; casilla sin marcar "Acepto los términos" obligatoria para crear cualquier cobro; texto de excepción de retracto; el servidor guarda la aceptación (usuario, versión de los términos, fecha y hora, plan, monto, referencia) y rechaza crear cobros sin ella.
+- **Dónde:** `src/components/` (páginas legales), `src/components/LandingPage.tsx` / vista de planes, `server.ts`, Firestore.
+- **Depende de:** Tareas 1, 2 y los documentos de Legal_LAP revisados por Abogado_LAP.
+- **Criterio de hecho:** sin marcar la casilla no se puede pagar (y la API rechaza el cobro); con ella, la aceptación queda guardada con la versión vigente; los términos se ven desde cualquier página.
+
 ### Tarea 13 — Lanzamiento (flujo productos vitrina)
 - **Qué:** puertas completas (Verify_After_Changes_LAP contra este plan y el spec, /code-review, /security-review, Sentinel_LAP diff —es pagos—, QA_Release_LAP, REVISOR_EXTERNO_LAP hasta GO), encender `PAGOS_ACTIVOS`, desplegar Cloud Run + reglas Firestore + Hosting, **un pago real de bajo monto** de cada tipo (Paquete único, Paquete renovable, Pro) verificado de punta a punta y cancelado/reembolsado manualmente, README y landing actualizados, memoria y changelog.
 - **Dónde:** todo el repo + `Brain_Master_Business/WIKI/productos-vitrina.md`.
-- **Depende de:** Tareas 0-12.
+- **Depende de:** Tareas 0-12 y 14; **contador** (IVA/facturación) y **abogado colegiado** (documentos legales) con visto bueno; datos pendientes del proveedor (documento y dirección) completados por Leonardo.
 - **Criterio de hecho:** los tres pagos reales activan el plan correcto, Leonardo recibió los avisos, la cancelación funciona, y el REVISOR da GO sobre el diff final.
