@@ -41,7 +41,7 @@ app.use((req, res, next) => {
     }
     res.setHeader("Access-Control-Allow-Origin", origen);
     res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   }
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
@@ -92,12 +92,14 @@ declare global {
   }
 }
 
-async function verificarIdToken(req: express.Request): Promise<{ uid: string; email: string | null } | null> {
+async function verificarIdToken(req: express.Request, comprobarRevocado = false): Promise<{ uid: string; email: string | null } | null> {
   const encabezado = req.headers.authorization || "";
   const match = /^Bearer\s+(.+)$/.exec(encabezado);
   if (!match) return null;
   try {
-    const decoded = await getAuth(obtenerFirebaseApp()).verifyIdToken(match[1]);
+    // En rutas de cobro/envio se comprueba ademas que el token no este revocado (cuenta
+    // deshabilitada o sesion cerrada), no solo que no haya caducado.
+    const decoded = await getAuth(obtenerFirebaseApp()).verifyIdToken(match[1], comprobarRevocado);
     return { uid: decoded.uid, email: decoded.email || null };
   } catch (error) {
     // Token ausente, falso, expirado, o sin red/credenciales para verificarlo: en todos los
@@ -109,7 +111,7 @@ async function verificarIdToken(req: express.Request): Promise<{ uid: string; em
 
 // Rutas de cobro y de envio: sin un token valido, 401. El uid nunca llega por el body.
 const exigirAuth: express.RequestHandler = async (req, res, next) => {
-  const identidad = await verificarIdToken(req);
+  const identidad = await verificarIdToken(req, true);
   if (!identidad) {
     return res.status(401).json({ error: "Se requiere iniciar sesion para usar esta funcion." });
   }

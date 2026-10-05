@@ -47,8 +47,17 @@ export async function obtenerCuenta(uid: string): Promise<Cuenta> {
   }
 
   const nueva: Cuenta = { ...CUENTA_GRATIS_BASE, actualizado: Timestamp.now() };
-  await ref.set(nueva);
-  return nueva;
+  try {
+    // create() falla si el documento ya existe: nunca pisa una cuenta que el webhook acaba de
+    // pasar a Paquete/Pro entre el get() y esta escritura (REVISOR M16; set() la habria borrado).
+    await ref.create(nueva);
+    return nueva;
+  } catch (error: any) {
+    if (error?.code === 6 /* ALREADY_EXISTS */) {
+      return (await ref.get()).data() as Cuenta;
+    }
+    throw error;
+  }
 }
 
 /**
