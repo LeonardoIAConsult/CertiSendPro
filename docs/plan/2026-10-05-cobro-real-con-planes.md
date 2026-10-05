@@ -37,6 +37,10 @@ Hoy no hay planes ni base de datos: todo es gratis y en memoria. El cobro nunca 
 | H13 reembolsos | Legal_LAP (términos) |
 | H12 IVA/DIAN | Fuera del código: **contador antes de la primera venta** (bloquea Tarea 13) |
 | Vía plena | Abogado colegiado revisa `docs/legal/` antes de Tarea 13 |
+| Ronda 2 (Abogado_LAP sobre borradores): N2 textos públicos falsos | Tarea 11 (retirar «precisión humana», «nunca persistidos», «máxima entregabilidad», USD; reemplazar `PrivacyPolicy.tsx` por la v2.0) |
+| Ronda 2: N3 cláusula de envío equivocado | **Tarea 15** (condiciones de producto) |
+| Ronda 2: H3 en código (TRM vieja/caché vencida) | Tarea 4 (nada de TRM se publica antes) |
+| Ronda 2: N6 precio distinto entre tarjeta y resumen | Tareas 7, 8 y 10 (avisar y reconfirmar si sube) |
 
 ### Tarea 1 — Identidad del usuario en el servidor
 - **Qué:** que el servidor sepa quién llama. El navegador manda el ID token de Firebase en cada `/api` sensible; el servidor lo verifica (firebase-admin con las credenciales por defecto de Cloud Run) y obtiene el `uid`. Sin token válido, las rutas de cobro y de envío responden 401.
@@ -117,8 +121,14 @@ Hoy no hay planes ni base de datos: todo es gratis y en memoria. El cobro nunca 
 - **Depende de:** Tareas 1, 2 y los documentos de Legal_LAP revisados por Abogado_LAP.
 - **Criterio de hecho:** sin marcar la casilla no se puede pagar (y la API rechaza el cobro); con ella, la aceptación queda guardada con la versión vigente; los términos se ven desde cualquier página.
 
+### Tarea 15 — Revisión segura antes de enviar (bug de homónimos)
+- **Qué:** en la pantalla de revisión, mostrar para cada certificado el nombre leído por la IA y el destinatario con **nombre y correo**; el emparejamiento manual se hace por la **fila** del destinatario, no por su nombre (hoy, con dos personas del mismo nombre, siempre se toma la primera: `handleManualPairing` en `src/App.tsx`); la confirmación de envío se registra en el servidor (uid, lote, número de envíos, fecha y hora).
+- **Dónde:** `src/App.tsx`, `server.ts` (registro de confirmación, junto a `/api/lote/iniciar`).
+- **Depende de:** Tarea 3.
+- **Criterio de hecho:** con dos destinatarios homónimos en la hoja, elegir el segundo en la revisión envía al segundo (prueba en navegador); la pantalla muestra los correos; el registro de confirmación queda guardado.
+
 ### Tarea 13 — Lanzamiento (flujo productos vitrina)
 - **Qué:** puertas completas (Verify_After_Changes_LAP contra este plan y el spec, /code-review, /security-review, Sentinel_LAP diff —es pagos—, QA_Release_LAP, REVISOR_EXTERNO_LAP hasta GO), encender `PAGOS_ACTIVOS`, desplegar Cloud Run + reglas Firestore + Hosting, **un pago real de bajo monto** de cada tipo (Paquete único, Paquete renovable, Pro) verificado de punta a punta y cancelado/reembolsado manualmente, README y landing actualizados, memoria y changelog.
 - **Dónde:** todo el repo + `Brain_Master_Business/WIKI/productos-vitrina.md`.
-- **Depende de:** Tareas 0-12 y 14; **contador** (IVA/facturación) y **abogado colegiado** (documentos legales) con visto bueno; datos pendientes del proveedor (documento y dirección) completados por Leonardo.
+- **Depende de:** Tareas 0-12, 14 y 15; **contador** (IVA/facturación) y **abogado colegiado** (documentos legales) con visto bueno; datos pendientes del proveedor (documento y dirección) completados por Leonardo.
 - **Criterio de hecho:** los tres pagos reales activan el plan correcto, Leonardo recibió los avisos, la cancelación funciona, y el REVISOR da GO sobre el diff final.
