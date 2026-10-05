@@ -22,5 +22,12 @@ service cloud.firestore {
     match /lotes/{loteId} {
       allow read, write: if false;
     }
+
+    // preferencias/{id}: precio en COP/TRM que se ofrecio al crear un cobro (Tarea 6, 2026-10-05).
+    // El webhook de Mercado Pago la vuelve a leer para comprobar que lo cobrado coincide con lo
+    // ofrecido; el navegador nunca lee ni escribe esto.
+    match /preferencias/{id} {
+      allow read, write: if false;
+    }
   }
 }

@@ -35,7 +35,18 @@ export interface Cuenta {
    * este cambio: se lee siempre con `?? 0`.
    */
   reservadosPaquete: number;
+  /** Ultimo pago de Mercado Pago que activo o renovo un plan (Tarea 6, 2026-10-05). `null` si la
+   * cuenta nunca ha pagado nada (sigue en Gratis desde que se creo). */
+  ultimoPago: UltimoPago | null;
   actualizado: Timestamp;
+}
+
+export interface UltimoPago {
+  /** Id del pago en Mercado Pago (tambien la clave de `pagosProcesados/{id}`). */
+  id: string;
+  cop: number;
+  trm: number;
+  fecha: Timestamp;
 }
 
 const CUENTA_GRATIS_BASE: Omit<Cuenta, "actualizado"> = {
@@ -45,14 +56,16 @@ const CUENTA_GRATIS_BASE: Omit<Cuenta, "actualizado"> = {
   renueva: false,
   mpSuscripcionId: null,
   reservadosPaquete: 0,
+  ultimoPago: null,
 };
 
-// NOTA para la Tarea 6 (webhook de Mercado Pago, pendiente de implementar): al activar un plan
-// "pro", el webhook DEBE escribir `vence` en la MISMA escritura (mismo tx.update/tx.set) que
-// `plan: "pro"`. `decidirLote` solo trata "pro" como vigente si `vence` queda en el futuro
-// (ver `vigente` abajo): un `plan: "pro"` escrito sin `vence`, o con `vence` actualizado en un
-// paso aparte, deja una ventana donde la cuenta ya cobrada se trata como Gratis, o donde una
-// falla a mitad de camino deja "pro" con una fecha de vencimiento vieja o inexistente.
+// NOTA para la Tarea 8 (suscripcion Pro, pendiente de implementar): igual que
+// `activarPaqueteSiNoProcesadoTx` hace para el Paquete (Tarea 6, de abajo), al activar un plan
+// "pro" el webhook DEBE escribir `vence` en la MISMA escritura (mismo tx.set) que `plan: "pro"`.
+// `decidirLote` solo trata "pro" como vigente si `vence` queda en el futuro (ver `vigente` abajo):
+// un `plan: "pro"` escrito sin `vence`, o con `vence` actualizado en un paso aparte, deja una
+// ventana donde la cuenta ya cobrada se trata como Gratis, o donde una falla a mitad de camino
+// deja "pro" con una fecha de vencimiento vieja o inexistente.
 
 /**
  * Devuelve la cuenta del usuario; si no existe todavia, la crea como Gratis.
@@ -92,6 +105,98 @@ export async function marcarProcesado(mpId: string): Promise<boolean> {
     tx.set(ref, { procesadoEn: Timestamp.now() });
     return true;
   });
+}
+
+// ── Preferencias de cobro y activacion del Paquete (Tarea 6, webhook de Mercado Pago, 2026-10-05) ──
+// `create-preference` guarda aqui, ANTES de llamar a Mercado Pago, el precio real que calculo con
+// la TRM del dia. El webhook, cuando MP confirma un pago, vuelve a leer esta misma fila por el id
+// aleatorio que viaja en `external_reference` y comprueba que el monto cobrado coincide con el que
+// de verdad se ofrecio — no le basta con lo que diga el propio `external_reference`, que viaja por
+// la red de MP y, aunque MP lo firma, esta es la defensa barata de "contra que se compara".
+
+export interface PreferenciaGuardada {
+  uid: string;
+  /** Hoy solo puede ser "paquete" (Tarea 6); "pro" es la Tarea 8. */
+  plan: Plan;
+  cop: number;
+  trm: number;
+  fechaTrm: string;
+  creado: Timestamp;
+}
+
+/** Guarda `preferencias/{id}` antes de pedirle la preferencia a Mercado Pago. Coleccion con
+ * deny-all en firestore.rules: solo el servidor la toca. */
+export async function guardarPreferencia(
+  id: string,
+  datos: Omit<PreferenciaGuardada, "creado">
+): Promise<void> {
+  await db()
+    .collection("preferencias")
+    .doc(String(id))
+    .set({ ...datos, creado: Timestamp.now() });
+}
+
+/** Lee `preferencias/{id}`; `null` si no existe (id inventado o de otro producto). */
+export async function obtenerPreferencia(id: string): Promise<PreferenciaGuardada | null> {
+  const snap = await db().collection("preferencias").doc(String(id)).get();
+  return snap.exists ? (snap.data() as PreferenciaGuardada) : null;
+}
+
+export const ENVIOS_PAQUETE = 150;
+
+/** Misma fecha, 1 mes despues (aritmetica de calendario, no "+30 dias"): el Paquete vence el
+ * mismo dia del mes siguiente al pago, igual que lo describe el spec ("1 mes desde el pago"). */
+export function sumarUnMes(fecha: Date): Date {
+  const resultado = new Date(fecha.getTime());
+  resultado.setUTCMonth(resultado.getUTCMonth() + 1);
+  return resultado;
+}
+
+/**
+ * Cuerpo transaccional de la activacion del Paquete tras un pago de Mercado Pago aprobado y
+ * verificado (Tarea 6). Idempotencia y activacion van en la MISMA transaccion (a proposito: NO se
+ * usa `marcarProcesado`, que abre su propia transaccion por separado — eso dejaria una ventana
+ * donde dos avisos simultaneos del mismo pago podrian leer "no procesado" los dos antes de que
+ * cualquiera alcance a marcarlo). Ambas lecturas (`tx.get(pagoRef)`) van antes de cualquier
+ * escritura; la cuenta se escribe en UNA sola llamada (`tx.set`, reemplaza el documento completo:
+ * nunca se "suman" los 150 al saldo anterior, se vuelve a fijar — spec: "no se acumulan").
+ *
+ * Devuelve "repetido" sin tocar la cuenta si `paymentId` ya estaba marcado como procesado.
+ */
+export async function activarPaqueteSiNoProcesadoTx(
+  tx: TransaccionLike,
+  pagoRef: any,
+  cuentaRef: any,
+  datos: { paymentId: string; cop: number; trm: number; fecha: Timestamp }
+): Promise<"activado" | "repetido"> {
+  const pagoSnap = await tx.get(pagoRef);
+  if (pagoSnap.exists) return "repetido";
+
+  tx.set(pagoRef, { procesadoEn: Timestamp.now() });
+  tx.set(cuentaRef, {
+    plan: "paquete",
+    enviosRestantes: ENVIOS_PAQUETE,
+    vence: Timestamp.fromDate(sumarUnMes(datos.fecha.toDate())),
+    renueva: false, // pago unico (Tarea 6); "renovar cada mes" es la Tarea 7.
+    mpSuscripcionId: null,
+    reservadosPaquete: 0, // D4/requisito de la Tarea 6: nunca hereda reservas de un ciclo anterior.
+    ultimoPago: { id: datos.paymentId, cop: datos.cop, trm: datos.trm, fecha: datos.fecha },
+    actualizado: Timestamp.now(),
+  });
+  return "activado";
+}
+
+/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
+export async function activarPaqueteSiNoProcesado(
+  uid: string,
+  paymentId: string,
+  datos: { cop: number; trm: number; fecha: Timestamp }
+): Promise<"activado" | "repetido"> {
+  const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
+  const cuentaRef = db().collection("cuentas").doc(uid);
+  return db().runTransaction((tx) =>
+    activarPaqueteSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, ...datos })
+  );
 }
 
 // ── Limites de lotes de envio en el servidor (Tarea 3, 2026-10-05) ──────────────────────────

@@ -1,0 +1,362 @@
+// Pruebas del webhook de Mercado Pago (Tarea 6, cobro real con planes, 2026-10-05). Inyectan un
+// fetch falso de MP (via `obtenerPago`) y el doble de Firestore de tests/_fakeFirestore.ts para la
+// activacion real del Paquete (nunca un mock que "simula el exito": se usa la MISMA funcion
+// transaccional que produccion, sobre un almacen falso) — mismo patron que
+// tests/registrarEnvio.test.ts. Cubre:
+//   - aprobado y correcto -> activa 150, vence +1 mes, reservadosPaquete 0.
+//   - mismo pago dos veces -> una sola activacion (idempotencia real, no un contador de llamadas).
+//   - referencia de Faro -> ignorado con 200, nunca activa.
+//   - monto distinto -> no activa.
+//   - status pending/rejected -> no activa.
+//   - cuerpo falsificado (approved) mientras MP dice rejected -> no activa (la query ignora el body).
+//   - error 5xx de MP -> 500 (para que Mercado Pago reintente).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { Timestamp } from "firebase-admin/firestore";
+import { procesarWebhookMP, type RespuestaPagoMP } from "../server/webhook";
+import {
+  activarPaqueteSiNoProcesadoTx,
+  type Cuenta,
+  type PreferenciaGuardada,
+} from "../server/cuentas";
+import { FirestoreFalso } from "./_fakeFirestore";
+
+/** Respuesta OK de GET /v1/payments/{id} con los campos que lee el webhook. */
+function pagoOk(datos: Partial<{
+  status: string;
+  currency_id: string;
+  transaction_amount: number;
+  external_reference: string;
+  date_approved: string;
+}>): RespuestaPagoMP {
+  const cuerpo = {
+    status: "approved",
+    currency_id: "COP",
+    transaction_amount: 49102,
+    external_reference: "CERTISEND|uid-1|paquete|49102|ref-1",
+    date_approved: "2026-10-05T10:00:00.000-05:00",
+    ...datos,
+  };
+  return { ok: true, status: 200, json: async () => cuerpo };
+}
+
+function pagoError(status: number): RespuestaPagoMP {
+  return { ok: false, status, json: async () => ({}) };
+}
+
+/** Preferencia guardada por create-preference para uid-1/paquete/49102, salvo lo que se sobreescriba. */
+function preferenciaBase(parcial: Partial<PreferenciaGuardada> = {}): PreferenciaGuardada {
+  return {
+    uid: "uid-1",
+    plan: "paquete",
+    cop: 49102,
+    trm: 3273.49,
+    fechaTrm: "2026-10-03",
+    creado: Timestamp.now(),
+    ...parcial,
+  };
+}
+
+/** Activa de verdad contra un FirestoreFalso (no un mock): misma funcion transaccional que
+ * produccion (server/cuentas.ts), para que "una sola activacion" sea una prueba real. */
+function activarPaqueteConFake(db: FirestoreFalso) {
+  return async (uid: string, paymentId: string, datos: { cop: number; trm: number; fecha: Timestamp }) => {
+    const pagoRef = db.doc(`pagosProcesados/${paymentId}`);
+    const cuentaRef = db.doc(`cuentas/${uid}`);
+    return db.runTransaction((tx) =>
+      activarPaqueteSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, ...datos })
+    );
+  };
+}
+
+function obtenerPreferenciaConFake(db: FirestoreFalso, preferencias: Record<string, PreferenciaGuardada>) {
+  // Simula `preferencias/{id}` ya sembrada: no hace falta pasar por runTransaction, es una lectura simple.
+  for (const [id, datos] of Object.entries(preferencias)) {
+    db.seed(`preferencias/${id}`, datos as unknown as Record<string, any>);
+  }
+  return async (id: string): Promise<PreferenciaGuardada | null> => {
+    const data = db.leer(`preferencias/${id}`);
+    return data ? (data as PreferenciaGuardada) : null;
+  };
+}
+
+const logsCapturados: string[] = [];
+function logMudo(linea: string) {
+  logsCapturados.push(linea);
+}
+
+function construirOpts(overrides: Partial<{
+  tipo: string;
+  paymentId: string;
+  obtenerPago: (id: string) => Promise<RespuestaPagoMP>;
+  obtenerPreferencia: (id: string) => Promise<PreferenciaGuardada | null>;
+  activarPaquete: (
+    uid: string,
+    paymentId: string,
+    datos: { cop: number; trm: number; fecha: Timestamp }
+  ) => Promise<"activado" | "repetido">;
+}>) {
+  return {
+    tipo: "payment",
+    paymentId: "pago-1",
+    obtenerPago: async () => pagoOk({}),
+    obtenerPreferencia: async () => preferenciaBase(),
+    activarPaquete: async () => "activado" as const,
+    timestampDesdeFecha: (fecha: Date) => Timestamp.fromDate(fecha),
+    log: logMudo,
+    ...overrides,
+  };
+}
+
+// ── Caso feliz: aprobado y correcto -> activa 150, vence +1 mes, reservadosPaquete 0 ───────────
+
+test("webhook: pago aprobado y correcto activa el Paquete (150 envios, vence +1 mes, reservadosPaquete 0)", async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const activarPaquete = activarPaqueteConFake(db);
+
+  const resultado = await procesarWebhookMP(
+    construirOpts({ obtenerPago: async () => pagoOk({}), obtenerPreferencia, activarPaquete })
+  );
+
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(resultado.razon, "activado");
+
+  const cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.plan, "paquete");
+  assert.equal(cuenta.enviosRestantes, 150);
+  assert.equal(cuenta.reservadosPaquete, 0);
+  assert.ok(cuenta.ultimoPago);
+  assert.equal(cuenta.ultimoPago!.id, "pago-1");
+  assert.equal(cuenta.ultimoPago!.cop, 49102);
+
+  // date_approved = 2026-10-05T10:00:00-05:00 -> +1 mes de calendario = 2026-11-05 (misma hora).
+  const venceISO = cuenta.vence!.toDate().toISOString();
+  assert.equal(venceISO.slice(0, 10), "2026-11-05");
+
+  const pagoProcesado = db.leer("pagosProcesados/pago-1");
+  assert.ok(pagoProcesado, "el pago debe quedar marcado como procesado");
+});
+
+// ── Idempotencia: mismo pago dos veces -> una sola activacion ──────────────────────────────────
+
+test("webhook: el mismo pago avisado dos veces activa una sola vez (idempotencia real)", async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const activarPaquete = activarPaqueteConFake(db);
+  const opts = construirOpts({ obtenerPago: async () => pagoOk({}), obtenerPreferencia, activarPaquete });
+
+  const r1 = await procesarWebhookMP(opts);
+  const r2 = await procesarWebhookMP(opts);
+
+  assert.equal(r1.razon, "activado");
+  assert.equal(r2.razon, "pago ya procesado (idempotencia)");
+  assert.equal(r2.httpStatus, 200);
+
+  const cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.enviosRestantes, 150, "sigue en 150: la segunda llamada no vuelve a activar");
+});
+
+// ── Pago de Faro (misma cuenta de MP) -> ignorado con 200 ───────────────────────────────────────
+
+test("webhook: external_reference de Faro (no empieza con CERTISEND|) se ignora con 200, nunca activa", async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, {});
+  const activarPaquete = activarPaqueteConFake(db);
+  let activarPaqueteLlamado = false;
+
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      obtenerPago: async () => pagoOk({ external_reference: "FARO|algo|otra-cosa" }),
+      obtenerPreferencia,
+      activarPaquete: async (...args) => {
+        activarPaqueteLlamado = true;
+        return activarPaquete(...args);
+      },
+    })
+  );
+
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(activarPaqueteLlamado, false, "un pago de Faro nunca debe intentar activar nada de CertiSend");
+  assert.equal(db.leer("cuentas/uid-1"), undefined);
+});
+
+// ── Monto distinto -> no activa ──────────────────────────────────────────────────────────────
+
+test("webhook: transaction_amount distinto del cop en external_reference no activa", async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const activarPaquete = activarPaqueteConFake(db);
+
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      // MP dice que de verdad se cobraron 1000, pero el external_reference (armado por nosotros
+      // al crear la preferencia) decia 49102: no coinciden, no se activa nada.
+      obtenerPago: async () => pagoOk({ transaction_amount: 1000 }),
+      obtenerPreferencia,
+      activarPaquete,
+    })
+  );
+
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(db.leer("cuentas/uid-1"), undefined, "sin coincidencia de monto, la cuenta no se toca");
+});
+
+// ── status pending / rejected -> no activa ───────────────────────────────────────────────────
+
+for (const status of ["pending", "rejected", "in_process", "cancelled"]) {
+  test(`webhook: status="${status}" (no approved) no activa`, async () => {
+    const db = new FirestoreFalso();
+    const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+    const activarPaquete = activarPaqueteConFake(db);
+
+    const resultado = await procesarWebhookMP(
+      construirOpts({ obtenerPago: async () => pagoOk({ status }), obtenerPreferencia, activarPaquete })
+    );
+
+    assert.equal(resultado.httpStatus, 200);
+    assert.equal(db.leer("cuentas/uid-1"), undefined);
+  });
+}
+
+// ── Cuerpo falsificado (dice approved) mientras MP dice rejected -> no activa ────────────────
+// El webhook NUNCA lee status del body/query de la peticion entrante: siempre vuelve a consultar
+// GET /v1/payments/{id}. Esta prueba simula exactamente eso: lo que "llega" (via `tipo`/`paymentId`,
+// los unicos datos que la ruta HTTP saca del cuerpo) no importa; lo unico que decide es la
+// respuesta de `obtenerPago`, que aqui devuelve "rejected" sin importar lo que diga el aviso.
+
+test("webhook: cuerpo falsificado diciendo approved, pero MP (via obtenerPago) dice rejected -> no activa", async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const activarPaquete = activarPaqueteConFake(db);
+
+  // El "aviso" (tipo/paymentId) es igual que siempre: la unica fuente de verdad sobre el status
+  // es `obtenerPago`, que aqui devuelve rejected -- simulando que el cuerpo del POST, si se hubiera
+  // leido, habria mentido diciendo "approved".
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      tipo: "payment",
+      paymentId: "pago-1",
+      obtenerPago: async () => pagoOk({ status: "rejected" }),
+      obtenerPreferencia,
+      activarPaquete,
+    })
+  );
+
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(db.leer("cuentas/uid-1"), undefined, "el status real (rejected) manda, no uno falsificado");
+});
+
+// ── Error 5xx de MP -> 500 (para que Mercado Pago reintente) ────────────────────────────────
+
+test("webhook: error 5xx de Mercado Pago al consultar el pago -> 500", async () => {
+  const resultado = await procesarWebhookMP(
+    construirOpts({ obtenerPago: async () => pagoError(503) })
+  );
+  assert.equal(resultado.httpStatus, 500);
+});
+
+test("webhook: error 4xx (pago no encontrado) -> 200, no es transitorio", async () => {
+  const resultado = await procesarWebhookMP(
+    construirOpts({ obtenerPago: async () => pagoError(404) })
+  );
+  assert.equal(resultado.httpStatus, 200);
+});
+
+test("webhook: red caida (obtenerPago rechaza) -> 500", async () => {
+  const resultado = await procesarWebhookMP(
+    construirOpts({ obtenerPago: async () => { throw new Error("red caida"); } })
+  );
+  assert.equal(resultado.httpStatus, 500);
+});
+
+// ── tipo distinto de "payment" (p.ej. merchant_order) -> 200, nunca llama a obtenerPago ────────
+
+test('webhook: tipo distinto de "payment" se ignora con 200 sin consultar a Mercado Pago', async () => {
+  let obtenerPagoLlamado = false;
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      tipo: "merchant_order",
+      obtenerPago: async () => {
+        obtenerPagoLlamado = true;
+        return pagoOk({});
+      },
+    })
+  );
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(obtenerPagoLlamado, false);
+});
+
+// ── plan "pro" en el external_reference -> 200, no activa (Tarea 8 pendiente) ──────────────────
+
+test('webhook: plan "pro" en el external_reference no activa (Tarea 8 pendiente)', async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, {});
+  const activarPaquete = activarPaqueteConFake(db);
+
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      obtenerPago: async () => pagoOk({ external_reference: "CERTISEND|uid-1|pro|94931|ref-pro" }),
+      obtenerPreferencia,
+      activarPaquete,
+    })
+  );
+
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(db.leer("cuentas/uid-1"), undefined);
+});
+
+// ── La preferencia guardada no coincide (cop distinto o no existe) -> no activa ────────────────
+
+test("webhook: la preferencia guardada no coincide en cop -> no activa (defensa extra sobre el external_reference)", async () => {
+  const db = new FirestoreFalso();
+  // La preferencia real guardada al crear el cobro dice 49102, pero el external_reference (que
+  // viaja por la red) dice 1 -- simula una referencia manipulada.
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase({ cop: 49102 }) });
+  const activarPaquete = activarPaqueteConFake(db);
+
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      obtenerPago: async () =>
+        pagoOk({ external_reference: "CERTISEND|uid-1|paquete|1|ref-1", transaction_amount: 1 }),
+      obtenerPreferencia,
+      activarPaquete,
+    })
+  );
+
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(db.leer("cuentas/uid-1"), undefined);
+});
+
+test("webhook: id de pago inventado (sin preferencia guardada) -> no activa", async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, {}); // nunca se sembro "ref-1"
+  const activarPaquete = activarPaqueteConFake(db);
+
+  const resultado = await procesarWebhookMP(
+    construirOpts({ obtenerPago: async () => pagoOk({}), obtenerPreferencia, activarPaquete })
+  );
+
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(db.leer("cuentas/uid-1"), undefined);
+});
+
+// ── Log minimo (paymentId, uid, status) ──────────────────────────────────────────────────────
+
+test("webhook: el log incluye paymentId/uid/status y nunca datos del pagador", async () => {
+  logsCapturados.length = 0;
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const activarPaquete = activarPaqueteConFake(db);
+
+  await procesarWebhookMP(
+    construirOpts({ obtenerPago: async () => pagoOk({}), obtenerPreferencia, activarPaquete })
+  );
+
+  const lineaConDatos = logsCapturados.find((l) => l.includes("pago-1") && l.includes("uid-1"));
+  assert.ok(lineaConDatos, "debe haber una linea de log con el paymentId y el uid");
+  assert.ok(lineaConDatos!.includes("approved"));
+  for (const l of logsCapturados) {
+    assert.ok(!/@|payer|email|tarjeta|card/i.test(l), "el log nunca debe incluir datos del pagador");
+  }
+});

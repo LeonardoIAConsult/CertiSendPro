@@ -1,10 +1,12 @@
 import "dotenv/config";
 import express from "express";
 import path from "path";
+import { randomUUID } from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import { PDFDocument } from "pdf-lib";
 import { getAuth } from "firebase-admin/auth";
+import { Timestamp } from "firebase-admin/firestore";
 import { obtenerFirebaseApp } from "./server/firebaseAdmin";
 import {
   obtenerCuenta,
@@ -13,8 +15,12 @@ import {
   reservarEnvio,
   confirmarEnvioExitoso,
   liberarReserva,
+  guardarPreferencia,
+  obtenerPreferencia,
+  activarPaqueteSiNoProcesado,
 } from "./server/cuentas";
 import { trmHoy, copDesdeUsd } from "./server/trm";
+import { procesarWebhookMP } from "./server/webhook";
 
 const app = express();
 // Cloud Run inyecta PORT; en local sigue siendo 3000.
@@ -679,12 +685,23 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
 // El PRECIO lo fija el servidor, nunca el navegador (antes llegaba `amount` del cliente y
 // cualquiera podia pagar $1). La cuenta de Mercado Pago es de Colombia: se cobra en COP con la
 // TRM oficial del dia (Superfinanciera, datos.gov.co 32sa-8pi3), igual que Faro.
-const PLANES_USD: Record<string, number> = {
-  "CertiSend Pro Monthly": 29,
-  "CertiSend Pay-as-you-go Bundle": 15,
-};
+// Las claves son el `plan` que acepta esta ruta y el que viaja en `external_reference`
+// (`CERTISEND|<uid>|<plan>|<cop>|<idAleatorio>`), nunca el titulo mostrado en el checkout.
+const PLANES_USD = {
+  paquete: { usd: 15, titulo: "CertiSend — Paquete de 150 envíos" },
+  pro: { usd: 29, titulo: "CertiSend Pro Monthly" },
+} as const;
+type PlanCobro = keyof typeof PLANES_USD;
 // TRM del dia: validacion, timeout y cacheo robustos viven en server/trm.ts (Tarea 4, 2026-10-05)
 // — igual que cuentas.ts, separado de este archivo para poder probarse con node:test sin red.
+
+// URL publica donde Mercado Pago puede llamar de vuelta (`notification_url`). A diferencia de
+// APP_URL (back_urls visibles al navegador, cae en localhost en dev), esta SIEMPRE tiene que ser
+// un dominio real y accesible desde internet, porque la llama el servidor de Mercado Pago, no el
+// navegador del usuario. Por defecto el dominio de produccion del Hosting de este proyecto
+// (firebase-applet-config.json `authDomain` e index.html `og:url`): certisendpro.online. Si el
+// dominio de Hosting cambiara, Leonardo debe fijar PUBLIC_BASE_URL en el entorno de Cloud Run.
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://certisendpro.online";
 
 app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
   // APAGADO hasta que Leonardo defina la entrega (05-oct): la landing manda a contacto. Encender
@@ -693,10 +710,15 @@ app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
     return res.status(503).json({ error: "Pagos no disponibles por ahora. Escribenos a contacto@leonardoantolinez.com." });
   }
   try {
-    const { planName } = req.body;   // `amount` y `currency` del cliente se ignoran a proposito
-    if (!Object.prototype.hasOwnProperty.call(PLANES_USD, String(planName))) {
+    const { plan } = req.body as { plan?: string }; // `amount`/`currency`/`planName` del cliente se ignoran a proposito
+    if (plan === "pro") {
+      // Pro es suscripcion (Tarea 8); todavia no existe que activar cuando MP confirme el cobro.
+      return res.status(501).json({ error: "Pro llega pronto. Escribenos a contacto@leonardoantolinez.com." });
+    }
+    if (plan !== "paquete") {
       return res.status(400).json({ error: "Plan no valido" });
     }
+    const planCobro: PlanCobro = "paquete";
     const mpAccessToken = process.env.MERCADO_PAGO_ACCESS_TOKEN;
 
     if (!mpAccessToken) {
@@ -707,10 +729,25 @@ app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
     const trm = await trmHoy();
     if (!trm) return res.status(503).json({ error: "No podemos calcular el precio de hoy; intenta más tarde." });
 
-    const usd = PLANES_USD[planName];
+    const { usd, titulo } = PLANES_USD[planCobro];
     const cop = copDesdeUsd(usd, trm.valor); // misma formula que /api/precios (D3): no se duplica.
     const base = process.env.APP_URL || "http://localhost:3000";
     const ahora = Date.now();
+
+    // Id aleatorio de esta preferencia (no el id que MP asigna despues a la preferencia o al pago):
+    // es la clave de `preferencias/{id}` y el ultimo campo del external_reference, para que el
+    // webhook pueda volver a leer EXACTAMENTE lo que se ofrecio aqui y comparar contra lo que MP
+    // dice que se cobro — nunca confiar solo en el cop que viaja en el propio external_reference.
+    const referenciaId = randomUUID();
+    const externalReference = `CERTISEND|${req.uid}|${planCobro}|${cop}|${referenciaId}`;
+    await guardarPreferencia(referenciaId, {
+      uid: req.uid!,
+      plan: planCobro,
+      cop,
+      trm: trm.valor,
+      fechaTrm: trm.fechaDesde,
+    });
+
     // La ruta correcta es /checkout/preferences; /v1/preferences no existe ("resource not found"),
     // asi que el cobro de CertiSend nunca funciono hasta este cambio.
     const response = await fetch("https://api.mercadopago.com/checkout/preferences", {
@@ -720,8 +757,9 @@ app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        items: [{ title: planName, quantity: 1, unit_price: cop, currency_id: "COP" }],
-        external_reference: `CERTISEND|${planName}|${cop}`,
+        items: [{ title: titulo, quantity: 1, unit_price: cop, currency_id: "COP" }],
+        external_reference: externalReference,
+        notification_url: `${PUBLIC_BASE_URL}/api/mp/webhook?src=certisend`,
         back_urls: {
           success: `${base}/?pago=ok`,
           failure: `${base}/?pago=error`,
@@ -754,6 +792,76 @@ app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
   }
 });
 
+// ── Webhook propio de CertiSend (Tarea 6, 2026-10-05) ───────────────────────────────────────
+// Mercado Pago llama aqui cuando hay novedad en un pago (`notification_url` de arriba). NUNCA se
+// confia en el cuerpo/query de este aviso para decidir nada: solo se usan para sacar el id del
+// pago; el resto (status, moneda, monto, referencia) se vuelve a consultar con GET
+// /v1/payments/{id} usando el access token del SERVIDOR. La logica de verificacion vive en
+// server/webhook.ts (testable con node:test, sin red ni Firestore real).
+//
+// Limite de tasa PROPIO de este endpoint (no comparte el contador de /api de arriba, que es por
+// IP para las rutas de usuarios autenticados): un aviso de Mercado Pago entra sin sesion y no debe
+// ni consumir ni verse afectado por el cupo de otras llamadas a /api.
+const VENTANA_WEBHOOK_MS = 60_000;
+const MAX_WEBHOOK_POR_VENTANA = Number(process.env.RATE_LIMIT_WEBHOOK_PER_MIN || 60);
+const visitasWebhook = new Map<string, { n: number; desde: number }>();
+const limitarWebhookMP: express.RequestHandler = (req, res, next) => {
+  const ip = req.ip || req.socket.remoteAddress || "desconocida";
+  const ahora = Date.now();
+  const v = visitasWebhook.get(ip);
+  if (!v || ahora - v.desde > VENTANA_WEBHOOK_MS) {
+    visitasWebhook.set(ip, { n: 1, desde: ahora });
+  } else if (++v.n > MAX_WEBHOOK_POR_VENTANA) {
+    res.setHeader("Retry-After", Math.ceil((VENTANA_WEBHOOK_MS - (ahora - v.desde)) / 1000));
+    return res.status(429).end();
+  }
+  if (visitasWebhook.size > 5000) {
+    for (const [k, val] of visitasWebhook) if (ahora - val.desde > VENTANA_WEBHOOK_MS) visitasWebhook.delete(k);
+  }
+  next();
+};
+
+app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
+  try {
+    // Mercado Pago manda el tipo/id por query (`type`/`topic` + `data.id`/`id`, formato nuevo o
+    // IPN viejo) o, a veces, tambien en el body. Se acepta cualquiera de las dos fuentes, pero
+    // solo para encontrar el id: lo que decide todo lo demas es la respuesta de la API (abajo).
+    const tipo = String(
+      req.query.type || req.query.topic || req.body?.type || req.body?.topic || ""
+    );
+    const paymentId = String(
+      req.query["data.id"] || req.query.id || req.body?.data?.id || req.body?.id || ""
+    );
+
+    const mpAccessToken = process.env.MERCADO_PAGO_ACCESS_TOKEN;
+    if (!mpAccessToken) {
+      console.error("[MP WEBHOOK] MERCADO_PAGO_ACCESS_TOKEN no configurado.");
+      return res.status(500).end(); // configuracion incompleta: tratar como transitorio, que MP reintente.
+    }
+
+    const resultado = await procesarWebhookMP({
+      tipo,
+      paymentId,
+      obtenerPago: async (id) => {
+        const r = await fetch(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(id)}`, {
+          headers: { Authorization: `Bearer ${mpAccessToken}` },
+        });
+        return { ok: r.ok, status: r.status, json: () => r.json() };
+      },
+      obtenerPreferencia,
+      activarPaquete: activarPaqueteSiNoProcesado,
+      timestampDesdeFecha: (fecha) => Timestamp.fromDate(fecha),
+      log: (linea) => console.log(linea),
+    });
+
+    res.status(resultado.httpStatus).json({ recibido: resultado.httpStatus === 200 });
+  } catch (error: any) {
+    // Error inesperado: 500 para que Mercado Pago reintente en vez de perder el aviso en silencio.
+    console.error("[MP WEBHOOK] error inesperado:", error?.message || error);
+    res.status(500).end();
+  }
+});
+
 // Endpoint publico de precios del dia (D3, decision del Brain 2026-10-05, Tarea 4): la web lo usa
 // para mostrar "≈ $X COP hoy" ANTES de pagar, sin exigir sesion. Vive bajo /api, asi que hereda el
 // limitador de peticiones por IP ya montado arriba (`app.use("/api", ...)`) sin duplicar logica.
@@ -765,8 +873,8 @@ app.get("/api/precios", async (_req, res) => {
     if (!trm) {
       return res.status(503).json({ error: "No podemos calcular el precio de hoy; intenta más tarde." });
     }
-    const usdPaquete = PLANES_USD["CertiSend Pay-as-you-go Bundle"];
-    const usdPro = PLANES_USD["CertiSend Pro Monthly"];
+    const usdPaquete = PLANES_USD.paquete.usd;
+    const usdPro = PLANES_USD.pro.usd;
     res.setHeader("Cache-Control", "public, max-age=300");
     res.json({
       trm: trm.valor,
