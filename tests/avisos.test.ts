@@ -36,14 +36,24 @@ test("firmarHmac: vector fijo compartido con docs/relay/avisos-relay.gs", () => 
 });
 
 // ── M33: vector de la cadena canonica COMPLETA (con nonce) — el que verifica `runTestHmac()` del
-// relay (docs/relay/avisos-relay.gs) y tests/relayGs.test.ts ejecutando el .gs real en Node. ────
+// relay (docs/relay/avisos-relay.gs) y tests/relayGs.test.ts ejecutando el .gs real en Node.
+// M-3(b) (corrige vuelta 34): la cadena ahora incluye `idEnvio` entre `nonce` y `para` — este
+// vector usa `idEnvio=""` (sin id idempotente), por lo que el valor esperado CAMBIO frente al que
+// probaba M33. ───────────────────────────────────────────────────────────────────────────────
 
-const VECTOR_HMAC_CANONICA_ESPERADO = "20f0e9b0af94d0e8d7dd20cc2b7199663ef20eadfc8ea3c2c1055f8ead6341a1";
+const VECTOR_HMAC_CANONICA_ESPERADO = "c1422dd09b070935232f1194678b1d8aa0abddb9a4fb41bcb788129ea41c5b14";
 
-test("cadenaCanonicaAviso + firmarHmac (M33, con nonce): vector fijo compartido con runTestHmac() del relay", () => {
-  const cadena = cadenaCanonicaAviso(1700000000, "nonce-de-prueba", "a@b.com", "Asunto", "Texto del correo");
+test("cadenaCanonicaAviso + firmarHmac (M33, con nonce; M-3(b), con idEnvio): vector fijo compartido con runTestHmac() del relay", () => {
+  const cadena = cadenaCanonicaAviso(1700000000, "nonce-de-prueba", "", "a@b.com", "Asunto", "Texto del correo");
   const firma = firmarHmac(cadena, "secreto-de-prueba");
   assert.equal(firma, VECTOR_HMAC_CANONICA_ESPERADO);
+});
+
+test("cadenaCanonicaAviso + firmarHmac: con idEnvio NO vacio, la firma cambia (es parte de lo firmado)", () => {
+  const cadena = cadenaCanonicaAviso(1700000000, "nonce-de-prueba", "pago-1:comprador", "a@b.com", "Asunto", "Texto del correo");
+  const firma = firmarHmac(cadena, "secreto-de-prueba");
+  assert.equal(firma, "513573d306f7729dc045b022687414043bbdd20da254b16c003e4795514374c5");
+  assert.notEqual(firma, VECTOR_HMAC_CANONICA_ESPERADO);
 });
 
 test("firmarHmac: secretos distintos dan firmas distintas para el mismo cuerpo", () => {
@@ -58,9 +68,9 @@ test("firmarHmac: cuerpos distintos dan firmas distintas con el mismo secreto", 
   assert.notEqual(a, b);
 });
 
-test("cadenaCanonicaAviso: concatena ts/nonce/para/asunto/texto separados por salto de linea", () => {
-  const c = cadenaCanonicaAviso(1700000000, "nonce-1", "a@b.com", "Asunto", "Texto del correo");
-  assert.equal(c, "1700000000\nnonce-1\na@b.com\nAsunto\nTexto del correo");
+test("cadenaCanonicaAviso: concatena ts/nonce/idEnvio/para/asunto/texto separados por salto de linea", () => {
+  const c = cadenaCanonicaAviso(1700000000, "nonce-1", "pago-1:comprador", "a@b.com", "Asunto", "Texto del correo");
+  assert.equal(c, "1700000000\nnonce-1\npago-1:comprador\na@b.com\nAsunto\nTexto del correo");
 });
 
 // ── enviarCorreo: config faltante -> false, nunca lanza, nunca registra el secreto ─────────────
@@ -110,10 +120,31 @@ test("enviarCorreo: config completa, relay responde 200 -> true, body firmado co
   assert.equal(cuerpoRecibido.asunto, "Asunto");
   assert.equal(cuerpoRecibido.texto, "Texto");
   assert.equal(cuerpoRecibido.nonce, "nonce-fijo-de-prueba");
+  assert.equal(cuerpoRecibido.idEnvio, "", "sin idEnvio en DatosCorreo, el cuerpo manda cadena vacia (nunca undefined)");
   const tsEsperado = Math.floor(ahoraFija.getTime() / 1000);
   assert.equal(cuerpoRecibido.ts, tsEsperado);
   const firmaEsperada = firmarHmac(
-    cadenaCanonicaAviso(tsEsperado, "nonce-fijo-de-prueba", "comprador@test.com", "Asunto", "Texto"),
+    cadenaCanonicaAviso(tsEsperado, "nonce-fijo-de-prueba", "", "comprador@test.com", "Asunto", "Texto"),
+    "secreto-X"
+  );
+  assert.equal(cuerpoRecibido.firma, firmaEsperada);
+});
+
+test("enviarCorreo: con idEnvio en DatosCorreo, se incluye en el cuerpo y en la firma (M-3(b))", async () => {
+  let cuerpoRecibido: any = null;
+  const fetchLike: FetchLike = async (_url, init) => {
+    cuerpoRecibido = JSON.parse(init.body);
+    return { ok: true, status: 200, text: async () => "ok" };
+  };
+  const ahoraFija = new Date("2026-10-05T10:00:00.000Z");
+  await enviarCorreo(
+    { para: "comprador@test.com", asunto: "Asunto", texto: "Texto", idEnvio: "pago-1:comprador" },
+    { relayUrl: "https://relay.test/exec", relaySecret: "secreto-X", fetchLike, ahora: () => ahoraFija, generarNonce: () => "nonce-fijo-de-prueba" }
+  );
+  assert.equal(cuerpoRecibido.idEnvio, "pago-1:comprador");
+  const tsEsperado = Math.floor(ahoraFija.getTime() / 1000);
+  const firmaEsperada = firmarHmac(
+    cadenaCanonicaAviso(tsEsperado, "nonce-fijo-de-prueba", "pago-1:comprador", "comprador@test.com", "Asunto", "Texto"),
     "secreto-X"
   );
   assert.equal(cuerpoRecibido.firma, firmaEsperada);

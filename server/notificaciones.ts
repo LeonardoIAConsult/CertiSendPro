@@ -33,7 +33,6 @@ import {
   obtenerAceptacion as obtenerAceptacionReal,
   revertirPagoSiNoRevertido as revertirPagoSiNoRevertidoReal,
   obtenerEstadoCorreoComprador as obtenerEstadoCorreoCompradorReal,
-  registrarIntentoAcuse as registrarIntentoAcuseReal,
   type DestinatarioCorreo,
   type Idioma,
   type ResultadoReversion,
@@ -61,12 +60,15 @@ export interface DatosNotificarActivacion {
 }
 
 export interface NotificarActivacionDeps {
-  /** `ahora` (M37, corrige vuelta 28): opcional — para fijar la hora del reclamo en pruebas y
-   * para que `reintentarAcusePendiente` pueda reclamar "acuse20h" con la misma hora que usa para
-   * decidir si ya pasaron 20 horas. Sin el, usa la hora real del servidor (igual que antes). */
-  reclamarEnvioCorreo(paymentId: string, destinatario: DestinatarioCorreo, ahora?: Date): Promise<boolean>;
-  marcarCorreoEnviado(paymentId: string, destinatario: DestinatarioCorreo): Promise<void>;
-  liberarReclamoCorreo(paymentId: string, destinatario: DestinatarioCorreo): Promise<void>;
+  reclamarEnvioCorreo(paymentId: string, destinatario: DestinatarioCorreo, ahora: Date): Promise<boolean>;
+  /**
+   * `reclamadoEn` (simplificacion 2026-10-06): el MISMO `ahora` que recibio `reclamarEnvioCorreo`
+   * al reclamar — `marcarCorreoEnviado`/`liberarReclamoCorreo` (server/cuentas.ts) solo cierran el
+   * reclamo si sigue siendo exactamente ese (comparacion transaccional), para que un cierre tardio
+   * nunca pise un reclamo ajeno mas nuevo sobre el mismo destinatario.
+   */
+  marcarCorreoEnviado(paymentId: string, destinatario: DestinatarioCorreo, reclamadoEn: Date): Promise<void>;
+  liberarReclamoCorreo(paymentId: string, destinatario: DestinatarioCorreo, reclamadoEn: Date): Promise<void>;
   obtenerAceptacion(id: string): Promise<{ email: string | null; idioma: Idioma } | null>;
   enviarCorreo(datos: DatosCorreo): Promise<boolean>;
   /** Compone el correo de confirmacion al comprador — inyectable (por defecto,
@@ -97,13 +99,17 @@ async function intentarEnviarUnDestinatario(
   paymentId: string,
   deps: NotificarActivacionDeps,
   destinatario: DestinatarioCorreo,
-  correo: DatosCorreo
+  correo: DatosCorreo,
+  ahora: Date
 ): Promise<void> {
-  const reclamado = await deps.reclamarEnvioCorreo(paymentId, destinatario);
+  const reclamado = await deps.reclamarEnvioCorreo(paymentId, destinatario, ahora);
   if (!reclamado) return; // ya reclamado o ya enviado por otra entrega.
 
-  const ok = await deps.enviarCorreo(correo);
-  await cerrarReclamoConReintento(paymentId, deps, destinatario, ok);
+  // M-3(b): id idempotente de este correo logico — el relay (docs/relay/avisos-relay.gs) lo usa
+  // para no reenviarlo si una entrega anterior ya lo mando de verdad pero Node la dio por fallida
+  // (timeout del lado de Node mientras Apps Script seguia procesando, ver server/avisos.ts).
+  const ok = await deps.enviarCorreo({ ...correo, idEnvio: `${paymentId}:${destinatario}` });
+  await cerrarReclamoConReintento(paymentId, deps, destinatario, ok, ahora);
 }
 
 /**
@@ -126,12 +132,13 @@ async function cerrarReclamoConReintento(
   paymentId: string,
   deps: NotificarActivacionDeps,
   destinatario: DestinatarioCorreo,
-  envioOk: boolean
+  envioOk: boolean,
+  reclamadoEn: Date
 ): Promise<void> {
   const cerrarReclamo = () =>
     envioOk
-      ? deps.marcarCorreoEnviado(paymentId, destinatario)
-      : deps.liberarReclamoCorreo(paymentId, destinatario);
+      ? deps.marcarCorreoEnviado(paymentId, destinatario, reclamadoEn)
+      : deps.liberarReclamoCorreo(paymentId, destinatario, reclamadoEn);
   try {
     await cerrarReclamo();
   } catch (error: any) {
@@ -168,6 +175,7 @@ async function cerrarReclamoConReintento(
  */
 export async function notificarActivacionPaquete(
   datos: DatosNotificarActivacion,
+  ahora: Date = new Date(),
   deps: NotificarActivacionDeps = depsNotificarActivacionReales
 ): Promise<void> {
   try {
@@ -191,15 +199,21 @@ export async function notificarActivacionPaquete(
           `[NOTIFICACIONES] acuse de compra BLOQUEADO (dato pendiente en el correo). paymentId=${datos.paymentId}`
         );
         const avisoBloqueo = construirAvisoBloqueoProveedorLeonardo({ uid: datos.uid, paymentId: datos.paymentId });
-        await intentarEnviarUnDestinatario(datos.paymentId, deps, "bloqueoProveedor", {
-          para: CORREO_LEONARDO,
-          ...avisoBloqueo,
-        });
+        await intentarEnviarUnDestinatario(
+          datos.paymentId,
+          deps,
+          "bloqueoProveedor",
+          { para: CORREO_LEONARDO, ...avisoBloqueo },
+          ahora
+        );
       } else {
-        await intentarEnviarUnDestinatario(datos.paymentId, deps, "comprador", {
-          para: aceptacion.email,
-          ...correoComprador,
-        });
+        await intentarEnviarUnDestinatario(
+          datos.paymentId,
+          deps,
+          "comprador",
+          { para: aceptacion.email, ...correoComprador },
+          ahora
+        );
       }
     } else {
       console.warn(`[NOTIFICACIONES] sin correo de comprador para paymentId=${datos.paymentId} (aceptacion ausente o sin email).`);
@@ -211,7 +225,7 @@ export async function notificarActivacionPaquete(
       cop: datos.cop,
       plan: "paquete",
     });
-    await intentarEnviarUnDestinatario(datos.paymentId, deps, "leonardo", { para: CORREO_LEONARDO, ...avisoVenta });
+    await intentarEnviarUnDestinatario(datos.paymentId, deps, "leonardo", { para: CORREO_LEONARDO, ...avisoVenta }, ahora);
   } catch (error: any) {
     console.error(`[NOTIFICACIONES] fallo al notificar la activacion. paymentId=${datos.paymentId}:`, error?.message || error);
   }
@@ -256,7 +270,7 @@ export async function avisarReembolsoPaquete(
     cuentaRevertida: resultado === "revertido",
   });
   try {
-    await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto });
+    await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto, idEnvio: `${datos.paymentId}:reembolso` });
   } catch (error: any) {
     // El aviso a Leonardo es best-effort: la reversion (lo que de verdad importa) YA tuvo exito.
     console.error(`[NOTIFICACIONES] fallo al avisar el reembolso a Leonardo (la reversión SÍ quedó). paymentId=${datos.paymentId}:`, error?.message || error);
@@ -279,12 +293,16 @@ const depsAvisarPagoDobleReales: AvisarPagoDobleDeps = { enviarCorreo: enviarCor
  * existente y `activarPaqueteSiNoProcesadoTx` devuelve "repetido" antes de llegar aqui). Nunca
  * lanza: el log (que SI debe quedar, para la alerta de Cloud Logging) va primero y por separado
  * del correo, que es best-effort.
+ *
+ * Medio 1 (vuelta 35): mismo formato de log estructurado que las alertas de acuses
+ * (`emitirAlertaTiempoUnaVez` mas abajo) — `severity: "ERROR"` + `message` fijo, grepable para la
+ * alerta de Cloud Logging (ver docs/ops.md). Nunca uid aqui (dato personal), igual que esas.
  */
 export async function avisarPagoDobleRequiereReembolso(
   datos: { uid: string; paymentId: string; cop: number },
   deps: AvisarPagoDobleDeps = depsAvisarPagoDobleReales
 ): Promise<void> {
-  console.error("ALERTA_REEMBOLSO_REQUERIDO", { paymentId: datos.paymentId, uid: datos.uid, cop: datos.cop });
+  console.error(JSON.stringify({ severity: "ERROR", message: "ALERTA_REEMBOLSO_REQUERIDO", paymentId: datos.paymentId, cop: datos.cop }));
   try {
     const { asunto, texto } = construirAvisoPagoDobleLeonardo(datos);
     await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto });
@@ -296,26 +314,31 @@ export async function avisarPagoDobleRequiereReembolso(
   }
 }
 
-// ── M37 (corrige vuelta 28, "reclamo atascado y sin reintento", 2026-10-05) ─────────────────────
-// Reintento del acuse de compra, sin Cloud Scheduler (su API no esta habilitada en este proyecto):
-// dos disparadores en server.ts llaman a `reintentarAcusePendiente` por cada pago candidato que
-// encuentran (GET /api/cuenta, por uid; el barrido del webhook, de cualquier uid) — ver
-// server/cuentas.ts `listarPagosPendientesDeAcuse`/`listarPagosParaBarridoGlobal`.
-//
+// ── Reintento del acuse de compra — simplificado 2026-10-06 ────────────────────────────────────
+// Decision del Brain tras el NO-GO de la revision externa (vuelta 32 sobre b93fbed, 3 vueltas
+// seguidas parchando esta misma pieza): SIMPLIFICAR en vez de agregar otra capa. El webhook manda
+// el acuse de compra EN LINEA (await) al activar un pago; si falla, queda pendiente. El UNICO
+// mecanismo de reintento es `POST /api/tareas/barrido-acuses` (Cloud Scheduler cada 30 min, ver
+// server/tareasFondo.ts), que llama a `reintentarAcusePendiente` por cada pago pendiente. Se
+// quitan: el reintento disparado desde GET /api/cuenta, el barrido disparado por el propio
+// webhook, y el tope de intentos con espera exponencial creciente (`MAX_INTENTOS_ACUSE`) — sin
+// backoff: cada barrido (cada 30 min) reintenta todo lo pendiente sin excepcion, y la alerta ya no
+// depende de "cuantas veces se intento" sino de CUANTO TIEMPO lleva pendiente:
+//   - a las 20h sin acuse enviado: alerta UNA vez (log + mejor esfuerzo por correo), sigue
+//     reintentando.
+//   - a las 48h sin acuse enviado: alerta UNA vez (mismo formato) y DEJA de reintentar (estado
+//     terminal: el caso ya necesita atencion humana).
 // Reconstruye los MISMOS datos que uso la entrega original del webhook a partir de lo que
-// `activarPaqueteSiNoProcesadoTx` ya guardo en `pagosProcesados/{paymentId}` (M37) y vuelve a
-// llamar a `notificarActivacionPaquete` — que YA es idempotente POR DESTINATARIO (M35): si
-// Leonardo ya tiene su correo, no se reenvia; si el comprador ya lo tiene, tampoco. Nunca vuelve a
-// consultar Mercado Pago ni toca el saldo/plan del usuario — el pago YA esta activado, esto es
-// solo el correo.
+// `activarPaqueteSiNoProcesadoTx` ya guardo en `pagosProcesados/{paymentId}` y vuelve a llamar a
+// `notificarActivacionPaquete` — que YA es idempotente POR DESTINATARIO (M35): si Leonardo ya
+// tiene su correo, no se reenvia; si el comprador ya lo tiene, tampoco. Nunca vuelve a consultar
+// Mercado Pago ni toca el saldo/plan del usuario — el pago YA esta activado, esto es solo el
+// correo.
 
-/** La ley exige el acuse a mas tardar el dia siguiente al pago (docs/legal/plantilla-confirmacion-
- * compra.md). 20h (no 24h) da margen para que el reintento automatico lo resuelva solo antes de
- * escalar a una persona, sin acercarse tanto al plazo legal que el aviso llegue demasiado tarde
- * para que Leonardo pueda hacer algo con el. */
-const VEINTE_HORAS_MS = 20 * 3600_000;
+export const VEINTE_HORAS_MS = 20 * 3600_000;
+export const CUARENTA_Y_OCHO_HORAS_MS = 48 * 3600_000;
 
-function construirAvisoAcuse20hLeonardo(datos: { uid: string; paymentId: string }): {
+function construirAvisoAcuse20hLeonardo(datos: { uid: string; paymentId: string; horas: number }): {
   asunto: string;
   texto: string;
 } {
@@ -323,19 +346,33 @@ function construirAvisoAcuse20hLeonardo(datos: { uid: string; paymentId: string 
     asunto: `[CertiSend] Acuse de compra SIN ENVIAR 20 horas despues del pago`,
     texto:
       `El acuse de compra del pago ${datos.paymentId} (uid ${datos.uid}) todavia no se ha enviado ` +
-      `al comprador 20 horas despues del pago. La ley exige enviarlo a mas tardar el dia siguiente ` +
-      `al pago (docs/legal/plantilla-confirmacion-compra.md). El reintento automatico (GET /api/cuenta ` +
-      `del usuario, o el barrido del webhook) ya lo intento sin exito — revisa AVISOS_RELAY_URL/` +
-      `AVISOS_RELAY_SECRET y los logs de Cloud Run, y si hace falta manda el acuse a mano. ` +
-      `Este aviso no se repite para este pago.`,
+      `al comprador, ${datos.horas} horas despues del pago. La ley exige enviarlo a mas tardar el ` +
+      `dia siguiente al pago (docs/legal/plantilla-confirmacion-compra.md). El barrido automatico ` +
+      `(POST /api/tareas/barrido-acuses, cada 30 min) ya lo intento sin exito — revisa ` +
+      `AVISOS_RELAY_URL/AVISOS_RELAY_SECRET y los logs de Cloud Run, y si hace falta manda el acuse ` +
+      `a mano. El barrido seguira reintentando hasta las 48h; este aviso no se repite para este pago.`,
+  };
+}
+
+function construirAvisoAcuseAbandonadoLeonardo(datos: { uid: string; paymentId: string; horas: number }): {
+  asunto: string;
+  texto: string;
+} {
+  return {
+    asunto: `[CertiSend] Acuse de compra ABANDONADO — ${datos.horas} horas sin enviarse`,
+    texto:
+      `El acuse de compra del pago ${datos.paymentId} (uid ${datos.uid}) lleva ${datos.horas} horas ` +
+      `sin enviarse al comprador. El barrido automatico (POST /api/tareas/barrido-acuses) DEJA de ` +
+      `reintentarlo a partir de ahora (48h es el tope): revisa AVISOS_RELAY_URL/AVISOS_RELAY_SECRET ` +
+      `y los logs de Cloud Run, y manda el acuse a mano. Este aviso no se repite para este pago.`,
   };
 }
 
 export interface DatosReintentoAcusePendiente {
   paymentId: string;
   uid: string;
-  /** `null` si el pago se activo antes de M37 (sin estos datos guardados): en ese caso no hay con
-   * que reconstruir el aviso de forma segura y no se reintenta nada automaticamente. */
+  /** `null` si el pago se activo sin estos datos guardados: en ese caso no hay con que reconstruir
+   * el aviso de forma segura y no se reintenta nada automaticamente. */
   referenciaId: string | null;
   cop: number;
   trm: number;
@@ -344,53 +381,68 @@ export interface DatosReintentoAcusePendiente {
   fecha: Date;
   /** Fecha de vencimiento del Paquete activado por ESTE pago. */
   vence: Date;
-  /** G3 (correccion NO-GO vuelta 30): true si Mercado Pago reembolso/contracargo este pago.
-   * Opcional (`?? false`) para no romper llamadas existentes que todavia no lo reconstruyen;
-   * `datosReintentoDesdePago` (server/tareasFondo.ts) SIEMPRE lo manda en produccion. */
+  /** G3: true si Mercado Pago reembolso/contracargo este pago. Opcional (`?? false`) para no
+   * romper llamadas existentes que todavia no lo reconstruyen; `datosReintentoDesdePago`
+   * (server/tareasFondo.ts) SIEMPRE lo manda en produccion. */
   revertido?: boolean;
 }
 
 export interface ReintentarAcuseDeps extends NotificarActivacionDeps {
   obtenerEstadoCorreoComprador(paymentId: string): Promise<string | null>;
-  /** M2 (correccion NO-GO vuelta 30): registra un intento mas de reintento del acuse (incrementa
-   * `intentosAcuse`, guarda `ultimoIntentoAcuseEn`); al llegar a `MAX_INTENTOS_ACUSE` marca
-   * `estadoAcuse="agotado"` en vez de contar un intento nuevo. Ver server/cuentas.ts
-   * `registrarIntentoAcuseTx`. */
-  registrarIntentoAcuse(paymentId: string, ahora: Date): Promise<{ intentos: number; agotado: boolean }>;
 }
 
 const depsReintentarAcuseReales: ReintentarAcuseDeps = {
   ...depsNotificarActivacionReales,
   obtenerEstadoCorreoComprador: obtenerEstadoCorreoCompradorReal,
-  registrarIntentoAcuse: registrarIntentoAcuseReal,
 };
 
-/** M2 (correccion NO-GO vuelta 30, 2026-10-05): log con marcador FIJO y grepable para que una
- * alerta de Cloud Logging lo capture (el Brain la configura, ver docs/ops.md) — se emite cuando
- * `registrarIntentoAcuse` agota el tope de intentos (`MAX_INTENTOS_ACUSE`) y el acuse de compra
- * sigue sin salir. `console.error` (nunca `console.log`): es una condicion que requiere atencion
- * humana, no informativa. */
-function logAlertaAcuseAtrasado(datos: { paymentId: string; uid: string; fecha: Date }, ahora: Date): void {
-  const horas = Math.round((ahora.getTime() - datos.fecha.getTime()) / 3600_000);
-  console.error("ALERTA_ACUSE_ATRASADO", { paymentId: datos.paymentId, uid: datos.uid, horas });
+/**
+ * Emite la alerta de "lleva demasiado tiempo pendiente" EXACTAMENTE una vez por pago (reclamo
+ * transaccional, destinatario `"acuse20h"`/`"acuse48h"` — mismo mecanismo que los demas
+ * destinatarios de correo). El canal FUERTE es el log estructurado de abajo (nunca con uid/email:
+ * es lo que lee la alerta de Cloud Logging, ver docs/ops.md); el correo a Leonardo es de MEJOR
+ * ESFUERZO y no condiciona la unicidad de la alerta — si el relay falla, la alerta YA quedo
+ * emitida igual, y no se reintenta el correo en el siguiente barrido (simplificacion deliberada:
+ * esta alerta es secundaria al log, que es el canal autoritativo).
+ */
+async function emitirAlertaTiempoUnaVez(
+  datos: { uid: string; paymentId: string },
+  horas: number,
+  destinatario: "acuse20h" | "acuse48h",
+  mensaje: "ALERTA_ACUSE_ATRASADO" | "ALERTA_ACUSE_ABANDONADO",
+  construirAviso: (d: { uid: string; paymentId: string; horas: number }) => { asunto: string; texto: string },
+  ahora: Date,
+  deps: ReintentarAcuseDeps
+): Promise<void> {
+  const reclamado = await deps.reclamarEnvioCorreo(datos.paymentId, destinatario, ahora);
+  if (!reclamado) return; // ya se emitio antes para este pago (esta u otra entrega).
+
+  const horasRedondeadas = Math.round(horas);
+  // Canal FUERTE: nunca uid ni email aqui (dato personal) — solo lo que la alerta de Cloud
+  // Logging necesita para el filtro (ver docs/ops.md).
+  console.error(JSON.stringify({ severity: "ERROR", message: mensaje, paymentId: datos.paymentId, horas: horasRedondeadas }));
+
+  const { asunto, texto } = construirAviso({ ...datos, horas: horasRedondeadas });
+  await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto, idEnvio: `${datos.paymentId}:${destinatario}` });
+  // Se marca "enviado" en los dos casos (correo OK o no): la unicidad de la alerta ya la dio el
+  // log de arriba; reintentar solo el envio del correo (sin repetir el log) es complejidad que
+  // esta alerta, de mejor esfuerzo, no necesita.
+  await deps.marcarCorreoEnviado(datos.paymentId, destinatario, ahora);
 }
 
 /**
- * M37: reintenta el acuse de UN pago que todavia no tiene `correoComprador="enviado"`. Nunca
- * lanza (defensa en profundidad: la llama server.ts en segundo plano, sin bloquear ninguna
- * respuesta HTTP). Tras reintentar, si han pasado 20h o mas desde el pago Y el acuse SIGUE sin
- * salir, avisa a Leonardo UNA sola vez (mismo mecanismo de reclamo que los demas destinatarios de
- * correo, destinatario "acuse20h" — ver server/cuentas.ts).
+ * Reintenta el acuse de UN pago que todavia no tiene `correoComprador="enviado"`. Nunca lanza
+ * (defensa en profundidad: la llama el barrido de `server/tareasFondo.ts` una vez por pago, sin
+ * que el fallo de uno tumbe a los demas).
  *
- * G3 (correccion NO-GO vuelta 30): defensa en profundidad — un pago `revertido` NUNCA reintenta
- * (el comprador ya no tiene nada que confirmar). En la practica, quien selecciona los candidatos
- * (`seleccionarPagosParaBarrido`/`listarPagosPendientesDeAcuse`, server/cuentas.ts) ya filtra esto
- * antes de llegar aqui; este chequeo es la segunda capa, por si algun llamador futuro se salta esa
- * seleccion.
+ * G3: defensa en profundidad — un pago `revertido` NUNCA reintenta (el comprador ya no tiene nada
+ * que confirmar). En la practica, quien selecciona los candidatos (`esCandidatoBarridoAcuse`,
+ * server/tareasFondo.ts) ya filtra esto antes de llegar aqui; este chequeo es la segunda capa.
  *
- * M2 (correccion NO-GO vuelta 30): antes de intentar el envio, registra un intento mas
- * (`registrarIntentoAcuse`). Si eso agota el tope (`MAX_INTENTOS_ACUSE`), NO se intenta el envio
- * esta vez — se emite `ALERTA_ACUSE_ATRASADO` (log con marcador fijo) y se retorna.
+ * Simplificacion 2026-10-06 (sin backoff/tope de intentos): la decision es por ANTIGUEDAD del
+ * pago, no por cuantas veces se intento. >=48h: deja de reintentar, alerta "abandonado" una vez.
+ * [20h, 48h): reintenta igual y, si sigue sin salir, alerta "atrasado" una vez. <20h: reintenta
+ * sin alertar nada.
  */
 export async function reintentarAcusePendiente(
   datos: DatosReintentoAcusePendiente,
@@ -404,17 +456,18 @@ export async function reintentarAcusePendiente(
     }
 
     if (!datos.referenciaId || !datos.fechaTrm) {
-      // Pago de antes de M37 (activado sin estos datos) o con datos incompletos: no hay con que
-      // reconstruir el correo con seguridad. Queda igual que antes — atendible a mano, sin
-      // reintento automatico (mismo patron ya aceptado en este proyecto para otros "pendiente").
-      console.warn(`[NOTIFICACIONES] M37: pago ${datos.paymentId} sin referenciaId/fechaTrm guardados; no se puede reintentar el acuse automaticamente.`);
+      // Pago activado sin estos datos guardados, o con datos incompletos: no hay con que
+      // reconstruir el correo con seguridad. Atendible a mano, sin reintento automatico (mismo
+      // patron ya aceptado en este proyecto para otros "pendiente").
+      console.warn(`[NOTIFICACIONES] pago ${datos.paymentId} sin referenciaId/fechaTrm guardados; no se puede reintentar el acuse automaticamente.`);
       return;
     }
 
-    const { agotado } = await deps.registrarIntentoAcuse(datos.paymentId, ahora);
-    if (agotado) {
-      logAlertaAcuseAtrasado(datos, ahora);
-      return; // M2: tope de intentos agotado — no se vuelve a intentar automaticamente.
+    const horas = (ahora.getTime() - datos.fecha.getTime()) / 3600_000;
+
+    if (horas >= CUARENTA_Y_OCHO_HORAS_MS / 3600_000) {
+      await emitirAlertaTiempoUnaVez(datos, horas, "acuse48h", "ALERTA_ACUSE_ABANDONADO", construirAvisoAcuseAbandonadoLeonardo, ahora, deps);
+      return; // >=48h: deja de reintentar.
     }
 
     await notificarActivacionPaquete(
@@ -428,22 +481,17 @@ export async function reintentarAcusePendiente(
         fechaPago: datos.fecha,
         fechaVencimiento: datos.vence,
       },
+      ahora,
       deps
     );
 
-    if (ahora.getTime() - datos.fecha.getTime() < VEINTE_HORAS_MS) return;
+    if (horas < VEINTE_HORAS_MS / 3600_000) return;
 
     // Se relee el estado DESPUES del reintento de arriba (pudo acabar de enviarse justo ahora).
     const estadoActual = await deps.obtenerEstadoCorreoComprador(datos.paymentId);
     if (estadoActual === "enviado") return;
 
-    const reclamado = await deps.reclamarEnvioCorreo(datos.paymentId, "acuse20h", ahora);
-    if (!reclamado) return; // ya se aviso antes por esta misma racha, o alguien lo esta avisando ahora.
-
-    const { asunto, texto } = construirAvisoAcuse20hLeonardo({ uid: datos.uid, paymentId: datos.paymentId });
-    const ok = await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto });
-    if (ok) await deps.marcarCorreoEnviado(datos.paymentId, "acuse20h");
-    else await deps.liberarReclamoCorreo(datos.paymentId, "acuse20h");
+    await emitirAlertaTiempoUnaVez(datos, horas, "acuse20h", "ALERTA_ACUSE_ATRASADO", construirAvisoAcuse20hLeonardo, ahora, deps);
   } catch (error: any) {
     console.error(`[NOTIFICACIONES] fallo el reintento del acuse pendiente. paymentId=${datos.paymentId}:`, error?.message || error);
   }

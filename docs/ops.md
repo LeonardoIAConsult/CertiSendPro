@@ -1,30 +1,72 @@
 # Operación: barrido programado de acuses + alerta de Cloud Logging
 
-Correción NO-GO vuelta 30 (2026-10-05), requisitos G2/M2. Esta página documenta los comandos
-`gcloud` para dar de alta el job de Cloud Scheduler que dispara el barrido completo de acuses
-pendientes y la alerta de Cloud Logging que captura `ALERTA_ACUSE_ATRASADO`. **Ninguno de estos
-comandos se ejecutó al escribir esta orden** (guardarraíl: sin `gcloud` de escritura, sin
-secretos nuevos) — los ejecuta el Brain o Leonardo cuando se decida activar el barrido programado.
+Simplificación 2026-10-06 (decisión del Brain tras el NO-GO de la revisión externa, vuelta 32
+sobre b93fbed: 3 vueltas seguidas parchando el reintento de acuses — la orden fue simplificar, no
+agregar otra capa). Esta página documenta los comandos reales para dar de alta el job de Cloud
+Scheduler que dispara el barrido completo de acuses pendientes y la alerta de Cloud Logging que
+captura `ALERTA_ACUSE_ATRASADO`/`ALERTA_ACUSE_ABANDONADO`. **Ninguno de estos comandos se
+ejecutó al escribir esta página** (guardarraíl: sin `gcloud` de escritura) — los ejecuta el Brain
+o Leonardo cuando se decida activar el barrido programado.
 
 Para el relay de correo (Apps Script, avisos a Leonardo/compradores) ver
 [`docs/relay/README.md`](./relay/README.md) — es un tema separado.
 
+## 0. Datos reales del proyecto
+
+| Dato | Valor |
+|---|---|
+| Proyecto | `clever-spirit-436820-t7` |
+| Región | `us-central1` |
+| Servicio Cloud Run | `certisend-api` |
+| URL del servicio | `https://certisend-api-522374745014.us-central1.run.app` |
+| Audiencia OIDC | la MISMA URL del servicio: `https://certisend-api-522374745014.us-central1.run.app` |
+| API `cloudscheduler.googleapis.com` | ya habilitada |
+| SA del Scheduler | `certisend-scheduler@clever-spirit-436820-t7.iam.gserviceaccount.com` — ya existe y ya tiene `roles/run.invoker` sobre `certisend-api` |
+| SA de la API | `certisend-api@clever-spirit-436820-t7.iam.gserviceaccount.com` |
+| Secretos ya creados (Secret Manager) | `huella-lote-secret`, `avisos-relay-secret` — ya accesibles por la SA de la API |
+
+**B-1 (corrige vuelta 34 del REVISOR_EXTERNO): el servicio Cloud Run `certisend-api` corre HOY con
+la cuenta de servicio de compute POR DEFECTO** (nunca se le asigno una dedicada) — la tabla de
+arriba describe la SA que el deploy DEBE usar, no la que usa ahora. El deploy que active este
+barrido debe, en el mismo paso, mover el servicio a `certisend-api@...` y dar de alta los dos
+secretos que esa SA necesita (ya creados en Secret Manager, ver tabla arriba):
+
+```bash
+gcloud run services update certisend-api \
+  --project=clever-spirit-436820-t7 \
+  --region=us-central1 \
+  --service-account="certisend-api@clever-spirit-436820-t7.iam.gserviceaccount.com" \
+  --update-secrets="HUELLA_LOTE_SECRET=huella-lote-secret:latest,AVISOS_RELAY_SECRET=avisos-relay-secret:latest"
+```
+
+(no ejecutado por esta página — mismo guardarraíl que el resto de este documento: usar siempre la
+variante `update` de este flag, NUNCA la variante `set`, que REEMPLAZA TODOS los secretos
+existentes del servicio por solo los que se le pasen; la variante `update` agrega/actualiza sin
+tocar los demás).
+
 ## 1. Qué protege esto
 
 `POST /api/tareas/barrido-acuses` (`server.ts`, lógica en `server/tareasFondo.ts` +
-`server/schedulerAuth.ts`) recorre TODOS los `pagosProcesados` pendientes de acuse (paginado, sin
-tope de antigüedad) y reintenta el correo de confirmación de compra de cada uno elegible — a
-diferencia del barrido parcial que ya dispara el propio webhook de Mercado Pago (ventana de 5
-pagos recientes, máximo 1 vez por minuto), este es el barrido COMPLETO y es el único disparador
-pensado para correr de forma regular sin depender de que lleguen pagos nuevos.
+`server/schedulerAuth.ts`) es el **único** mecanismo de reintento del acuse de compra. El webhook
+de Mercado Pago (`POST /api/mp/webhook`) manda el acuse de compra EN LÍNEA (`await` dentro de la
+propia petición) al activar un pago; si falla, el acuse queda pendiente, sin ningún reintento
+disparado por el propio webhook ni por `GET /api/cuenta` (esas dos vías existieron en versiones
+anteriores y se retiraron en esta simplificación). Este endpoint recorre TODOS los
+`pagosProcesados` pendientes de acuse (paginado, sin tope de antigüedad para la selección) y
+reintenta el correo de confirmación de compra de cada uno elegible con el reclamo transaccional de
+`server/cuentas.ts`.
 
-Solo Cloud Scheduler, con un token de identidad OIDC firmado por Google para una cuenta de
-servicio específica, puede llamarlo:
+Solo Cloud Scheduler, con un token de identidad OIDC firmado por Google para la cuenta de servicio
+dedicada, puede llamarlo:
 
-- Sin encabezado `Authorization: Bearer <token>` → `401`.
-- Token válido pero de otra cuenta de servicio o con otra audiencia → `403`.
+- Sin encabezado `Authorization: Bearer <token>` → `401` (y un log estructurado grepable
+  `TAREA_BARRIDO_RECHAZADA`, `motivo:"sin_token"` — ver §4).
+- Token válido pero de otra cuenta de servicio o con otra audiencia → `403` (mismo log,
+  `motivo:"token_invalido"`).
 - Token válido → ejecuta el barrido y responde `200` con `{ok:true, paginas, revisados,
-  reintentados}`.
+  reintentados}` (o `500` con un log estructurado `BARRIDO_ACUSES_FALLO` si el barrido mismo falla
+  a mitad de camino — `server/tareasFondo.ts` lo envuelve en `try/catch`, nunca un rechazo sin
+  manejar).
 
 La verificación (`server/schedulerAuth.ts`) llama al endpoint público
 `https://oauth2.googleapis.com/tokeninfo` (Google valida la firma de su lado) y comprueba que
@@ -32,98 +74,110 @@ La verificación (`server/schedulerAuth.ts`) llama al endpoint público
 comentario en ese archivo sobre por qué no se usa `google-auth-library` directamente (es una
 dependencia transitiva, no declarada en `package.json`) — si se prefiere la verificación
 criptográfica local en vez de llamar a Google en cada disparo, declarar esa librería como
-dependencia directa es la vía recomendada, pero esta orden no lo hace sin que Leonardo lo decida.
+dependencia directa es la vía recomendada, pero no se hace sin que Leonardo lo decida.
 
-## 2. Variables de entorno nuevas en Cloud Run
+## 2. Variables de entorno en Cloud Run (servicio `certisend-api`)
 
 | Variable | Valor |
 |---|---|
-| `SCHEDULER_SA_EMAIL` | Email de la cuenta de servicio dedicada al Scheduler (crearla si no existe, ver §3). |
-| `SCHEDULER_AUDIENCE` | La URL completa del servicio de Cloud Run + la ruta del endpoint, p. ej. `https://certisend-xxxxx-uc.a.run.app/api/tareas/barrido-acuses` (debe ser EXACTAMENTE la audiencia que se configura en el paso §4 del job). |
+| `SCHEDULER_SA_EMAIL` | `certisend-scheduler@clever-spirit-436820-t7.iam.gserviceaccount.com` |
+| `SCHEDULER_AUDIENCE` | `https://certisend-api-522374745014.us-central1.run.app` (la MISMA URL del servicio, sin la ruta del endpoint — debe ser EXACTAMENTE lo que se pase en `--oidc-token-audience` en el paso 3) |
 
-## 3. Crear la cuenta de servicio dedicada (una sola vez)
+Los secretos `huella-lote-secret`/`avisos-relay-secret` ya existen en Secret Manager y ya son
+accesibles por `certisend-api@clever-spirit-436820-t7.iam.gserviceaccount.com` — no hace falta
+crear nada nuevo para el barrido; solo fijar las dos variables de arriba en la revisión de Cloud
+Run (por ejemplo, con `gcloud run services update certisend-api --region us-central1
+--update-env-vars SCHEDULER_SA_EMAIL=...,SCHEDULER_AUDIENCE=...`, no ejecutado por esta página).
+**Usar siempre la variante `update` de este flag, NUNCA la variante `set`** (corrige G-1, vuelta 34
+del REVISOR_EXTERNO): la variante `set` REEMPLAZA TODAS las variables de entorno existentes del
+servicio (`NODE_ENV`, `APP_URL`, `ALLOWED_ORIGINS`...) por solo las que se le pasen — la variante
+`update` agrega/actualiza sin borrar las demás.
 
-```bash
-gcloud iam service-accounts create certisend-scheduler \
-  --project=TU_PROYECTO \
-  --display-name="CertiSend - Cloud Scheduler (barrido de acuses)"
-```
+## 3. Crear el job de Cloud Scheduler (cada 30 minutos, con OIDC)
 
-Dar permiso para invocar el servicio de Cloud Run (nunca el rol de `admin`, solo `invoker`):
-
-```bash
-gcloud run services add-iam-policy-binding certisendpro \
-  --project=TU_PROYECTO \
-  --region=TU_REGION \
-  --member="serviceAccount:certisend-scheduler@TU_PROYECTO.iam.gserviceaccount.com" \
-  --role="roles/run.invoker"
-```
-
-`SCHEDULER_SA_EMAIL` = `certisend-scheduler@TU_PROYECTO.iam.gserviceaccount.com`.
-
-## 4. Crear el job de Cloud Scheduler (cada 30 minutos, con OIDC)
+La cuenta de servicio del Scheduler y el permiso `run.invoker` YA existen — este es el único paso
+que falta dar de alta:
 
 ```bash
 gcloud scheduler jobs create http certisend-barrido-acuses \
-  --project=TU_PROYECTO \
-  --location=TU_REGION \
+  --project=clever-spirit-436820-t7 \
+  --location=us-central1 \
   --schedule="*/30 * * * *" \
-  --uri="https://certisend-xxxxx-uc.a.run.app/api/tareas/barrido-acuses" \
+  --uri="https://certisend-api-522374745014.us-central1.run.app/api/tareas/barrido-acuses" \
   --http-method=POST \
-  --oidc-service-account-email="certisend-scheduler@TU_PROYECTO.iam.gserviceaccount.com" \
-  --oidc-token-audience="https://certisend-xxxxx-uc.a.run.app/api/tareas/barrido-acuses" \
+  --oidc-service-account-email="certisend-scheduler@clever-spirit-436820-t7.iam.gserviceaccount.com" \
+  --oidc-token-audience="https://certisend-api-522374745014.us-central1.run.app" \
   --attempt-deadline=30s \
   --max-retry-attempts=1
 ```
 
 Notas:
-- La URL de `--uri` y la de `--oidc-token-audience` deben coincidir con lo que Cloud Run sirve
-  en producción (confirmar el dominio real de Cloud Run, no el de Firebase Hosting — el mismo
-  cuidado que ya pide `PUBLIC_BASE_URL` en `server.ts`).
-- `SCHEDULER_AUDIENCE` en Cloud Run debe ser EXACTAMENTE el mismo valor que `--oidc-token-audience`.
-- `--max-retry-attempts=1`: un reintento basta — el endpoint es idempotente (M2/M3 ya evitan
-  reintentar de más) y el siguiente disparo (30 min después) vuelve a cubrir cualquier pendiente.
+- `--uri` lleva la ruta del endpoint (`/api/tareas/barrido-acuses`); `--oidc-token-audience` NO —
+  es la URL base del servicio, exactamente igual a `SCHEDULER_AUDIENCE` del paso 2 (así es como
+  `server/schedulerAuth.ts` la compara contra el claim `aud` del token).
+- `--max-retry-attempts=1`: un reintento basta — el endpoint es idempotente (el reclamo
+  transaccional de `server/cuentas.ts` ya evita reintentar de más) y el siguiente disparo (30 min
+  después) vuelve a cubrir cualquier pendiente.
 
 Verificar que el job quedó bien dado de alta:
 
 ```bash
-gcloud scheduler jobs describe certisend-barrido-acuses --project=TU_PROYECTO --location=TU_REGION
+gcloud scheduler jobs describe certisend-barrido-acuses --project=clever-spirit-436820-t7 --location=us-central1
 ```
 
 Probar manualmente (sin esperar los 30 min):
 
 ```bash
-gcloud scheduler jobs run certisend-barrido-acuses --project=TU_PROYECTO --location=TU_REGION
+gcloud scheduler jobs run certisend-barrido-acuses --project=clever-spirit-436820-t7 --location=us-central1
 ```
 
-## 5. Alerta de Cloud Logging para `ALERTA_ACUSE_ATRASADO`
+## 4. Métrica basada en logs + alerta de Cloud Logging
 
-`server/notificaciones.ts` (`logAlertaAcuseAtrasado`) emite `console.error("ALERTA_ACUSE_ATRASADO",
-{paymentId, uid, horas})` cuando el tope de intentos (M2, `MAX_INTENTOS_ACUSE=10`) se agota y el
-acuse de compra sigue sin salir — esto llega a Cloud Logging como un log estructurado con
-severidad `ERROR` desde Cloud Run. Crear una métrica basada en logs y una política de alerta sobre
-ese marcador fijo (nunca cambiar el texto `ALERTA_ACUSE_ATRASADO` sin actualizar también este
-filtro):
+`server/notificaciones.ts` (`emitirAlertaTiempoUnaVez`) emite, como canal fuerte (nunca depende
+del relay de correo), un log estructurado con severidad `ERROR` ante dos condiciones, cada una
+UNA sola vez por pago:
+
+- `ALERTA_ACUSE_ATRASADO` — el acuse lleva ≥20h sin enviarse (el barrido sigue reintentando).
+- `ALERTA_ACUSE_ABANDONADO` — el acuse lleva >48h sin enviarse (el barrido DEJA de reintentar;
+  necesita atención manual).
+
+`server/tareasFondo.ts` (`manejarBarridoAcusesTarea`) emite, con el mismo formato, un
+`BARRIDO_ACUSES_FALLO` si el barrido mismo falla (p. ej. Firestore sin red a mitad de una página),
+y un `TAREA_BARRIDO_RECHAZADA` (`motivo:"sin_token"`/`"token_invalido"`) ante un `401`/`403` — ver
+§1. Este segundo marcador NO esta en el filtro de la metrica de abajo a proposito: un `401`/`403`
+ocasional (bots escaneando el endpoint, sin el secreto nunca pueden pasar la verificacion) es
+esperado y no amerita alertar; si `TAREA_BARRIDO_RECHAZADA` empieza a aparecer de forma
+SOSTENIDA (el propio Cloud Scheduler dejo de poder autenticarse), eso lo atrapa la alerta de §4bis
+(fallos del PROPIO job, no de la app).
+
+El filtro de la métrica (§4) también incluye `ALERTA_REEMBOLSO_REQUERIDO` — `server/notificaciones.ts`
+(`avisarPagoDobleRequiereReembolso`, Medio 4/Tarea 15) ya lo emite, con el mismo formato de log
+estructurado (`severity:"ERROR"`, nunca uid), cuando un pago aprobado NO se activa por ya existir
+un Paquete vigente de OTRO pago (pago doble con 2 preferencias); la devolución del dinero en sí
+(Tarea 9) sigue siendo manual, ver el plan.
+
+Crear la métrica basada en logs (nunca cambiar el texto de estos marcadores sin actualizar
+también este filtro):
 
 ```bash
-gcloud logging metrics create certisend_acuse_atrasado \
-  --project=TU_PROYECTO \
-  --description="Acuses de compra que agotaron los reintentos automáticos (M2)" \
+gcloud logging metrics create certisend_alertas_acuse \
+  --project=clever-spirit-436820-t7 \
+  --description="Acuses de compra atrasados/abandonados, fallos del barrido y reembolsos que requieren accion manual" \
   --log-filter='resource.type="cloud_run_revision"
-resource.labels.service_name="certisendpro"
-severity=ERROR
-textPayload:"ALERTA_ACUSE_ATRASADO"'
+resource.labels.service_name="certisend-api"
+jsonPayload.message=~"ALERTA_ACUSE_(ATRASADO|ABANDONADO)|ALERTA_REEMBOLSO_REQUERIDO|BARRIDO_ACUSES_FALLO"'
 ```
 
-Crear la política de alerta (notifica por correo; cambiar `NOTIFICATION_CHANNEL_ID` por el canal
-real de Leonardo, creado antes en Cloud Monitoring → Alertas → Canales de notificación):
+Crear la política de alerta (notifica por correo a `contacto@leonardoantolinez.com` — crear antes
+el canal de notificación en Cloud Monitoring → Alertas → Canales de notificación → Correo
+electrónico, con esa dirección, y usar el id que devuelva en `NOTIFICATION_CHANNEL_ID`):
 
 ```bash
 gcloud alpha monitoring policies create \
-  --project=TU_PROYECTO \
-  --display-name="CertiSend: acuse de compra atrasado (ALERTA_ACUSE_ATRASADO)" \
+  --project=clever-spirit-436820-t7 \
+  --display-name="CertiSend: acuse atrasado/abandonado o reembolso pendiente" \
   --condition-display-name="Al menos 1 ocurrencia en 15 minutos" \
-  --condition-filter='metric.type="logging.googleapis.com/user/certisend_acuse_atrasado" AND resource.type="cloud_run_revision"' \
+  --condition-filter='metric.type="logging.googleapis.com/user/certisend_alertas_acuse" AND resource.type="cloud_run_revision"' \
   --condition-threshold-value=0 \
   --condition-threshold-comparison=COMPARISON_GT \
   --condition-threshold-duration=0s \
@@ -134,9 +188,47 @@ gcloud alpha monitoring policies create \
 Nota: la sintaxis exacta de `gcloud alpha monitoring policies create` puede variar según la
 versión del SDK instalado; si falla, crear la política equivalente desde la consola (Cloud
 Monitoring → Alertas → Crear política → condición "Métrica de log" → la métrica
-`certisend_acuse_atrasado` creada arriba → umbral "más de 0 en 15 minutos").
+`certisend_alertas_acuse` creada arriba → umbral "más de 0 en 15 minutos" → canal de notificación
+el correo `contacto@leonardoantolinez.com`).
 
-## 6. Huella HMAC de lotes (`HUELLA_LOTE_SECRET`)
+## 4bis. Segunda alerta: fallos del PROPIO job de Cloud Scheduler (M-1, corrige vuelta 34 del REVISOR_EXTERNO)
+
+La alerta de §4 lee los logs que escribe LA APLICACIÓN (`resource.type="cloud_run_revision"`) —
+nunca ve un fallo que ocurre ANTES de que la aplicación llegue a loguear nada: un `401`/`403`
+sostenido por un token OIDC mal configurado, un timeout del `--attempt-deadline` (30s, §3), o
+cualquier respuesta no-2xx que Cloud Scheduler reporte en SU PROPIO log de ejecución
+(`resource.type="cloud_scheduler_job"`). Esta segunda alerta cubre esa capa, independiente de §4 —
+si el job deja de poder disparar el barrido, esto avisa aunque la aplicación nunca llegue a
+escribir ni un solo log.
+
+Crear la métrica:
+
+```bash
+gcloud logging metrics create certisend_barrido_job_fallos \
+  --project=clever-spirit-436820-t7 \
+  --description="Fallos del propio job de Cloud Scheduler certisend-barrido-acuses (no llega a loguear la app)" \
+  --log-filter='resource.type="cloud_scheduler_job" AND resource.labels.job_id="certisend-barrido-acuses" AND severity>=ERROR'
+```
+
+Crear la política de alerta (mismo canal de correo que §4):
+
+```bash
+gcloud alpha monitoring policies create \
+  --project=clever-spirit-436820-t7 \
+  --display-name="CertiSend: fallo del job de Cloud Scheduler certisend-barrido-acuses" \
+  --condition-display-name="Al menos 1 ocurrencia en 15 minutos" \
+  --condition-filter='metric.type="logging.googleapis.com/user/certisend_barrido_job_fallos" AND resource.type="cloud_scheduler_job"' \
+  --condition-threshold-value=0 \
+  --condition-threshold-comparison=COMPARISON_GT \
+  --condition-threshold-duration=0s \
+  --condition-aggregations='[{"alignmentPeriod":"900s","perSeriesAligner":"ALIGN_COUNT"}]' \
+  --notification-channels="NOTIFICATION_CHANNEL_ID"
+```
+
+Nota: misma salvedad de sintaxis que §4 — si `gcloud alpha monitoring policies create` falla,
+crear la política equivalente desde la consola con el mismo filtro de log.
+
+## 5. Huella HMAC de lotes (`HUELLA_LOTE_SECRET`)
 
 Corrección GRAVE 2 (vuelta 31, 2026-10-06). `POST /api/lote/iniciar` firma, con esta clave, la
 huella HMAC-SHA256 de cada par página-fila-correo que el usuario confirmó en la pantalla de
@@ -178,20 +270,22 @@ curl -s https://TU_SERVICIO.run.app/api/health
 Rotar el secreto (crear una nueva versión, sin publicarla hasta estar listo):
 
 ```bash
-echo -n "EL_VALOR_NUEVO" | gcloud secrets versions add huella-lote-secret --project=TU_PROYECTO --data-file=-
+echo -n "EL_VALOR_NUEVO" | gcloud secrets versions add huella-lote-secret --project=clever-spirit-436820-t7 --data-file=-
 ```
 
 **Importante:** rotar este secreto invalida las huellas de cualquier lote YA creado y todavía no
 confirmado por completo (el lote expira solo a las 2 horas, ver `server/cuentas.ts`) — rotar
 coordinado con un momento de bajo tráfico, nunca a mitad de una campaña de envío masivo.
 
-## 7. Qué NO hace este barrido
+## 6. Qué NO hace este barrido
 
-- No reemplaza el aviso de 20h a Leonardo (`server/notificaciones.ts`,
-  `construirAvisoAcuse20hLeonardo`) — ese sigue siendo el canal principal mientras el pago esté
-  dentro del tope de intentos. `ALERTA_ACUSE_ATRASADO` es el canal ADICIONAL para cuando el tope
-  (M2, 10 intentos) ya se agotó y el caso necesita atención manual.
-- No reintenta pagos `revertido` (G3) ni pagos en un estado terminal (`agotado`, aviso de bloqueo
-  de proveedor ya enviado, aviso de 20h ya enviado — M3).
-- No reactiva un Paquete ni toca el saldo/plan del usuario: el pago YA está activado: esto es
+- No reactiva un Paquete ni toca el saldo/plan del usuario: el pago YA está activado — esto es
   solo el reintento del correo de confirmación.
+- No reintenta pagos `revertido` (un reembolso/contracargo ya confirmado: el comprador no tiene
+  nada que confirmar).
+- No tiene tope de INTENTOS ni espera creciente entre intentos (backoff exponencial) — cada
+  disparo del Scheduler (cada 30 min) reintenta todo lo pendiente sin excepción; la única cosa que
+  detiene el reintento de un pago es que su acuse ya salió, que esté revertido, o que ya pase de
+  48h (momento en el que se abandona y se alerta, ver §1).
+- No reemplaza la devolución manual del dinero (Tarea 9 del plan) ni la revisión del panel de
+  Mercado Pago — solo automatiza el correo de confirmación de compra.

@@ -1,6 +1,7 @@
 // Pruebas de la composicion de avisos (Tareas 5 y 9, cobro real con planes; M34/M35/M36 corrigen
-// la vuelta 27, 2026-10-05): `notificarActivacionPaquete`/`avisarReembolsoPaquete` de
-// server/notificaciones.ts.
+// la vuelta 27, 2026-10-05; simplificacion 2026-10-06 tras el NO-GO de la vuelta 32: el reclamo de
+// correo ahora exige `ahora`/`reclamadoEn` explicito en las tres funciones, con comparacion
+// transaccional de dueño al cerrar — ver server/cuentas.ts).
 //
 // Oraculo cubierto aqui:
 //   1. activacion -> 1 correo al comprador y 1 a Leonardo.
@@ -13,6 +14,8 @@
 //   5. texto con un dato pendiente -> 0 correos al comprador y 1 aviso a Leonardo (M36(2)).
 //   6. avisarReembolsoPaquete: si `revertirPago` lanza, la funcion AHORA propaga el error (M34),
 //      para que server/webhook.ts pueda responder 500.
+//   7. un liberar TARDIO (con el `reclamadoEn` de un reclamo viejo) nunca pisa un reclamo AJENO
+//      mas nuevo sobre el mismo destinatario (simplificacion 2026-10-06, punto 6 de la orden).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -24,9 +27,11 @@ import {
   type AvisarReembolsoDeps,
   type AvisarPagoDobleDeps,
 } from "../server/notificaciones";
-import { reclamarEnvioCorreoTx, type DestinatarioCorreo } from "../server/cuentas";
+import { reclamarEnvioCorreoTx, marcarCorreoEnviadoTx, liberarReclamoCorreoTx, type DestinatarioCorreo } from "../server/cuentas";
 import { construirCorreoConfirmacionCompra, type DatosCorreo } from "../server/avisos";
 import { FirestoreFalso } from "./_fakeFirestore";
+
+const AHORA = new Date("2026-10-06T12:00:00.000Z");
 
 // `construirCorreoComprador` por defecto en estas pruebas devuelve un texto SIN placeholders —
 // simula el estado "despues de que Leonardo completo PROVEEDOR_DOCUMENTO/PROVEEDOR_DIRECCION"
@@ -78,7 +83,7 @@ const DATOS_BASE = {
 
 test("notificarActivacionPaquete: activacion manda exactamente 1 correo al comprador y 1 a Leonardo", async () => {
   const { deps, correosEnviados } = depsActivacionFalsas();
-  await notificarActivacionPaquete(DATOS_BASE, deps);
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps);
 
   assert.equal(correosEnviados.length, 2);
   const paraComprador = correosEnviados.filter((c) => c.para === "comprador@test.com");
@@ -92,8 +97,8 @@ test("notificarActivacionPaquete: activacion manda exactamente 1 correo al compr
 
 test("notificarActivacionPaquete: llamar dos veces (deps en memoria, idempotencia simple) no manda correos extra", async () => {
   const { deps, correosEnviados } = depsActivacionFalsas();
-  await notificarActivacionPaquete(DATOS_BASE, deps);
-  await notificarActivacionPaquete(DATOS_BASE, deps);
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps);
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps);
 
   assert.equal(correosEnviados.length, 2, "la segunda llamada no debe mandar ningun correo mas");
 });
@@ -110,15 +115,13 @@ function depsConFirestoreFalsoReal(db: FirestoreFalso, paymentId: string, overri
   const correosEnviados: DatosCorreo[] = [];
   const pagoRef = db.doc(`pagosProcesados/${paymentId}`);
   const deps: NotificarActivacionDeps = {
-    reclamarEnvioCorreo: (_pid, destinatario: DestinatarioCorreo) =>
-      db.runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, destinatario)),
-    marcarCorreoEnviado: async (_pid, destinatario: DestinatarioCorreo) => {
-      const campo = destinatario === "comprador" ? "correoComprador" : destinatario === "leonardo" ? "correoLeonardo" : "avisoBloqueoProveedor";
-      await db.runTransaction(async (tx) => tx.update(pagoRef, { [campo]: "enviado" }));
+    reclamarEnvioCorreo: (_pid, destinatario: DestinatarioCorreo, ahora: Date) =>
+      db.runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, destinatario, ahora)),
+    marcarCorreoEnviado: async (_pid, destinatario: DestinatarioCorreo, reclamadoEn: Date) => {
+      await db.runTransaction((tx) => marcarCorreoEnviadoTx(tx, pagoRef, destinatario, reclamadoEn));
     },
-    liberarReclamoCorreo: async (_pid, destinatario: DestinatarioCorreo) => {
-      const campo = destinatario === "comprador" ? "correoComprador" : destinatario === "leonardo" ? "correoLeonardo" : "avisoBloqueoProveedor";
-      await db.runTransaction(async (tx) => tx.update(pagoRef, { [campo]: null }));
+    liberarReclamoCorreo: async (_pid, destinatario: DestinatarioCorreo, reclamadoEn: Date) => {
+      await db.runTransaction((tx) => liberarReclamoCorreoTx(tx, pagoRef, destinatario, reclamadoEn));
     },
     obtenerAceptacion: async () => ({ email: "comprador@test.com", idioma: "es" }),
     enviarCorreo: async (datos) => {
@@ -137,8 +140,8 @@ test("notificarActivacionPaquete (M35): dos avisos CASI SIMULTANEOS del mismo pa
   const { deps, correosEnviados } = depsConFirestoreFalsoReal(db, "pago-1");
 
   await Promise.all([
-    notificarActivacionPaquete(DATOS_BASE, deps),
-    notificarActivacionPaquete(DATOS_BASE, deps),
+    notificarActivacionPaquete(DATOS_BASE, AHORA, deps),
+    notificarActivacionPaquete(DATOS_BASE, AHORA, deps),
   ]);
 
   const paraComprador = correosEnviados.filter((c) => c.para === "comprador@test.com");
@@ -151,7 +154,7 @@ test("notificarActivacionPaquete: si correoYaEnviado/reclamo ya dice 'enviado' (
   const db = new FirestoreFalso();
   db.seed("pagosProcesados/pago-1", { correoComprador: "enviado", correoLeonardo: "enviado" });
   const { deps, correosEnviados } = depsConFirestoreFalsoReal(db, "pago-1");
-  await notificarActivacionPaquete(DATOS_BASE, deps);
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps);
   assert.equal(correosEnviados.length, 0);
 });
 
@@ -168,7 +171,7 @@ test("notificarActivacionPaquete: si enviarCorreo falla SOLO para Leonardo, el c
     },
   });
 
-  await notificarActivacionPaquete(DATOS_BASE, deps);
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps);
 
   assert.equal(correosEnviados.length, 1, "el comprador SI recibio su correo");
   assert.equal(correosEnviados[0].para, "comprador@test.com");
@@ -189,9 +192,11 @@ test("notificarActivacionPaquete: tras el fallo de Leonardo, una entrega POSTERI
     },
   });
 
-  await notificarActivacionPaquete(DATOS_BASE, deps); // 1er intento: comprador OK, Leonardo falla
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps); // 1er intento: comprador OK, Leonardo falla
   fallarLeonardo = false;
-  await notificarActivacionPaquete(DATOS_BASE, deps); // 2a entrega (p. ej. webhook repetido)
+  // 2a entrega (p. ej. webhook repetido): con un `ahora` DISTINTO (otra entrega real), el reclamo
+  // libre de Leonardo se vuelve a reclamar con un `reclamadoEn` nuevo.
+  await notificarActivacionPaquete(DATOS_BASE, new Date(AHORA.getTime() + 60_000), deps);
 
   const paraComprador = correosReales.filter((c) => c.para === "comprador@test.com");
   const paraLeonardo = correosReales.filter((c) => c.para === CORREO_LEONARDO);
@@ -205,12 +210,12 @@ test("notificarActivacionPaquete: si obtenerAceptacion lanza (Firestore sin red)
       throw new Error("red caida");
     },
   });
-  await assert.doesNotReject(notificarActivacionPaquete(DATOS_BASE, deps));
+  await assert.doesNotReject(notificarActivacionPaquete(DATOS_BASE, AHORA, deps));
 });
 
 test("notificarActivacionPaquete: sin email en la aceptacion, igual se avisa a Leonardo (y se marca enviado)", async () => {
   const { deps, correosEnviados, reclamos } = depsActivacionFalsas({ obtenerAceptacion: async () => null });
-  await notificarActivacionPaquete(DATOS_BASE, deps);
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps);
   assert.equal(correosEnviados.length, 1);
   assert.equal(correosEnviados[0].para, CORREO_LEONARDO);
   assert.equal(reclamos.get("leonardo"), "enviado");
@@ -225,7 +230,7 @@ test("notificarActivacionPaquete (M36(2)): el acuse con datos del proveedor pend
   // (server/avisos.ts), el correo compuesto para el comprador SIEMPRE trae ese placeholder — es
   // exactamente el escenario real de hoy, no uno simulado.
   const { deps, correosEnviados } = depsActivacionFalsas({ construirCorreoComprador: construirCorreoConfirmacionCompra });
-  await notificarActivacionPaquete(DATOS_BASE, deps);
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps);
 
   const paraComprador = correosEnviados.filter((c) => c.para === "comprador@test.com");
   const paraLeonardo = correosEnviados.filter((c) => c.para === CORREO_LEONARDO);
@@ -243,11 +248,45 @@ test("notificarActivacionPaquete (M36(2)): el aviso de bloqueo a Leonardo tiene 
     construirCorreoComprador: construirCorreoConfirmacionCompra, // real: hoy siempre bloqueado.
   });
 
-  await notificarActivacionPaquete(DATOS_BASE, deps);
-  await notificarActivacionPaquete(DATOS_BASE, deps); // entrega repetida del mismo pago
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps);
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps); // entrega repetida del mismo pago
 
   const avisosBloqueo = correosEnviados.filter((c) => /BLOQUEADO/.test(c.asunto));
   assert.equal(avisosBloqueo.length, 1, "el aviso de bloqueo no se repite en una entrega posterior");
+});
+
+// ── B-2 (corrige vuelta 34 del REVISOR_EXTERNO): el bloqueo de M36(2) NO es terminal ────────────
+// Con el dato del proveedor pendiente, el barrido NUNCA reclama/envia el correo al comprador (el
+// unico reclamo que toma es el de "bloqueoProveedor", para el aviso a Leonardo) — por eso, en
+// cuanto el dato se corrige (Leonardo completa PROVEEDOR_DOCUMENTO/PROVEEDOR_DIRECCION), el
+// SIGUIENTE barrido (`reintentarAcusePendiente` -> `notificarActivacionPaquete`, que relee
+// `construirCorreoComprador` desde cero en cada llamada) SI logra mandarlo — nada quedo
+// permanentemente bloqueado.
+
+test("B-2: con dato del proveedor pendiente no se envia al comprador; al corregirse, el SIGUIENTE barrido SI envia", async () => {
+  const db = new FirestoreFalso();
+  let datoPendiente = true; // simula PROVEEDOR_DOCUMENTO/PROVEEDOR_DIRECCION aun sin configurar.
+  const construirCorreoCompradorSimulado = () => ({
+    asunto: "Confirmación de tu compra",
+    texto: datoPendiente ? "Texto con un dato [PENDIENTE: completar] del proveedor." : "Texto ya completo, sin ningún dato pendiente.",
+  });
+  const { deps, correosEnviados } = depsConFirestoreFalsoReal(db, "pago-1", {
+    construirCorreoComprador: construirCorreoCompradorSimulado,
+  });
+
+  // 1er barrido: el dato SIGUE pendiente -> 0 correos al comprador.
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps);
+  assert.equal(correosEnviados.filter((c) => c.para === "comprador@test.com").length, 0, "con dato pendiente, el comprador no debe recibir nada");
+  assert.equal(db.leer("pagosProcesados/pago-1")?.correoComprador ?? null, null, "el bloqueo NUNCA reclama el campo del comprador (no es terminal)");
+
+  // Leonardo completa el dato del proveedor entre un barrido y el siguiente.
+  datoPendiente = false;
+
+  // 2o barrido (30 min despues, mismo pago): ya no hay placeholder -> SI se manda al comprador.
+  await notificarActivacionPaquete(DATOS_BASE, new Date(AHORA.getTime() + 30 * 60_000), deps);
+  const paraComprador = correosEnviados.filter((c) => c.para === "comprador@test.com");
+  assert.equal(paraComprador.length, 1, "al corregirse el dato, el SIGUIENTE barrido SI manda el acuse");
+  assert.equal(db.leer("pagosProcesados/pago-1")?.correoComprador, "enviado");
 });
 
 // ── Hallazgo de /code-review sobre el commit de M33-M36 (vuelta 27): si la escritura que CIERRA
@@ -263,7 +302,7 @@ test("notificarActivacionPaquete: si marcarCorreoEnviado falla UNA vez (transito
       reclamos.set(destinatario, "enviado");
     },
   });
-  await assert.doesNotReject(notificarActivacionPaquete(DATOS_BASE, deps));
+  await assert.doesNotReject(notificarActivacionPaquete(DATOS_BASE, AHORA, deps));
   assert.equal(correosEnviados.length, 2, "los correos SI se mandaron (el fallo fue solo en el cierre del reclamo)");
   assert.equal(reclamos.get("leonardo"), "enviado", "el reintento si logro marcar el reclamo como enviado");
 });
@@ -278,11 +317,61 @@ test("notificarActivacionPaquete: si marcarCorreoEnviado falla DOS veces seguida
         throw new Error("Firestore sin red (persistente)");
       },
     });
-    await assert.doesNotReject(notificarActivacionPaquete(DATOS_BASE, deps));
+    await assert.doesNotReject(notificarActivacionPaquete(DATOS_BASE, AHORA, deps));
   } finally {
     console.error = logOriginal;
   }
   assert.ok(logs.some((l) => l.includes("RECLAMO_SIN_SALIDA")), "debe quedar un log grepable para resolverlo a mano");
+});
+
+// ── Punto 6 de la orden de simplificacion (2026-10-06): un liberar TARDIO (con el `reclamadoEn`
+// de un reclamo ya viejo) nunca pisa un reclamo AJENO mas nuevo sobre el MISMO destinatario ────
+
+test("liberarReclamoCorreoTx: un liberar tardio (reclamadoEn viejo) no pisa un reclamo ajeno mas nuevo", async () => {
+  const db = new FirestoreFalso();
+  const pagoRef = db.doc("pagosProcesados/pago-1");
+  const ahoraA = new Date("2026-10-06T10:00:00.000Z");
+  const ahoraB = new Date("2026-10-06T10:20:00.000Z"); // 20 min despues: A ya esta atascado (>10 min).
+
+  // Entrega A reclama "comprador" a las 10:00.
+  const reclamoA = await db.runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, "comprador", ahoraA));
+  assert.equal(reclamoA, true);
+
+  // Entrega B, 20 min despues, encuentra el reclamo de A atascado y lo vuelve a reclamar (fresco).
+  const reclamoB = await db.runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, "comprador", ahoraB));
+  assert.equal(reclamoB, true, "el reclamo atascado de A SI se puede volver a reclamar");
+
+  // Entrega A, que seguia viva (p. ej. una llamada de red muy lenta), por fin intenta LIBERAR su
+  // reclamo VIEJO (con el `reclamadoEn` de las 10:00) — esto NUNCA debe tocar el reclamo de B.
+  await db.runTransaction((tx) => liberarReclamoCorreoTx(tx, pagoRef, "comprador", ahoraA));
+
+  const pago = db.leer("pagosProcesados/pago-1");
+  assert.equal(pago?.correoComprador, "reclamado", "el reclamo de B (el dueño actual) debe seguir intacto");
+  assert.equal(
+    (pago?.correoCompradorReclamadoEn as any).toMillis(),
+    ahoraB.getTime(),
+    "la fecha del reclamo debe seguir siendo la de B, no la de A"
+  );
+});
+
+test("marcarCorreoEnviadoTx: un marcar-enviado TARDIO (reclamadoEn viejo) no pisa un reclamo ajeno mas nuevo", async () => {
+  const db = new FirestoreFalso();
+  const pagoRef = db.doc("pagosProcesados/pago-1");
+  const ahoraA = new Date("2026-10-06T10:00:00.000Z");
+  const ahoraB = new Date("2026-10-06T10:20:00.000Z");
+
+  await db.runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, "comprador", ahoraA));
+  await db.runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, "comprador", ahoraB)); // B toma el reclamo atascado de A.
+
+  // A, tardiamente, cree que SI mando el correo y marca "enviado" con su `reclamadoEn` viejo.
+  await db.runTransaction((tx) => marcarCorreoEnviadoTx(tx, pagoRef, "comprador", ahoraA));
+
+  const pago = db.leer("pagosProcesados/pago-1");
+  assert.equal(pago?.correoComprador, "reclamado", "A no debe poder marcar 'enviado' sobre el reclamo de B");
+
+  // B, el dueño real, SI puede cerrarlo con su propio `reclamadoEn`.
+  await db.runTransaction((tx) => marcarCorreoEnviadoTx(tx, pagoRef, "comprador", ahoraB));
+  assert.equal(db.leer("pagosProcesados/pago-1")?.correoComprador, "enviado");
 });
 
 // ── avisarReembolsoPaquete: aviso a Leonardo, idempotente por `revertirPago` ───────────────────
@@ -377,7 +466,12 @@ test("avisarPagoDobleRequiereReembolso: manda exactamente 1 correo a Leonardo co
   assert.match(correosEnviados[0].texto, /uid-1/);
 });
 
-test("avisarPagoDobleRequiereReembolso: emite el log ALERTA_REEMBOLSO_REQUERIDO", async () => {
+// Correccion de fusion (vuelta 35, merge con wip/acuses-simple): el log pasa de un string suelto
+// a JSON estructurado con `severity:"ERROR"` — mismo formato que las alertas de acuses
+// (`emitirAlertaTiempoUnaVez`, mas abajo) y que `TAREA_BARRIDO_RECHAZADA`/`BARRIDO_ACUSES_FALLO`
+// (server/tareasFondo.ts), para que la misma metrica de Cloud Logging (docs/ops.md §4) los
+// capture a todos con un solo filtro. Nunca el uid (dato personal).
+test("avisarPagoDobleRequiereReembolso: emite el log ALERTA_REEMBOLSO_REQUERIDO en JSON con severity ERROR", async () => {
   const { deps } = depsPagoDobleFalsas();
   const original = console.error;
   const llamadas: any[] = [];
@@ -387,10 +481,13 @@ test("avisarPagoDobleRequiereReembolso: emite el log ALERTA_REEMBOLSO_REQUERIDO"
   } finally {
     console.error = original;
   }
-  assert.ok(
-    llamadas.some((args) => args[0] === "ALERTA_REEMBOLSO_REQUERIDO"),
-    "debe loguear el marcador fijo ALERTA_REEMBOLSO_REQUERIDO"
-  );
+  const logEstructurado = llamadas
+    .map((args) => { try { return JSON.parse(args[0]); } catch { return null; } })
+    .find((obj) => obj?.message === "ALERTA_REEMBOLSO_REQUERIDO");
+  assert.ok(logEstructurado, "debe loguear el marcador fijo ALERTA_REEMBOLSO_REQUERIDO como JSON");
+  assert.equal(logEstructurado.severity, "ERROR");
+  assert.equal(logEstructurado.paymentId, "pago-2");
+  assert.equal(logEstructurado.uid, undefined, "nunca el uid en el log (dato personal)");
 });
 
 test("avisarPagoDobleRequiereReembolso: si enviarCorreo falla/lanza, la funcion no lanza (el log ya quedo)", async () => {

@@ -15,7 +15,7 @@ import { esFestivoColombia } from "./festivosColombia";
 // ── Firma HMAC del relay ─────────────────────────────────────────────────────────────────────
 // El cuerpo se firma sobre una cadena canonica simple (nunca sobre `JSON.stringify`, cuyo orden de
 // claves no esta garantizado entre Node y Apps Script):
-// `${ts}\n${nonce}\n${para}\n${asunto}\n${texto}`. El relay (docs/relay/avisos-relay.gs)
+// `${ts}\n${nonce}\n${idEnvio}\n${para}\n${asunto}\n${texto}`. El relay (docs/relay/avisos-relay.gs)
 // reconstruye la MISMA cadena con los campos que recibio y compara la firma EN TIEMPO CONSTANTE
 // (M33, corrige vuelta 27) — nunca confia en una `firma` sin volver a calcularla con el secreto
 // que solo conocen el servidor y el relay.
@@ -26,12 +26,30 @@ import { esFestivoColombia } from "./festivosColombia";
 // pero un nonce ya visto (alguien capturo e intento repetir una peticion firmada real) se rechaza
 // igual que una firma invalida — sin este campo, una firma capturada seguiria siendo valida
 // durante toda su ventana de antiguedad (5 min) y se podria reenviar el mismo correo varias veces.
+//
+// `idEnvio` (M-3, corrige vuelta 34 del REVISOR_EXTERNO): a diferencia del `nonce` (aleatorio,
+// distinto en CADA llamada, incluida un reintento del MISMO correo logico), `idEnvio` es estable
+// para un mismo correo logico — `${paymentId}:${destinatario}` para los avisos del acuse de compra
+// (ver server/notificaciones.ts). El relay lo guarda en `PropertiesService` (nunca en
+// `CacheService`: caduca, y esta deduplicacion debe sobrevivir mas que los 10 min del nonce) y si
+// ya lo vio, responde OK sin volver a mandar el correo — protege contra el caso real que motivo
+// esto: el relay de Apps Script tarda mas que el timeout de `enviarCorreo` (ver abajo), Node trata
+// la llamada como fallida y el barrido la reintenta, pero Apps Script SI habia terminado de
+// mandar el correo original. Cadena vacia (`""`) cuando el llamador no tiene un id idempotente que
+// ofrecer (compatibilidad: el relay nunca deduplica una cadena vacia).
 
 /** Cadena canonica que se firma — EXPORTADA para que la prueba de HMAC (tests/avisos.test.ts) y
  * el relay (docs/relay/avisos-relay.gs, funcion `cadenaCanonica_`) construyan exactamente la misma
  * cadena a partir de los mismos campos. */
-export function cadenaCanonicaAviso(ts: number, nonce: string, para: string, asunto: string, texto: string): string {
-  return `${ts}\n${nonce}\n${para}\n${asunto}\n${texto}`;
+export function cadenaCanonicaAviso(
+  ts: number,
+  nonce: string,
+  idEnvio: string,
+  para: string,
+  asunto: string,
+  texto: string
+): string {
+  return `${ts}\n${nonce}\n${idEnvio}\n${para}\n${asunto}\n${texto}`;
 }
 
 /** HMAC-SHA256 en hexadecimal de `cuerpo` con `secreto`. Funcion PURA (sin red, sin Date.now):
@@ -48,6 +66,10 @@ export interface DatosCorreo {
   para: string;
   asunto: string;
   texto: string;
+  /** M-3: id idempotente de este correo logico (`${paymentId}:${destinatario}`) — ver comentario
+   * de `cadenaCanonicaAviso` arriba. Opcional: si se omite, el relay nunca deduplica este envio
+   * (mismo comportamiento que antes de M-3). */
+  idEnvio?: string;
 }
 
 /** Forma minima de `fetch` que necesita este modulo (inyectable en pruebas, mismo patron que
@@ -73,11 +95,20 @@ export interface EnviarCorreoDeps {
   log?: (linea: string) => void;
 }
 
-const TIMEOUT_MS_DEFECTO = 5000;
+// M-3(a) (corrige vuelta 34 del REVISOR_EXTERNO): subido de 5s a 20s. Con 5s, el relay de Apps
+// Script (que puede demorar por cuota de MailApp o cold start del script) a veces NO terminaba a
+// tiempo: Node abortaba la llamada (`false`), el barrido liberaba el reclamo y el SIGUIENTE
+// disparo (30 min despues) reintentaba — pero Apps Script, que no se cancela solo porque el
+// cliente HTTP se desconecto, a veces SI habia terminado de mandar el correo original, y el
+// reintento producia un correo duplicado de verdad. 20s da mucho mas margen sin acercarse al
+// `attempt-deadline` de 30s del propio job de Cloud Scheduler (docs/ops.md §3) ni al timeout de
+// Express/Cloud Run en la peticion que dispara el barrido. El `idEnvio` de arriba es la segunda
+// defensa (dedup del lado del relay) para el caso en que, aun con 20s, el relay siga tardando mas.
+const TIMEOUT_MS_DEFECTO = 20_000;
 
 /**
  * Envia un correo a traves del relay de Apps Script, firmado con HMAC-SHA256. Nunca lanza: si
- * faltan las variables de entorno, si el relay no responde a tiempo (timeout `timeoutMs`, 5 s por
+ * faltan las variables de entorno, si el relay no responde a tiempo (timeout `timeoutMs`, 20 s por
  * defecto) o si responde con error, devuelve `false` y deja un `console.warn`/`console.error`
  * minimo (nunca el secreto, nunca el texto completo del correo — solo el destinatario y, si
  * aplica, el estado HTTP). Quien llama (server/notificaciones.ts, server.ts) decide que hacer con
@@ -100,7 +131,9 @@ export async function enviarCorreo(datos: DatosCorreo, deps: EnviarCorreoDeps = 
   // comentario de `cadenaCanonicaAviso` arriba. `deps.generarNonce` solo existe para que las
   // pruebas puedan fijar un nonce determinista; en produccion siempre es `randomUUID()`.
   const nonce = (deps.generarNonce ?? randomUUID)();
-  const firma = firmarHmac(cadenaCanonicaAviso(ts, nonce, datos.para, datos.asunto, datos.texto), relaySecret);
+  // M-3: cadena vacia cuando el llamador no mando `idEnvio` — el relay nunca deduplica ese caso.
+  const idEnvio = datos.idEnvio ?? "";
+  const firma = firmarHmac(cadenaCanonicaAviso(ts, nonce, idEnvio, datos.para, datos.asunto, datos.texto), relaySecret);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), deps.timeoutMs ?? TIMEOUT_MS_DEFECTO);
@@ -108,7 +141,7 @@ export async function enviarCorreo(datos: DatosCorreo, deps: EnviarCorreoDeps = 
     const respuesta = await fetchFn(relayUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ para: datos.para, asunto: datos.asunto, texto: datos.texto, ts, nonce, firma }),
+      body: JSON.stringify({ para: datos.para, asunto: datos.asunto, texto: datos.texto, ts, nonce, idEnvio, firma }),
       signal: controller.signal,
     });
     if (!respuesta.ok) {
