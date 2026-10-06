@@ -4,6 +4,7 @@
 // depende de nada externo, solo de la cuenta/fecha/parametro de la URL.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { translations } from "../src/utils/translations";
 import {
   decidirEstadoSondeo,
   formatearEstadoPlan,
@@ -18,7 +19,7 @@ import {
 const ahora = new Date("2026-10-05T12:00:00Z");
 
 function cuenta(parcial: Partial<CuentaInfo>): CuentaInfo {
-  return { plan: "gratis", enviosRestantes: 0, vence: null, renueva: false, ...parcial };
+  return { plan: "gratis", enviosRestantes: 0, vence: null, renueva: false, ultimoPago: null, ...parcial };
 }
 
 // ── formatearEstadoPlan: Gratis, Paquete con fecha, Paquete vencido, Pro ────────────────────
@@ -74,7 +75,7 @@ test("Paquete sin fecha de vencimiento: tambien se trata como Gratis", () => {
 // Regresion (hallazgo de /code-review sobre el primer commit de esta tarea): formatearEstadoPlan
 // y planActivo usaban DOS copias distintas del criterio de vigencia y se contradecian para un
 // Paquete/Pro sin `vence` (una decia Gratis, la otra decia activo para siempre). Ahora comparten
-// el mismo `planVigente` interno; esta prueba fija que nunca puedan volver a divergir.
+// el mismo `planVigenteConSaldo` interno; esta prueba fija que nunca puedan volver a divergir.
 test("formatearEstadoPlan y planActivo SIEMPRE coinciden en si un plan de pago sin `vence` esta vigente", () => {
   for (const plan of ["paquete", "pro"] as const) {
     const c = cuenta({ plan, enviosRestantes: 100, vence: null });
@@ -83,6 +84,17 @@ test("formatearEstadoPlan y planActivo SIEMPRE coinciden en si un plan de pago s
     assert.equal(mostradoComoGratis, !activo, `plan=${plan}: formatearEstadoPlan y planActivo deben coincidir`);
     assert.equal(activo, false, `plan=${plan} sin vence nunca debe ser "activo" (mismo criterio que decidirLote)`);
   }
+});
+
+// G6 (NO-GO del REVISOR_EXTERNO_LAP sobre la Tarea 10): planActivo NO miraba el saldo del
+// Paquete y por eso contradecia a formatearEstadoPlan (y a decidirLote en el servidor) cuando el
+// saldo llegaba a 0 con el plan todavia vigente por fecha. Ahora las dos funciones comparten el
+// mismo criterio `planVigenteConSaldo`.
+test("G6: Paquete vigente por fecha pero con saldo 0 -> planActivo false, mismo texto Gratis que formatearEstadoPlan", () => {
+  const vence = new Date(ahora.getTime() + 10 * 24 * 3600_000).toISOString();
+  const c = cuenta({ plan: "paquete", enviosRestantes: 0, vence });
+  assert.equal(planActivo(c, ahora), false);
+  assert.equal(formatearEstadoPlan(c, "es", ahora).titulo, "Plan Gratis · hasta 15 certificados por lote");
 });
 
 test("EN: Gratis traducido", () => {
@@ -99,6 +111,14 @@ test("limite_gratis: mensaje claro + opciones, en español", () => {
   assert.match(msg, /planes/);
 });
 
+// B27: batchLimitFree ofrecia "pasar a Paquete o Pro" (Pro todavia no se vende). El texto nuevo
+// ya no promete un plan inexistente.
+test("limite_gratis: ya NO ofrece pasar a Paquete o Pro (Pro todavia no se vende)", () => {
+  const msg = formatearMotivoRechazoLote("limite_gratis", undefined, 16, "es");
+  assert.doesNotMatch(msg, /pasa(r)? a Paquete o Pro/i);
+  assert.doesNotMatch(msg, /upgrade to the Bundle or Pro/i);
+});
+
 test('saldo_insuficiente: "tienes 40, el lote es de 60" (spec, texto exacto de los numeros)', () => {
   const msg = formatearMotivoRechazoLote("saldo_insuficiente", 40, 60, "es");
   assert.match(msg, /Tienes 40 envíos y el lote es de 60\./);
@@ -108,43 +128,138 @@ test('saldo_insuficiente: "tienes 40, el lote es de 60" (spec, texto exacto de l
 // ── decidirEstadoSondeo: confirmando / activo / revision / rechazado ────────────────────────
 
 test("sin parametro pago: no hay nada que sondear (null)", () => {
-  const estado = decidirEstadoSondeo({ pago: null, cuenta: null, msTranscurridos: 0 });
+  const estado = decidirEstadoSondeo({ pago: null, cuenta: null, ultimoPagoIdInicial: null, msTranscurridos: 0 });
   assert.equal(estado, null);
 });
 
-test('pago=error: "rechazado" de inmediato, sin importar la cuenta', () => {
+test('pago=error (pago rechazado por Mercado Pago, back_urls.failure): "rechazado" de inmediato, sin importar la cuenta ni sondear exito', () => {
   const estado = decidirEstadoSondeo({
     pago: "error",
-    cuenta: cuenta({ plan: "paquete", enviosRestantes: 150, vence: new Date(ahora.getTime() + 1000).toISOString() }),
+    cuenta: cuenta({
+      plan: "paquete",
+      enviosRestantes: 150,
+      vence: new Date(ahora.getTime() + 1000).toISOString(),
+      ultimoPago: { id: "pago-1", fecha: ahora.toISOString() },
+    }),
+    ultimoPagoIdInicial: "pago-1",
     msTranscurridos: 0,
   });
   assert.equal(estado, "rechazado");
 });
 
+// G6 punto 4 (texto exacto del mensaje de "rechazado", para los dos idiomas): un pago rechazado
+// nunca sondea exito, y el mensaje que ve el usuario dice claramente que no hubo cobro.
+test('pago rechazado: el texto es "No se realizó ningún cobro." (ES) / "No charge was made." (EN)', () => {
+  assert.equal(decidirEstadoSondeo({ pago: "error", cuenta: null, ultimoPagoIdInicial: null, msTranscurridos: 0 }), "rechazado");
+  assert.equal(translations.es.pagoRechazado, "No se realizó ningún cobro.");
+  assert.equal(translations.en.pagoRechazado, "No charge was made.");
+});
+
 test("pago=ok SIN plan activo todavia: sigue confirmando, NUNCA exito directo por la URL", () => {
-  const estado = decidirEstadoSondeo({ pago: "ok", cuenta: null, msTranscurridos: 0 });
+  const estado = decidirEstadoSondeo({ pago: "ok", cuenta: null, ultimoPagoIdInicial: null, msTranscurridos: 0 });
   assert.equal(estado, "confirmando");
 });
 
 test("pago=ok con la cuenta todavia en Gratis: confirmando (no exito)", () => {
-  const estado = decidirEstadoSondeo({ pago: "ok", cuenta: cuenta({ plan: "gratis" }), msTranscurridos: 1000 });
+  const estado = decidirEstadoSondeo({
+    pago: "ok",
+    cuenta: cuenta({ plan: "gratis" }),
+    ultimoPagoIdInicial: null,
+    msTranscurridos: 1000,
+  });
   assert.equal(estado, "confirmando");
 });
 
-test("pago=ok y el servidor YA dice que el Paquete esta activo: activo", () => {
+test("pago=ok y el servidor YA dice que el Paquete esta activo CON un pago nuevo (ultimoPago.id cambio): activo", () => {
   const activaCuenta = cuenta({
     plan: "paquete",
     enviosRestantes: 150,
     vence: new Date(ahora.getTime() + 30 * 24 * 3600_000).toISOString(),
+    ultimoPago: { id: "pago-nuevo", fecha: ahora.toISOString() },
   });
-  const estado = decidirEstadoSondeo({ pago: "ok", cuenta: activaCuenta, msTranscurridos: 10_000, ahora });
+  const estado = decidirEstadoSondeo({
+    pago: "ok",
+    cuenta: activaCuenta,
+    ultimoPagoIdInicial: null, // la cuenta no habia pagado nada antes de este sondeo
+    msTranscurridos: 10_000,
+    ahora,
+  });
   assert.equal(estado, "activo");
 });
 
-test("pago=pendiente: sondeo que se agota a los 2 minutos sin plan activo -> revision", () => {
+// G6 (NO-GO del REVISOR_EXTERNO_LAP): antes "activo" salia con CUALQUIER plan vigente, aunque el
+// pago de ESTA visita no hubiera llegado todavia (p. ej. el usuario ya tenia un Paquete de una
+// compra anterior y esta en medio de una renovacion que todavia no confirma MP).
+test("G6: Paquete vigente con 40 envios pero el pago PENDIENTE no cambio ultimoPago.id -> NO activo, pasa a revision a los 2 min", () => {
+  const cuentaSinPagoNuevo = cuenta({
+    plan: "paquete",
+    enviosRestantes: 40,
+    vence: new Date(ahora.getTime() + 20 * 24 * 3600_000).toISOString(),
+    ultimoPago: { id: "pago-viejo", fecha: ahora.toISOString() },
+  });
+
+  const antesDelLimite = decidirEstadoSondeo({
+    pago: "pendiente",
+    cuenta: cuentaSinPagoNuevo,
+    ultimoPagoIdInicial: "pago-viejo", // mismo id: el pago de esta visita NO ha llegado
+    msTranscurridos: LIMITE_SONDEO_MS - 1,
+    ahora,
+  });
+  assert.equal(antesDelLimite, "confirmando");
+
+  const enElLimite = decidirEstadoSondeo({
+    pago: "pendiente",
+    cuenta: cuentaSinPagoNuevo,
+    ultimoPagoIdInicial: "pago-viejo",
+    msTranscurridos: LIMITE_SONDEO_MS,
+    ahora,
+  });
+  assert.equal(enElLimite, "revision");
+});
+
+// G6: el pago SI cambio (ultimoPago.id distinto del inicial) y el plan queda vigente con saldo.
+test("G6: ultimoPago.id cambio y hay saldo -> activo", () => {
+  const cuentaConPagoNuevo = cuenta({
+    plan: "paquete",
+    enviosRestantes: 150,
+    vence: new Date(ahora.getTime() + 30 * 24 * 3600_000).toISOString(),
+    ultimoPago: { id: "pago-nuevo", fecha: ahora.toISOString() },
+  });
+  const estado = decidirEstadoSondeo({
+    pago: "pendiente",
+    cuenta: cuentaConPagoNuevo,
+    ultimoPagoIdInicial: "pago-viejo",
+    msTranscurridos: 5000,
+    ahora,
+  });
+  assert.equal(estado, "activo");
+});
+
+// G6: el pago cambio PERO el plan quedo sin saldo (p. ej. Paquete renovado con 0 por alguna
+// inconsistencia) -> no basta con que el pago sea nuevo, tambien tiene que estar activo de
+// verdad (planActivo, el mismo criterio que formatearEstadoPlan).
+test("G6: ultimoPago.id cambio pero el Paquete quedo sin saldo -> NO activo", () => {
+  const cuentaSinSaldo = cuenta({
+    plan: "paquete",
+    enviosRestantes: 0,
+    vence: new Date(ahora.getTime() + 30 * 24 * 3600_000).toISOString(),
+    ultimoPago: { id: "pago-nuevo", fecha: ahora.toISOString() },
+  });
+  const estado = decidirEstadoSondeo({
+    pago: "ok",
+    cuenta: cuentaSinSaldo,
+    ultimoPagoIdInicial: "pago-viejo",
+    msTranscurridos: 5000,
+    ahora,
+  });
+  assert.equal(estado, "confirmando");
+});
+
+test("pago=pendiente sin ningun pago registrado todavia: sondeo que se agota a los 2 minutos sin plan activo -> revision", () => {
   const antesDelLimite = decidirEstadoSondeo({
     pago: "pendiente",
     cuenta: null,
+    ultimoPagoIdInicial: null,
     msTranscurridos: LIMITE_SONDEO_MS - 1,
   });
   assert.equal(antesDelLimite, "confirmando");
@@ -152,6 +267,7 @@ test("pago=pendiente: sondeo que se agota a los 2 minutos sin plan activo -> rev
   const enElLimite = decidirEstadoSondeo({
     pago: "pendiente",
     cuenta: null,
+    ultimoPagoIdInicial: null,
     msTranscurridos: LIMITE_SONDEO_MS,
   });
   assert.equal(enElLimite, "revision");
@@ -163,14 +279,26 @@ test("planActivo: Gratis nunca esta activo", () => {
   assert.equal(planActivo(cuenta({ plan: "gratis" }), ahora), false);
 });
 
-test("planActivo: Paquete con vence en el futuro esta activo", () => {
+test("planActivo: Paquete con vence en el futuro Y saldo esta activo", () => {
   const vence = new Date(ahora.getTime() + 1000).toISOString();
-  assert.equal(planActivo(cuenta({ plan: "paquete", vence }), ahora), true);
+  assert.equal(planActivo(cuenta({ plan: "paquete", vence, enviosRestantes: 1 }), ahora), true);
 });
 
 test("planActivo: Paquete con vence en el pasado NO esta activo", () => {
   const vence = new Date(ahora.getTime() - 1000).toISOString();
-  assert.equal(planActivo(cuenta({ plan: "paquete", vence }), ahora), false);
+  assert.equal(planActivo(cuenta({ plan: "paquete", vence, enviosRestantes: 1 }), ahora), false);
+});
+
+// G6: este es el caso exacto que encontro el REVISOR — Paquete vigente por FECHA pero con saldo
+// en 0 ya NO cuenta como activo (antes si, porque planActivo no miraba enviosRestantes).
+test("G6: planActivo: Paquete con vence en el futuro pero SIN saldo (0) NO esta activo", () => {
+  const vence = new Date(ahora.getTime() + 1000).toISOString();
+  assert.equal(planActivo(cuenta({ plan: "paquete", vence, enviosRestantes: 0 }), ahora), false);
+});
+
+test("planActivo: Pro con vence en el futuro esta activo (no necesita saldo)", () => {
+  const vence = new Date(ahora.getTime() + 1000).toISOString();
+  assert.equal(planActivo(cuenta({ plan: "pro", vence, enviosRestantes: 0 }), ahora), true);
 });
 
 test("leerPagoParam: lee ok/pendiente/error y descarta cualquier otro valor", () => {

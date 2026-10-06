@@ -914,6 +914,13 @@ app.get("/api/cuenta", exigirAuth, async (req, res) => {
       enviosRestantes: cuenta.enviosRestantes,
       vence: cuenta.vence ? cuenta.vence.toDate().toISOString() : null,
       renueva: cuenta.renueva,
+      // G6 (NO-GO del REVISOR_EXTERNO_LAP sobre la Tarea 10, 2026-10-05): el sondeo del regreso
+      // de Mercado Pago necesita saber si YA llego un pago NUEVO (no solo que la cuenta tenga
+      // algun plan vigente de una compra anterior). Solo id+fecha: nunca el monto ni datos del
+      // pagador.
+      ultimoPago: cuenta.ultimoPago
+        ? { id: cuenta.ultimoPago.id, fecha: cuenta.ultimoPago.fecha.toDate().toISOString() }
+        : null,
     });
   } catch (error: any) {
     console.error("Error al obtener la cuenta:", error);

@@ -102,6 +102,10 @@ export interface TranslationDict {
   pagoActivo: string;
   pagoRevision: string;
   pagoRechazado: string;
+  // G5 (NO-GO del REVISOR_EXTERNO_LAP sobre la Tarea 10, 2026-10-05): sin sesion real de
+  // Firebase no se sondea nada (se mentiria con "confirmando"/"en revision"); se pide iniciar
+  // sesion.
+  pagoSinSesion: string;
 }
 
 export type Lang = "es" | "en";
@@ -186,7 +190,7 @@ export const translations: Record<Lang, TranslationDict> = {
     footerText: "CertiSend Pro es un servicio independiente de automatización segura de diplomas.",
     footerRights: "Todos los derechos reservados.",
 
-    batchLimitFree: "El plan Gratis permite hasta 15 certificados por lote. Divide el lote o pasa a Paquete o Pro.",
+    batchLimitFree: "El plan Gratis permite hasta 15 certificados por lote. Puedes dividirlo o escribirnos.",
     batchLimitSaldo: "Tienes {restantes} envíos y el lote es de {lote}.",
     batchLimitOpciones: "Puedes dividir el lote en partes de 15 o menos, o escribirnos a contacto@leonardoantolinez.com para ver los planes.",
 
@@ -198,7 +202,8 @@ export const translations: Record<Lang, TranslationDict> = {
     pagoConfirmando: "Estamos confirmando tu pago…",
     pagoActivo: "¡Pago confirmado! Tu plan ya está activo.",
     pagoRevision: "Tu pago está en revisión; te avisamos por correo.",
-    pagoRechazado: "No se realizó ningún cobro."
+    pagoRechazado: "No se realizó ningún cobro.",
+    pagoSinSesion: "Inicia sesión para ver el estado de tu pago.",
   },
   en: {
     appName: "CertiSend Pro",
@@ -279,7 +284,7 @@ export const translations: Record<Lang, TranslationDict> = {
     footerText: "CertiSend Pro is an independent, secure certificate automation utility.",
     footerRights: "All rights reserved.",
 
-    batchLimitFree: "The Free plan allows up to 15 certificates per batch. Split the batch or upgrade to the Bundle or Pro plan.",
+    batchLimitFree: "The Free plan allows up to 15 certificates per batch. You can split it or email us.",
     batchLimitSaldo: "You have {restantes} sends left and this batch has {lote}.",
     batchLimitOpciones: "You can split the batch into parts of 15 or fewer, or email us at contacto@leonardoantolinez.com to see the plans.",
 
@@ -291,6 +296,7 @@ export const translations: Record<Lang, TranslationDict> = {
     pagoConfirmando: "We're confirming your payment…",
     pagoActivo: "Payment confirmed! Your plan is now active.",
     pagoRevision: "Your payment is under review; we'll email you.",
-    pagoRechazado: "No charge was made."
+    pagoRechazado: "No charge was made.",
+    pagoSinSesion: "Sign in to see your payment status.",
   }
 };

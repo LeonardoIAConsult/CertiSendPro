@@ -220,24 +220,33 @@ export default function App() {
     cuentaRef.current = cuenta;
   }, [cuenta]);
 
-  const fetchCuenta = async () => {
+  // Devuelve si pudo leer la cuenta ("ok"), si no hay sesion real de Firebase ("sin-sesion": Modo
+  // Invitado, o sin ID token — p. ej. justo al volver de Mercado Pago con la pagina recien
+  // cargada y needsAuth=true porque se perdio el access token de Gmail en memoria, pero SIN
+  // sesion de Firebase persistida tampoco) o si fallo la llamada ("error"). El sondeo del regreso
+  // de Mercado Pago (mas abajo) usa este resultado para no mentir: sin sesion, no es
+  // "confirmando" ni "en revision", es "inicia sesion" (G5, NO-GO del REVISOR_EXTERNO_LAP).
+  const fetchCuenta = async (): Promise<"ok" | "sin-sesion" | "error"> => {
     // Modo Invitado no tiene sesion real de Firebase (sin ID token, el servidor respondería 401):
     // se queda sin "Mi plan" en vez de pedir permiso de todos modos.
-    if (user?.isGuest) return;
+    if (user?.isGuest) return "sin-sesion";
     try {
       const authHeader = await construirAuthHeader();
-      if (!authHeader.Authorization) return;
+      if (!authHeader.Authorization) return "sin-sesion";
       const res = await fetch("/api/cuenta", { headers: authHeader });
-      if (!res.ok) return;
+      if (!res.ok) return "error";
       const data = await res.json();
       setCuenta({
         plan: data.plan,
         enviosRestantes: data.enviosRestantes,
         vence: data.vence,
         renueva: data.renueva,
+        ultimoPago: data.ultimoPago ?? null,
       });
+      return "ok";
     } catch (err) {
       console.error("No se pudo obtener tu cuenta:", err);
+      return "error";
     }
   };
 
@@ -263,16 +272,31 @@ export default function App() {
 
     const inicio = Date.now();
     let detenido = false;
+    // G6 (NO-GO del REVISOR_EXTERNO_LAP): el id de `ultimoPago` que la cuenta YA tenia al EMPEZAR
+    // a sondear (lo fija la primera lectura exitosa, `undefined` = todavia no se sabe). "activo"
+    // exige que este id CAMBIE, para no confundir un plan vigente de una compra VIEJA con la
+    // confirmacion de ESTE pago.
+    let ultimoPagoIdInicial: string | null | undefined = undefined;
     setPagoEstado("confirmando");
 
     // El exito NUNCA lo decide la URL: cada "revisar" vuelve a pedir /api/cuenta y
-    // `decidirEstadoSondeo` solo marca "activo" si el SERVIDOR dice que el plan ya esta activo.
+    // `decidirEstadoSondeo` solo marca "activo" si el SERVIDOR dice que el plan ya esta activo
+    // CON un pago nuevo. Sin sesion real de Firebase (G5), no se sondea ni se miente: se pide
+    // iniciar sesion (el intervalo sigue corriendo para cuando el usuario inicie sesion).
     const revisar = async () => {
-      await fetchCuenta();
+      const resultado = await fetchCuenta();
       if (detenido) return;
+      if (resultado === "sin-sesion") {
+        setPagoEstado("sin_sesion");
+        return;
+      }
+      if (ultimoPagoIdInicial === undefined) {
+        ultimoPagoIdInicial = cuentaRef.current?.ultimoPago?.id ?? null;
+      }
       const estado = decidirEstadoSondeo({
         pago: pagoParam,
         cuenta: cuentaRef.current,
+        ultimoPagoIdInicial,
         msTranscurridos: Date.now() - inicio,
       });
       if (estado) setPagoEstado(estado);
@@ -1299,6 +1323,44 @@ export default function App() {
     return rec.name.toLowerCase().includes(q) || rec.email.toLowerCase().includes(q);
   });
 
+  // Banner persistente del regreso de Mercado Pago (G5, NO-GO del REVISOR_EXTERNO_LAP sobre la
+  // Tarea 10, 2026-10-05): se calcula ANTES del `if (needsAuth)` de abajo para poder pintarse
+  // tambien ahi. Antes, ese `return <LandingPage/>` salia antes de donde vivia este bloque y el
+  // usuario nunca lo veia al volver del pago con la pagina recien cargada (needsAuth=true porque
+  // se perdio el access token de Gmail en memoria, aunque la sesion de Firebase siga viva).
+  const pagoBanner = pagoEstado && (
+    <div
+      className={`mx-6 mt-4 rounded-lg border px-4 py-3 flex items-center gap-2 text-xs font-semibold ${
+        pagoEstado === "activo"
+          ? "bg-[#061C14] border-emerald-500/50 text-emerald-100"
+          : pagoEstado === "rechazado"
+          ? "bg-[#1C0606] border-rose-500/50 text-rose-100"
+          : pagoEstado === "revision" || pagoEstado === "sin_sesion"
+          ? "bg-[#1C1606] border-amber-500/50 text-amber-100"
+          : "bg-[#06101C] border-blue-500/50 text-blue-100"
+      }`}
+    >
+      {pagoEstado === "confirmando" && <Loader2 className="w-4 h-4 shrink-0 animate-spin" />}
+      {pagoEstado === "activo" && <CheckCircle2 className="w-4 h-4 shrink-0" />}
+      {(pagoEstado === "revision" || pagoEstado === "rechazado" || pagoEstado === "sin_sesion") && (
+        <AlertCircle className="w-4 h-4 shrink-0" />
+      )}
+      <span>
+        {translations[language][
+          pagoEstado === "confirmando"
+            ? "pagoConfirmando"
+            : pagoEstado === "activo"
+            ? "pagoActivo"
+            : pagoEstado === "revision"
+            ? "pagoRevision"
+            : pagoEstado === "sin_sesion"
+            ? "pagoSinSesion"
+            : "pagoRechazado"
+        ]}
+      </span>
+    </div>
+  );
+
   if (showPrivacyPolicy) {
     return (
       <PrivacyPolicy
@@ -1310,15 +1372,18 @@ export default function App() {
 
   if (needsAuth) {
     return (
-      <LandingPage
-        language={language}
-        setLanguage={setLanguage}
-        theme={theme}
-        setTheme={setTheme}
-        onStart={handleLogin}
-        onViewPrivacy={handleNavigateToPrivacy}
-        isLoggingIn={isLoggingIn}
-      />
+      <>
+        {pagoBanner}
+        <LandingPage
+          language={language}
+          setLanguage={setLanguage}
+          theme={theme}
+          setTheme={setTheme}
+          onStart={handleLogin}
+          onViewPrivacy={handleNavigateToPrivacy}
+          isLoggingIn={isLoggingIn}
+        />
+      </>
     );
   }
 
@@ -1436,35 +1501,9 @@ export default function App() {
       {/* Regreso de Mercado Pago (Tarea 10, 2026-10-05): estado del sondeo contra /api/cuenta.
           El exito NUNCA lo decide la URL (?pago=ok): solo decidirEstadoSondeo, con la respuesta
           real del servidor, puede marcar "activo". Persiste hasta resolverse (no es el banner
-          que se autodescarta a los 6s). */}
-      {pagoEstado && (
-        <div
-          className={`mx-6 mt-4 rounded-lg border px-4 py-3 flex items-center gap-2 text-xs font-semibold ${
-            pagoEstado === "activo"
-              ? "bg-[#061C14] border-emerald-500/50 text-emerald-100"
-              : pagoEstado === "rechazado"
-              ? "bg-[#1C0606] border-rose-500/50 text-rose-100"
-              : pagoEstado === "revision"
-              ? "bg-[#1C1606] border-amber-500/50 text-amber-100"
-              : "bg-[#06101C] border-blue-500/50 text-blue-100"
-          }`}
-        >
-          {pagoEstado === "confirmando" && <Loader2 className="w-4 h-4 shrink-0 animate-spin" />}
-          {pagoEstado === "activo" && <CheckCircle2 className="w-4 h-4 shrink-0" />}
-          {(pagoEstado === "revision" || pagoEstado === "rechazado") && <AlertCircle className="w-4 h-4 shrink-0" />}
-          <span>
-            {translations[language][
-              pagoEstado === "confirmando"
-                ? "pagoConfirmando"
-                : pagoEstado === "activo"
-                ? "pagoActivo"
-                : pagoEstado === "revision"
-                ? "pagoRevision"
-                : "pagoRechazado"
-            ]}
-          </span>
-        </div>
-      )}
+          que se autodescarta a los 6s). Variable `pagoBanner` definida arriba (G5: se pinta
+          tambien cuando needsAuth es true, antes de este punto). */}
+      {pagoBanner}
 
       {/* Main Workspace Grid - High-Density columns Arrangement */}
       {needsAuth ? (
