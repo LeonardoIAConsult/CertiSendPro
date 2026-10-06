@@ -19,7 +19,11 @@ import { Timestamp } from "firebase-admin/firestore";
 import {
   reclamarEnvioCorreoTx,
   seleccionarPagosParaBarrido,
+  elegibleParaReintentoAcuse,
+  registrarIntentoAcuseTx,
+  calcularEsperaBackoffMs,
   UMBRAL_RECLAMO_ATASCADO_MS,
+  MAX_INTENTOS_ACUSE,
   type DestinatarioCorreo,
 } from "../server/cuentas";
 import {
@@ -133,6 +137,7 @@ function depsReintentoConFirestoreFalso(
     },
     construirCorreoComprador: (_datos) => ({ asunto: "Confirmación de tu compra", texto: "Texto sin ningún dato pendiente." }),
     obtenerEstadoCorreoComprador: async (pid) => db.leer(`pagosProcesados/${pid}`)?.correoComprador ?? null,
+    registrarIntentoAcuse: (_pid, ahora) => db.runTransaction((tx) => registrarIntentoAcuseTx(tx, pagoRef, ahora)),
     ...overrides,
   };
   return { deps, correosEnviados };
@@ -309,4 +314,142 @@ test("seleccionarPagosParaBarrido: respeta el limite aunque haya mas candidatos 
   const candidatos = ["a", "b", "c"].map((id) => candidato(id));
   const seleccionados = seleccionarPagosParaBarrido(candidatos, ahora, CINCO_MIN_MS, 2);
   assert.equal(seleccionados.length, 2);
+});
+
+// ── G3 (correccion NO-GO vuelta 30, 2026-10-05): un pago revertido NUNCA se elige ni se reintenta ──
+// Oraculo de la orden: "pago revertido con correoComprador null → no se elige y no se envía nada".
+
+test("G3: elegibleParaReintentoAcuse rechaza un pago revertido aunque correoComprador sea null", () => {
+  assert.equal(elegibleParaReintentoAcuse({ correoComprador: null, revertido: true }, new Date()), false);
+});
+
+test("G3: seleccionarPagosParaBarrido excluye un pago revertido con correoComprador null (no se elige)", () => {
+  const ahora = new Date();
+  const revertido = candidato("pago-revertido", { correoComprador: null, revertido: true });
+  const seleccionados = seleccionarPagosParaBarrido([revertido], ahora, CINCO_MIN_MS, 5);
+  assert.equal(seleccionados.length, 0, "un pago revertido nunca debe elegirse para reintentar el acuse");
+});
+
+test("G3: reintentarAcusePendiente con datos.revertido=true no envia nada (defensa en profundidad)", async () => {
+  const db = new FirestoreFalso();
+  db.seed("pagosProcesados/pago-1", { procesadoEn: Timestamp.now(), correoComprador: null });
+  const { deps, correosEnviados } = depsReintentoConFirestoreFalso(db, "pago-1");
+
+  await reintentarAcusePendiente({ ...DATOS_REINTENTO_BASE, revertido: true }, new Date(), deps);
+
+  assert.equal(correosEnviados.length, 0, "ningun correo debe salir para un pago revertido");
+  assert.equal(db.leer("pagosProcesados/pago-1")?.correoComprador, null, "el estado del correo no debe tocarse");
+});
+
+// ── B3 (correccion NO-GO vuelta 30): el borde exacto de UMBRAL_RECLAMO_ATASCADO_MS SI es atascado ──
+
+// Las dos pruebas de abajo usan un `ahora` FIJO (nunca `Date.now()`/`new Date()` capturados en
+// dos instantes distintos del test): con margenes de 1ms, depender del reloj real haria estas
+// pruebas flaky bajo carga de CPU (el tiempo real entre "sembrar el dato" y "llamar a la funcion"
+// puede superar 1ms facilmente) — confirmado como la causa real de un flake intermitente visto al
+// correr la suite completa varias veces seguidas.
+const AHORA_FIJO_B3 = new Date("2026-10-05T12:00:00.000Z");
+
+test("B3: un reclamo 'reclamado' EXACTAMENTE en el umbral (ni un ms mas) SI se considera atascado", async () => {
+  const db = new FirestoreFalso();
+  const haceExactoElUmbral = new Date(AHORA_FIJO_B3.getTime() - UMBRAL_RECLAMO_ATASCADO_MS);
+  db.seed("pagosProcesados/pago-1", {
+    correoComprador: "reclamado",
+    correoCompradorReclamadoEn: Timestamp.fromDate(haceExactoElUmbral),
+  });
+  const pagoRef = db.doc("pagosProcesados/pago-1");
+
+  const reclamado = await db.runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, "comprador", AHORA_FIJO_B3));
+
+  assert.equal(reclamado, true, "exactamente en el umbral (>=) ya debe tratarse como atascado");
+});
+
+test("B3: un reclamo 'reclamado' UN ms antes del umbral NO se considera atascado todavia", async () => {
+  const db = new FirestoreFalso();
+  const unMsAntes = new Date(AHORA_FIJO_B3.getTime() - (UMBRAL_RECLAMO_ATASCADO_MS - 1));
+  db.seed("pagosProcesados/pago-1", {
+    correoComprador: "reclamado",
+    correoCompradorReclamadoEn: Timestamp.fromDate(unMsAntes),
+  });
+  const pagoRef = db.doc("pagosProcesados/pago-1");
+
+  const reclamado = await db.runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, "comprador", AHORA_FIJO_B3));
+
+  assert.equal(reclamado, false, "todavia no llega al umbral: sigue fresco");
+});
+
+// ── M2 (correccion NO-GO vuelta 30, 2026-10-05): tope de intentos con espera creciente ──────────
+
+test("M2: calcularEsperaBackoffMs crece exponencialmente (2^n minutos)", () => {
+  assert.equal(calcularEsperaBackoffMs(0), 60_000); // 2^0 = 1 min
+  assert.equal(calcularEsperaBackoffMs(1), 2 * 60_000);
+  assert.equal(calcularEsperaBackoffMs(2), 4 * 60_000);
+  assert.equal(calcularEsperaBackoffMs(3), 8 * 60_000);
+});
+
+test("M2: registrarIntentoAcuseTx incrementa intentosAcuse y guarda ultimoIntentoAcuseEn", async () => {
+  const db = new FirestoreFalso();
+  db.seed("pagosProcesados/pago-1", {});
+  const pagoRef = db.doc("pagosProcesados/pago-1");
+  const ahora = new Date();
+
+  const r1 = await db.runTransaction((tx) => registrarIntentoAcuseTx(tx, pagoRef, ahora));
+  assert.deepEqual(r1, { intentos: 1, agotado: false });
+  assert.equal(db.leer("pagosProcesados/pago-1")?.intentosAcuse, 1);
+  assert.equal(
+    (db.leer("pagosProcesados/pago-1")?.ultimoIntentoAcuseEn as Timestamp).toMillis(),
+    ahora.getTime()
+  );
+
+  const r2 = await db.runTransaction((tx) => registrarIntentoAcuseTx(tx, pagoRef, ahora));
+  assert.deepEqual(r2, { intentos: 2, agotado: false });
+});
+
+test(`M2: al llegar a MAX_INTENTOS_ACUSE (${MAX_INTENTOS_ACUSE}) se marca agotado y NO cuenta un intento nuevo`, async () => {
+  const db = new FirestoreFalso();
+  db.seed("pagosProcesados/pago-1", { intentosAcuse: MAX_INTENTOS_ACUSE });
+  const pagoRef = db.doc("pagosProcesados/pago-1");
+
+  const r = await db.runTransaction((tx) => registrarIntentoAcuseTx(tx, pagoRef, new Date()));
+
+  assert.deepEqual(r, { intentos: MAX_INTENTOS_ACUSE, agotado: true });
+  assert.equal(db.leer("pagosProcesados/pago-1")?.estadoAcuse, "agotado");
+  assert.equal(db.leer("pagosProcesados/pago-1")?.intentosAcuse, MAX_INTENTOS_ACUSE, "no debe contar un intento nuevo");
+});
+
+test("M2: exactamente MAX_INTENTOS_ACUSE-1 intentos previos SI permite un intento mas (10mo intento real)", async () => {
+  const db = new FirestoreFalso();
+  db.seed("pagosProcesados/pago-1", { intentosAcuse: MAX_INTENTOS_ACUSE - 1 });
+  const pagoRef = db.doc("pagosProcesados/pago-1");
+
+  const r = await db.runTransaction((tx) => registrarIntentoAcuseTx(tx, pagoRef, new Date()));
+
+  assert.deepEqual(r, { intentos: MAX_INTENTOS_ACUSE, agotado: false }, "el intento numero MAX_INTENTOS_ACUSE SI debe intentarse");
+});
+
+test("M2: elegibleParaReintentoAcuse rechaza estadoAcuse='agotado' (estado terminal, M3)", () => {
+  assert.equal(elegibleParaReintentoAcuse({ correoComprador: null, estadoAcuse: "agotado" }, new Date()), false);
+});
+
+test("M2: elegibleParaReintentoAcuse respeta la espera creciente (no reintenta antes de 2^n min)", () => {
+  const ahora = new Date("2026-10-05T12:00:00.000Z");
+  const unMinDespuesDelPrimerIntento = {
+    correoComprador: null,
+    intentosAcuse: 1,
+    ultimoIntentoAcuseEn: Timestamp.fromDate(new Date(ahora.getTime() - 1 * 60_000)), // 1 min, necesita 2^1=2.
+  };
+  assert.equal(elegibleParaReintentoAcuse(unMinDespuesDelPrimerIntento, ahora), false, "todavia no pasaron los 2 min requeridos");
+
+  const dosMinDespues = {
+    ...unMinDespuesDelPrimerIntento,
+    ultimoIntentoAcuseEn: Timestamp.fromDate(new Date(ahora.getTime() - 2 * 60_000)),
+  };
+  assert.equal(elegibleParaReintentoAcuse(dosMinDespues, ahora), true, "ya pasaron los 2 min requeridos");
+});
+
+test("M3: elegibleParaReintentoAcuse rechaza avisoBloqueoProveedor/avisoAcuse20h ya 'enviado' (estados terminales)", () => {
+  assert.equal(elegibleParaReintentoAcuse({ correoComprador: null, avisoBloqueoProveedor: "enviado" }, new Date()), false);
+  assert.equal(elegibleParaReintentoAcuse({ correoComprador: null, avisoAcuse20h: "enviado" }, new Date()), false);
+  // "reclamado" (no "enviado") en esos dos destinatarios NO es terminal: debe seguir elegible.
+  assert.equal(elegibleParaReintentoAcuse({ correoComprador: null, avisoBloqueoProveedor: "reclamado" }, new Date()), true);
 });

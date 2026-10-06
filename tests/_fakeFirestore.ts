@@ -86,6 +86,17 @@ export class FirestoreFalso {
     return { path };
   }
 
+  /**
+   * M1 (correccion NO-GO vuelta 30, 2026-10-05): minimo necesario para probar los ENVOLTORIOS
+   * REALES de server/cuentas.ts (p. ej. `activarPaqueteSiNoProcesado`, no solo su `...Tx`) contra
+   * este doble, via `_usarFirestoreParaPruebas`. Esos envoltorios solo hacen
+   * `db().collection(nombre).doc(id)` y `db().runTransaction(...)` — nunca `.where()`/`.get()`
+   * fuera de una transaccion — por eso esto NO intenta imitar consultas de Firestore.
+   */
+  collection(nombre: string): { doc(id: string): DocRefFalso } {
+    return { doc: (id: string) => this.doc(`${nombre}/${id}`) };
+  }
+
   /** Siembra un documento con datos iniciales, fuera de cualquier transaccion. */
   seed(path: string, data: Record<string, any>) {
     this.almacen.set(path, { version: 1, data: { ...data } });

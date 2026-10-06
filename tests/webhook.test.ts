@@ -15,7 +15,8 @@ import assert from "node:assert/strict";
 import { Timestamp } from "firebase-admin/firestore";
 import { procesarWebhookMP, registrarResultadoWebhook, type RespuestaPagoMP } from "../server/webhook";
 import {
-  activarPaqueteSiNoProcesadoTx,
+  activarPaqueteSiNoProcesado,
+  _usarFirestoreParaPruebas,
   type Cuenta,
   type PreferenciaGuardada,
 } from "../server/cuentas";
@@ -58,20 +59,18 @@ function preferenciaBase(parcial: Partial<PreferenciaGuardada> = {}): Preferenci
   };
 }
 
-/** Activa de verdad contra un FirestoreFalso (no un mock): misma funcion transaccional que
- * produccion (server/cuentas.ts), para que "una sola activacion" sea una prueba real. */
+/**
+ * M1 (correccion NO-GO vuelta 30, 2026-10-05): activa de verdad contra un FirestoreFalso (no un
+ * mock) llamando al ENVOLTORIO REAL `activarPaqueteSiNoProcesado` (antes esta funcion llamaba
+ * directo a `activarPaqueteSiNoProcesadoTx` y agregaba `uid` ella misma al armar los parametros —
+ * las conexiones de produccion de verdad, el envoltorio que abre `db().collection().doc()` y
+ * `db().runTransaction(...)`, nunca tenian su propia prueba). `_usarFirestoreParaPruebas` apunta
+ * el `db()` interno de server/cuentas.ts a ESTE FirestoreFalso; el envoltorio real es el que
+ * decide pasar `uid` a la transaccion, exactamente como en Cloud Run.
+ */
 function activarPaqueteConFake(db: FirestoreFalso) {
-  return async (
-    uid: string,
-    paymentId: string,
-    datos: { cop: number; trm: number; fecha: Timestamp; referenciaId?: string; fechaTrm?: string }
-  ) => {
-    const pagoRef = db.doc(`pagosProcesados/${paymentId}`);
-    const cuentaRef = db.doc(`cuentas/${uid}`);
-    return db.runTransaction((tx) =>
-      activarPaqueteSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, uid, ...datos })
-    );
-  };
+  _usarFirestoreParaPruebas(db);
+  return activarPaqueteSiNoProcesado;
 }
 
 function obtenerPreferenciaConFake(db: FirestoreFalso, preferencias: Record<string, PreferenciaGuardada>) {
@@ -105,7 +104,7 @@ function construirOpts(overrides: Partial<{
   activarPaquete: (
     uid: string,
     paymentId: string,
-    datos: { cop: number; trm: number; fecha: Timestamp }
+    datos: { cop: number; trm: number; fecha: Timestamp; referenciaId: string; fechaTrm: string }
   ) => Promise<"activado" | "repetido">;
   notificarActivacion: (datos: any) => Promise<void>;
   procesarReembolso: (datos: any) => Promise<void>;
@@ -156,6 +155,11 @@ test("webhook: pago aprobado y correcto activa el Paquete (150 envios, vence +1 
 
   const pagoProcesado = db.leer("pagosProcesados/pago-1");
   assert.ok(pagoProcesado, "el pago debe quedar marcado como procesado");
+  // M1 (correccion NO-GO vuelta 30): el ENVOLTORIO REAL `activarPaqueteSiNoProcesado` (no solo su
+  // `...Tx`) es quien debe guardar el uid en `pagosProcesados/{id}` — esta prueba llama al
+  // envoltorio real (ver `activarPaqueteConFake` arriba), asi que detecta si alguien quita `uid`
+  // de ese envoltorio.
+  assert.equal(pagoProcesado!.uid, "uid-1", "el envoltorio real debe guardar el uid del pago");
 });
 
 // ── Idempotencia: mismo pago dos veces -> una sola activacion ──────────────────────────────────

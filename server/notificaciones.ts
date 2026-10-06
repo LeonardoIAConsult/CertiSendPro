@@ -32,6 +32,7 @@ import {
   obtenerAceptacion as obtenerAceptacionReal,
   revertirPagoSiNoRevertido as revertirPagoSiNoRevertidoReal,
   obtenerEstadoCorreoComprador as obtenerEstadoCorreoCompradorReal,
+  registrarIntentoAcuse as registrarIntentoAcuseReal,
   type DestinatarioCorreo,
   type Idioma,
   type ResultadoReversion,
@@ -309,16 +310,36 @@ export interface DatosReintentoAcusePendiente {
   fecha: Date;
   /** Fecha de vencimiento del Paquete activado por ESTE pago. */
   vence: Date;
+  /** G3 (correccion NO-GO vuelta 30): true si Mercado Pago reembolso/contracargo este pago.
+   * Opcional (`?? false`) para no romper llamadas existentes que todavia no lo reconstruyen;
+   * `datosReintentoDesdePago` (server/tareasFondo.ts) SIEMPRE lo manda en produccion. */
+  revertido?: boolean;
 }
 
 export interface ReintentarAcuseDeps extends NotificarActivacionDeps {
   obtenerEstadoCorreoComprador(paymentId: string): Promise<string | null>;
+  /** M2 (correccion NO-GO vuelta 30): registra un intento mas de reintento del acuse (incrementa
+   * `intentosAcuse`, guarda `ultimoIntentoAcuseEn`); al llegar a `MAX_INTENTOS_ACUSE` marca
+   * `estadoAcuse="agotado"` en vez de contar un intento nuevo. Ver server/cuentas.ts
+   * `registrarIntentoAcuseTx`. */
+  registrarIntentoAcuse(paymentId: string, ahora: Date): Promise<{ intentos: number; agotado: boolean }>;
 }
 
 const depsReintentarAcuseReales: ReintentarAcuseDeps = {
   ...depsNotificarActivacionReales,
   obtenerEstadoCorreoComprador: obtenerEstadoCorreoCompradorReal,
+  registrarIntentoAcuse: registrarIntentoAcuseReal,
 };
+
+/** M2 (correccion NO-GO vuelta 30, 2026-10-05): log con marcador FIJO y grepable para que una
+ * alerta de Cloud Logging lo capture (el Brain la configura, ver docs/ops.md) — se emite cuando
+ * `registrarIntentoAcuse` agota el tope de intentos (`MAX_INTENTOS_ACUSE`) y el acuse de compra
+ * sigue sin salir. `console.error` (nunca `console.log`): es una condicion que requiere atencion
+ * humana, no informativa. */
+function logAlertaAcuseAtrasado(datos: { paymentId: string; uid: string; fecha: Date }, ahora: Date): void {
+  const horas = Math.round((ahora.getTime() - datos.fecha.getTime()) / 3600_000);
+  console.error("ALERTA_ACUSE_ATRASADO", { paymentId: datos.paymentId, uid: datos.uid, horas });
+}
 
 /**
  * M37: reintenta el acuse de UN pago que todavia no tiene `correoComprador="enviado"`. Nunca
@@ -326,6 +347,16 @@ const depsReintentarAcuseReales: ReintentarAcuseDeps = {
  * respuesta HTTP). Tras reintentar, si han pasado 20h o mas desde el pago Y el acuse SIGUE sin
  * salir, avisa a Leonardo UNA sola vez (mismo mecanismo de reclamo que los demas destinatarios de
  * correo, destinatario "acuse20h" — ver server/cuentas.ts).
+ *
+ * G3 (correccion NO-GO vuelta 30): defensa en profundidad — un pago `revertido` NUNCA reintenta
+ * (el comprador ya no tiene nada que confirmar). En la practica, quien selecciona los candidatos
+ * (`seleccionarPagosParaBarrido`/`listarPagosPendientesDeAcuse`, server/cuentas.ts) ya filtra esto
+ * antes de llegar aqui; este chequeo es la segunda capa, por si algun llamador futuro se salta esa
+ * seleccion.
+ *
+ * M2 (correccion NO-GO vuelta 30): antes de intentar el envio, registra un intento mas
+ * (`registrarIntentoAcuse`). Si eso agota el tope (`MAX_INTENTOS_ACUSE`), NO se intenta el envio
+ * esta vez — se emite `ALERTA_ACUSE_ATRASADO` (log con marcador fijo) y se retorna.
  */
 export async function reintentarAcusePendiente(
   datos: DatosReintentoAcusePendiente,
@@ -333,12 +364,23 @@ export async function reintentarAcusePendiente(
   deps: ReintentarAcuseDeps = depsReintentarAcuseReales
 ): Promise<void> {
   try {
+    if (datos.revertido === true) {
+      console.warn(`[NOTIFICACIONES] G3: pago ${datos.paymentId} revertido; no se reintenta el acuse.`);
+      return;
+    }
+
     if (!datos.referenciaId || !datos.fechaTrm) {
       // Pago de antes de M37 (activado sin estos datos) o con datos incompletos: no hay con que
       // reconstruir el correo con seguridad. Queda igual que antes — atendible a mano, sin
       // reintento automatico (mismo patron ya aceptado en este proyecto para otros "pendiente").
       console.warn(`[NOTIFICACIONES] M37: pago ${datos.paymentId} sin referenciaId/fechaTrm guardados; no se puede reintentar el acuse automaticamente.`);
       return;
+    }
+
+    const { agotado } = await deps.registrarIntentoAcuse(datos.paymentId, ahora);
+    if (agotado) {
+      logAlertaAcuseAtrasado(datos, ahora);
+      return; // M2: tope de intentos agotado — no se vuelve a intentar automaticamente.
     }
 
     await notificarActivacionPaquete(
