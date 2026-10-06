@@ -147,6 +147,7 @@ Hoy no hay planes ni base de datos: todo es gratis y en memoria. El cobro nunca 
 - **Dónde:** `src/App.tsx`, `server.ts` (registro de confirmación, junto a `/api/lote/iniciar`).
 - **Depende de:** Tarea 3.
 - **Criterio de hecho:** con dos destinatarios homónimos en la hoja, elegir el segundo en la revisión envía al segundo (prueba en navegador); la pantalla muestra los correos; el registro de confirmación queda guardado.
+- **Decisión del Brain (retención, 2026-10-06):** los registros de pago (`pagosProcesados/`, `aceptaciones/`, `preferencias/`) se conservan 10 años (Ley 962 de 2005, artículo 28 — criterio conservador para registros contables/tributarios en Colombia). El registro de confirmación de lote (`lotes/{id}.confirmacion`, huellas HMAC de la Tarea 15) se conserva el **mismo plazo** que los registros de pago, por estar ligado a ellos (ver `docs/legal/terminos-y-condiciones.md` §12.4/§13.3(c)).
 
 ### Tarea 13 — Lanzamiento (flujo productos vitrina)
 - **Qué:** puertas completas (Verify_After_Changes_LAP contra este plan y el spec, /code-review, /security-review, Sentinel_LAP diff —es pagos—, QA_Release_LAP, REVISOR_EXTERNO_LAP hasta GO), encender `PAGOS_ACTIVOS`, desplegar Cloud Run + reglas Firestore + Hosting, **un pago real de bajo monto** de cada tipo (Paquete único, Paquete renovable, Pro) verificado de punta a punta y cancelado/reembolsado manualmente, README y landing actualizados, memoria y changelog.
