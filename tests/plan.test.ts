@@ -6,14 +6,19 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { translations } from "../src/utils/translations";
 import {
+  debeDetenerSondeo,
   decidirEstadoSondeo,
+  ejecutarRevisionSondeo,
   formatearEstadoPlan,
   formatearFechaBogota,
   formatearMotivoRechazoLote,
   leerPagoParam,
+  leerPaymentId,
+  leerStatusMp,
   planActivo,
   LIMITE_SONDEO_MS,
   type CuentaInfo,
+  type ResultadoFetchCuenta,
 } from "../src/utils/plan";
 
 const ahora = new Date("2026-10-05T12:00:00Z");
@@ -126,22 +131,78 @@ test('saldo_insuficiente: "tienes 40, el lote es de 60" (spec, texto exacto de l
 });
 
 // ── decidirEstadoSondeo: confirmando / activo / revision / rechazado ────────────────────────
+// G7/G8 (NO-GO del REVISOR_EXTERNO_LAP sobre el commit 1cdb8e7, vuelta 25, 2026-10-05): el viejo
+// "ultimoPagoIdInicial" (capturado de un `ref` sincronizado un render DESPUES de `setCuenta`)
+// corria dos carreras distintas — G7: en el PRIMER tick, el ref podia seguir en `null` aunque
+// `fetchCuenta` ya hubiera resuelto; G8: si el webhook de Mercado Pago llegaba ANTES de esa
+// primera lectura, el "inicial" capturado YA era el nuevo id y "activo" nunca se alcanzaba. Ahora
+// se compara contra `paymentId`, el dato FIJO que trae la URL (nunca cambia durante el sondeo):
+// no hace falta ninguna "linea base" en tiempo de ejecucion.
+
+const lecturaOk = (c: CuentaInfo): ResultadoFetchCuenta => ({ tipo: "ok", cuenta: c });
+const SIN_SESION: ResultadoFetchCuenta = { tipo: "sin-sesion" };
+const ERROR_LECTURA: ResultadoFetchCuenta = { tipo: "error" };
 
 test("sin parametro pago: no hay nada que sondear (null)", () => {
-  const estado = decidirEstadoSondeo({ pago: null, cuenta: null, ultimoPagoIdInicial: null, msTranscurridos: 0 });
+  const estado = decidirEstadoSondeo({
+    pago: null,
+    paymentId: null,
+    statusMp: null,
+    lectura: ERROR_LECTURA,
+    authReady: true,
+    msTranscurridos: 0,
+  });
   assert.equal(estado, null);
 });
 
-test('pago=error (pago rechazado por Mercado Pago, back_urls.failure): "rechazado" de inmediato, sin importar la cuenta ni sondear exito', () => {
+test('pago=error (back_urls.failure): "rechazado" de inmediato, sin importar la cuenta ni sondear exito', () => {
   const estado = decidirEstadoSondeo({
     pago: "error",
-    cuenta: cuenta({
-      plan: "paquete",
-      enviosRestantes: 150,
-      vence: new Date(ahora.getTime() + 1000).toISOString(),
-      ultimoPago: { id: "pago-1", fecha: ahora.toISOString() },
-    }),
-    ultimoPagoIdInicial: "pago-1",
+    paymentId: "pago-1",
+    statusMp: null,
+    lectura: lecturaOk(
+      cuenta({
+        plan: "paquete",
+        enviosRestantes: 150,
+        vence: new Date(ahora.getTime() + 1000).toISOString(),
+        ultimoPago: { id: "pago-1", fecha: ahora.toISOString() },
+      })
+    ),
+    authReady: true,
+    msTranscurridos: 0,
+  });
+  assert.equal(estado, "rechazado");
+});
+
+// ORACULO (oraculo del encargo, escenario 4): Mercado Pago puede reportar `status=rejected` o
+// `status=failure` en la URL sin importar CUAL back_url trajo de vuelta (p. ej. `pago=ok` con
+// `auto_return` pero `status=rejected`) — eso tambien es "ningun cobro", no "activo".
+test('statusMp="rejected" fuerza "rechazado" aunque pago="ok" y la cuenta ya tenga un Paquete vigente', () => {
+  const estado = decidirEstadoSondeo({
+    pago: "ok",
+    paymentId: "pago-1",
+    statusMp: "rejected",
+    lectura: lecturaOk(
+      cuenta({
+        plan: "paquete",
+        enviosRestantes: 150,
+        vence: new Date(ahora.getTime() + 1000).toISOString(),
+        ultimoPago: { id: "pago-1", fecha: ahora.toISOString() },
+      })
+    ),
+    authReady: true,
+    msTranscurridos: 0,
+  });
+  assert.equal(estado, "rechazado");
+});
+
+test('statusMp="failure" tambien fuerza "rechazado"', () => {
+  const estado = decidirEstadoSondeo({
+    pago: "pendiente",
+    paymentId: null,
+    statusMp: "failure",
+    lectura: ERROR_LECTURA,
+    authReady: true,
     msTranscurridos: 0,
   });
   assert.equal(estado, "rechazado");
@@ -150,58 +211,62 @@ test('pago=error (pago rechazado por Mercado Pago, back_urls.failure): "rechazad
 // G6 punto 4 (texto exacto del mensaje de "rechazado", para los dos idiomas): un pago rechazado
 // nunca sondea exito, y el mensaje que ve el usuario dice claramente que no hubo cobro.
 test('pago rechazado: el texto es "No se realizó ningún cobro." (ES) / "No charge was made." (EN)', () => {
-  assert.equal(decidirEstadoSondeo({ pago: "error", cuenta: null, ultimoPagoIdInicial: null, msTranscurridos: 0 }), "rechazado");
+  assert.equal(
+    decidirEstadoSondeo({
+      pago: "error",
+      paymentId: null,
+      statusMp: null,
+      lectura: ERROR_LECTURA,
+      authReady: true,
+      msTranscurridos: 0,
+    }),
+    "rechazado"
+  );
   assert.equal(translations.es.pagoRechazado, "No se realizó ningún cobro.");
   assert.equal(translations.en.pagoRechazado, "No charge was made.");
 });
 
-test("pago=ok SIN plan activo todavia: sigue confirmando, NUNCA exito directo por la URL", () => {
-  const estado = decidirEstadoSondeo({ pago: "ok", cuenta: null, ultimoPagoIdInicial: null, msTranscurridos: 0 });
+test("pago=ok SIN datos todavia (lectura con error transitorio): sigue confirmando, NUNCA exito directo por la URL", () => {
+  const estado = decidirEstadoSondeo({
+    pago: "ok",
+    paymentId: "pago-1",
+    statusMp: null,
+    lectura: ERROR_LECTURA,
+    authReady: true,
+    msTranscurridos: 0,
+  });
   assert.equal(estado, "confirmando");
 });
 
 test("pago=ok con la cuenta todavia en Gratis: confirmando (no exito)", () => {
   const estado = decidirEstadoSondeo({
     pago: "ok",
-    cuenta: cuenta({ plan: "gratis" }),
-    ultimoPagoIdInicial: null,
+    paymentId: "pago-1",
+    statusMp: null,
+    lectura: lecturaOk(cuenta({ plan: "gratis" })),
+    authReady: true,
     msTranscurridos: 1000,
   });
   assert.equal(estado, "confirmando");
 });
 
-test("pago=ok y el servidor YA dice que el Paquete esta activo CON un pago nuevo (ultimoPago.id cambio): activo", () => {
-  const activaCuenta = cuenta({
+// ORACULO escenario 1: pago anterior (la cuenta YA tiene un `ultimoPago` de una compra vieja, y
+// hasta un plan vigente) + `pago=pendiente` SIN `payment_id` en la URL -> JAMAS "activo", sin
+// importar cuanto tiempo pase ni que tan vigente este el plan (si Mercado Pago no mando el id en
+// la URL, no hay con que comparar).
+test("ORACULO 1: pago=pendiente sin payment_id en la URL -> nunca activo, aunque la cuenta ya tenga un plan vigente de antes", () => {
+  const cuentaConPlanViejo = cuenta({
     plan: "paquete",
     enviosRestantes: 150,
     vence: new Date(ahora.getTime() + 30 * 24 * 3600_000).toISOString(),
-    ultimoPago: { id: "pago-nuevo", fecha: ahora.toISOString() },
+    ultimoPago: { id: "pago-de-una-compra-anterior", fecha: ahora.toISOString() },
   });
-  const estado = decidirEstadoSondeo({
-    pago: "ok",
-    cuenta: activaCuenta,
-    ultimoPagoIdInicial: null, // la cuenta no habia pagado nada antes de este sondeo
-    msTranscurridos: 10_000,
-    ahora,
-  });
-  assert.equal(estado, "activo");
-});
-
-// G6 (NO-GO del REVISOR_EXTERNO_LAP): antes "activo" salia con CUALQUIER plan vigente, aunque el
-// pago de ESTA visita no hubiera llegado todavia (p. ej. el usuario ya tenia un Paquete de una
-// compra anterior y esta en medio de una renovacion que todavia no confirma MP).
-test("G6: Paquete vigente con 40 envios pero el pago PENDIENTE no cambio ultimoPago.id -> NO activo, pasa a revision a los 2 min", () => {
-  const cuentaSinPagoNuevo = cuenta({
-    plan: "paquete",
-    enviosRestantes: 40,
-    vence: new Date(ahora.getTime() + 20 * 24 * 3600_000).toISOString(),
-    ultimoPago: { id: "pago-viejo", fecha: ahora.toISOString() },
-  });
-
   const antesDelLimite = decidirEstadoSondeo({
     pago: "pendiente",
-    cuenta: cuentaSinPagoNuevo,
-    ultimoPagoIdInicial: "pago-viejo", // mismo id: el pago de esta visita NO ha llegado
+    paymentId: null,
+    statusMp: null,
+    lectura: lecturaOk(cuentaConPlanViejo),
+    authReady: true,
     msTranscurridos: LIMITE_SONDEO_MS - 1,
     ahora,
   });
@@ -209,36 +274,64 @@ test("G6: Paquete vigente con 40 envios pero el pago PENDIENTE no cambio ultimoP
 
   const enElLimite = decidirEstadoSondeo({
     pago: "pendiente",
-    cuenta: cuentaSinPagoNuevo,
-    ultimoPagoIdInicial: "pago-viejo",
+    paymentId: null,
+    statusMp: null,
+    lectura: lecturaOk(cuentaConPlanViejo),
+    authReady: true,
     msTranscurridos: LIMITE_SONDEO_MS,
     ahora,
   });
-  assert.equal(enElLimite, "revision");
+  assert.equal(enElLimite, "revision", "sin payment_id, se agota a revision, NUNCA a activo");
 });
 
-// G6: el pago SI cambio (ultimoPago.id distinto del inicial) y el plan queda vigente con saldo.
-test("G6: ultimoPago.id cambio y hay saldo -> activo", () => {
-  const cuentaConPagoNuevo = cuenta({
+// ORACULO escenario 2 (G8, la carrera con el webhook): el webhook de Mercado Pago ya activo el
+// Paquete ANTES de la primera lectura de /api/cuenta — la PRIMERA llamada a decidirEstadoSondeo
+// (msTranscurridos=0) ya debe dar "activo" si el `ultimoPago.id` que trae esa primera lectura
+// coincide con el `payment_id` de la URL. No hace falta una segunda vuelta ni ninguna "linea base".
+test('ORACULO 2 (G8): el webhook ya activo el Paquete ANTES de la primera lectura -> "activo" en el primer tick (msTranscurridos=0)', () => {
+  const cuentaYaActivadaPorElWebhook = cuenta({
     plan: "paquete",
     enviosRestantes: 150,
     vence: new Date(ahora.getTime() + 30 * 24 * 3600_000).toISOString(),
-    ultimoPago: { id: "pago-nuevo", fecha: ahora.toISOString() },
+    ultimoPago: { id: "pago-123", fecha: ahora.toISOString() },
   });
   const estado = decidirEstadoSondeo({
-    pago: "pendiente",
-    cuenta: cuentaConPagoNuevo,
-    ultimoPagoIdInicial: "pago-viejo",
-    msTranscurridos: 5000,
+    pago: "ok",
+    paymentId: "pago-123", // viene de la URL (back_urls.success con auto_return)
+    statusMp: "approved",
+    lectura: lecturaOk(cuentaYaActivadaPorElWebhook),
+    authReady: true,
+    msTranscurridos: 0, // PRIMER tick: nunca hubo una vuelta anterior
     ahora,
   });
   assert.equal(estado, "activo");
 });
 
-// G6: el pago cambio PERO el plan quedo sin saldo (p. ej. Paquete renovado con 0 por alguna
-// inconsistencia) -> no basta con que el pago sea nuevo, tambien tiene que estar activo de
-// verdad (planActivo, el mismo criterio que formatearEstadoPlan).
-test("G6: ultimoPago.id cambio pero el Paquete quedo sin saldo -> NO activo", () => {
+// ORACULO escenario 3: el `ultimoPago.id` de la cuenta NO coincide con el `payment_id` de la URL
+// (p. ej. el usuario tiene un Paquete vigente de OTRO pago, y esta visita trae un `payment_id`
+// distinto que todavia no se proceso) -> nunca "activo".
+test("ORACULO 3: payment_id de la URL distinto del ultimoPago.id de la cuenta -> NO activo", () => {
+  const cuentaConOtroPago = cuenta({
+    plan: "paquete",
+    enviosRestantes: 150,
+    vence: new Date(ahora.getTime() + 30 * 24 * 3600_000).toISOString(),
+    ultimoPago: { id: "pago-viejo-ya-activado", fecha: ahora.toISOString() },
+  });
+  const estado = decidirEstadoSondeo({
+    pago: "pendiente",
+    paymentId: "pago-nuevo-todavia-sin-procesar",
+    statusMp: null,
+    lectura: lecturaOk(cuentaConOtroPago),
+    authReady: true,
+    msTranscurridos: 5000,
+    ahora,
+  });
+  assert.equal(estado, "confirmando");
+});
+
+// El payment_id SI coincide, pero el plan quedo sin saldo (p. ej. alguna inconsistencia) -> no
+// basta con que el pago coincida, tambien tiene que estar activo de verdad (planActivo).
+test("payment_id coincide pero el Paquete quedo sin saldo -> NO activo", () => {
   const cuentaSinSaldo = cuenta({
     plan: "paquete",
     enviosRestantes: 0,
@@ -247,30 +340,207 @@ test("G6: ultimoPago.id cambio pero el Paquete quedo sin saldo -> NO activo", ()
   });
   const estado = decidirEstadoSondeo({
     pago: "ok",
-    cuenta: cuentaSinSaldo,
-    ultimoPagoIdInicial: "pago-viejo",
+    paymentId: "pago-nuevo",
+    statusMp: null,
+    lectura: lecturaOk(cuentaSinSaldo),
+    authReady: true,
     msTranscurridos: 5000,
     ahora,
   });
   assert.equal(estado, "confirmando");
 });
 
-test("pago=pendiente sin ningun pago registrado todavia: sondeo que se agota a los 2 minutos sin plan activo -> revision", () => {
+test("pago=pendiente sin ninguna lectura exitosa todavia: sondeo que se agota a los 2 minutos -> revision", () => {
   const antesDelLimite = decidirEstadoSondeo({
     pago: "pendiente",
-    cuenta: null,
-    ultimoPagoIdInicial: null,
+    paymentId: "pago-1",
+    statusMp: null,
+    lectura: ERROR_LECTURA,
+    authReady: true,
     msTranscurridos: LIMITE_SONDEO_MS - 1,
   });
   assert.equal(antesDelLimite, "confirmando");
 
   const enElLimite = decidirEstadoSondeo({
     pago: "pendiente",
-    cuenta: null,
-    ultimoPagoIdInicial: null,
+    paymentId: "pago-1",
+    statusMp: null,
+    lectura: ERROR_LECTURA,
+    authReady: true,
     msTranscurridos: LIMITE_SONDEO_MS,
   });
   assert.equal(enElLimite, "revision");
+});
+
+// ── decidirEstadoSondeo: B28 (sin sesion de Firebase; no antes de la primera respuesta de
+//    onAuthStateChanged) ──────────────────────────────────────────────────────────────────────
+
+test('B28: sin sesion (lectura "sin-sesion") pero authReady=false (onAuthStateChanged todavia no respondio) -> "confirmando", NUNCA "sin_sesion" sobre una duda', () => {
+  const estado = decidirEstadoSondeo({
+    pago: "ok",
+    paymentId: "pago-1",
+    statusMp: null,
+    lectura: SIN_SESION,
+    authReady: false,
+    msTranscurridos: 0,
+  });
+  assert.equal(estado, "confirmando");
+});
+
+test('B28: sin sesion Y authReady=true (onAuthStateChanged YA respondio que no hay sesion) -> "sin_sesion"', () => {
+  const estado = decidirEstadoSondeo({
+    pago: "ok",
+    paymentId: "pago-1",
+    statusMp: null,
+    lectura: SIN_SESION,
+    authReady: true,
+    msTranscurridos: 0,
+  });
+  assert.equal(estado, "sin_sesion");
+});
+
+// ── debeDetenerSondeo (B29): "sin_sesion" tambien deja de sondear a los 2 minutos ───────────
+
+test('debeDetenerSondeo: "activo"/"revision"/"rechazado" siempre detienen el sondeo, en cualquier momento', () => {
+  for (const estado of ["activo", "revision", "rechazado"] as const) {
+    assert.equal(debeDetenerSondeo(estado, 0), true);
+    assert.equal(debeDetenerSondeo(estado, 999_999), true);
+  }
+});
+
+test('debeDetenerSondeo: "confirmando" NUNCA detiene el sondeo (sigue reintentando)', () => {
+  assert.equal(debeDetenerSondeo("confirmando", 0), false);
+  assert.equal(debeDetenerSondeo("confirmando", LIMITE_SONDEO_MS), false);
+  assert.equal(debeDetenerSondeo("confirmando", 999_999), false);
+});
+
+test('B29: "sin_sesion" NO detiene el sondeo antes de LIMITE_SONDEO_MS, pero SI al llegar a el', () => {
+  assert.equal(debeDetenerSondeo("sin_sesion", LIMITE_SONDEO_MS - 1), false);
+  assert.equal(debeDetenerSondeo("sin_sesion", LIMITE_SONDEO_MS), true);
+});
+
+// ── ejecutarRevisionSondeo: una vuelta completa (lee + decide + decide si detenerse) ────────
+// Esta es la pieza que reemplaza una prueba de render del componente real: no hay jsdom ni
+// @testing-library instalados en este proyecto (solo node:test, sin DOM) y anadir uno nuevo solo
+// para esta prueba violaria la escalera YAGNI (la logica que de verdad importa — la secuencia
+// async leer-cuenta -> decidir -> decidir si detenerse, que es justo donde vivian G7/G8 — queda
+// cubierta exactamente igual sin necesidad de montar React). `leerCuenta` aqui hace exactamente
+// lo que hace `fetchCuenta` en App.tsx: una promesa que resuelve con un `ResultadoFetchCuenta`.
+
+test("ejecutarRevisionSondeo: webhook adelantado (G8) con un leerCuenta falso -> activo, detener=true, en la PRIMERA llamada", async () => {
+  const cuentaYaActiva = cuenta({
+    plan: "paquete",
+    enviosRestantes: 150,
+    vence: new Date(ahora.getTime() + 30 * 24 * 3600_000).toISOString(),
+    ultimoPago: { id: "pago-999", fecha: ahora.toISOString() },
+  });
+  let llamadas = 0;
+  const { estado, detener } = await ejecutarRevisionSondeo({
+    pago: "ok",
+    paymentId: "pago-999",
+    statusMp: "approved",
+    leerCuenta: async () => {
+      llamadas++;
+      return lecturaOk(cuentaYaActiva);
+    },
+    authReady: true,
+    msTranscurridos: 0,
+    ahora,
+  });
+  assert.equal(llamadas, 1, "debe llamar a leerCuenta exactamente una vez por vuelta");
+  assert.equal(estado, "activo");
+  assert.equal(detener, true);
+});
+
+test("ejecutarRevisionSondeo: sin payment_id en la URL, aunque leerCuenta devuelva un plan vigente -> nunca activo, no detiene antes del limite", async () => {
+  const cuentaVigente = cuenta({
+    plan: "pro",
+    vence: new Date(ahora.getTime() + 30 * 24 * 3600_000).toISOString(),
+  });
+  const { estado, detener } = await ejecutarRevisionSondeo({
+    pago: "pendiente",
+    paymentId: null,
+    statusMp: null,
+    leerCuenta: async () => lecturaOk(cuentaVigente),
+    authReady: true,
+    msTranscurridos: 1000,
+    ahora,
+  });
+  assert.equal(estado, "confirmando");
+  assert.equal(detener, false);
+});
+
+test("ejecutarRevisionSondeo: statusMp=rejected -> rechazado, detener=true, sin necesidad de leer la cuenta otra vez para saberlo", async () => {
+  const { estado, detener } = await ejecutarRevisionSondeo({
+    pago: "ok",
+    paymentId: "pago-1",
+    statusMp: "rejected",
+    leerCuenta: async () => lecturaOk(cuenta({ plan: "gratis" })),
+    authReady: true,
+    msTranscurridos: 0,
+  });
+  assert.equal(estado, "rechazado");
+  assert.equal(detener, true);
+});
+
+test('ejecutarRevisionSondeo: B28/B29 encadenados — sin sesion y authReady=false da "confirmando" sin detener; authReady=true da "sin_sesion" sin detener antes del limite, y detiene al llegar a el', async () => {
+  const sinAuthReady = await ejecutarRevisionSondeo({
+    pago: "ok",
+    paymentId: "pago-1",
+    statusMp: null,
+    leerCuenta: async () => SIN_SESION,
+    authReady: false,
+    msTranscurridos: 0,
+  });
+  assert.equal(sinAuthReady.estado, "confirmando");
+  assert.equal(sinAuthReady.detener, false);
+
+  const conAuthReadyAntesDelLimite = await ejecutarRevisionSondeo({
+    pago: "ok",
+    paymentId: "pago-1",
+    statusMp: null,
+    leerCuenta: async () => SIN_SESION,
+    authReady: true,
+    msTranscurridos: LIMITE_SONDEO_MS - 1,
+  });
+  assert.equal(conAuthReadyAntesDelLimite.estado, "sin_sesion");
+  assert.equal(conAuthReadyAntesDelLimite.detener, false);
+
+  const conAuthReadyEnElLimite = await ejecutarRevisionSondeo({
+    pago: "ok",
+    paymentId: "pago-1",
+    statusMp: null,
+    leerCuenta: async () => SIN_SESION,
+    authReady: true,
+    msTranscurridos: LIMITE_SONDEO_MS,
+  });
+  assert.equal(conAuthReadyEnElLimite.estado, "sin_sesion");
+  assert.equal(conAuthReadyEnElLimite.detener, true);
+});
+
+// ── leerPaymentId / leerStatusMp ─────────────────────────────────────────────────────────────
+
+test("leerPaymentId: lee payment_id (Checkout Pro)", () => {
+  assert.equal(leerPaymentId("?pago=ok&payment_id=12345&status=approved"), "12345");
+});
+
+test("leerPaymentId: sin payment_id, usa collection_id (flujos viejos)", () => {
+  assert.equal(leerPaymentId("?pago=ok&collection_id=999"), "999");
+});
+
+test("leerPaymentId: payment_id tiene prioridad sobre collection_id si vienen los dos", () => {
+  assert.equal(leerPaymentId("?payment_id=AAA&collection_id=BBB"), "AAA");
+});
+
+test("leerPaymentId: sin ninguno de los dos -> null", () => {
+  assert.equal(leerPaymentId("?pago=ok"), null);
+  assert.equal(leerPaymentId(""), null);
+});
+
+test("leerStatusMp: lee status, o collection_status si falta status", () => {
+  assert.equal(leerStatusMp("?status=rejected"), "rejected");
+  assert.equal(leerStatusMp("?collection_status=approved"), "approved");
+  assert.equal(leerStatusMp(""), null);
 });
 
 // ── planActivo y leerPagoParam (piezas que usa decidirEstadoSondeo) ─────────────────────────

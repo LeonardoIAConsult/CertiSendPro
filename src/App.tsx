@@ -49,10 +49,14 @@ import {
   type CuentaInfo,
   type EstadoSondeoPago,
   type PagoParam,
-  decidirEstadoSondeo,
+  type ResultadoFetchCuenta,
+  debeDetenerSondeo,
+  ejecutarRevisionSondeo,
   formatearEstadoPlan,
   formatearMotivoRechazoLote,
   leerPagoParam,
+  leerPaymentId,
+  leerStatusMp,
   INTERVALO_SONDEO_MS,
 } from "./utils/plan";
 
@@ -191,6 +195,13 @@ export default function App() {
     setLogs((prev) => [...prev.slice(-38), newLog]);
   };
 
+  // B28 (NO-GO del REVISOR_EXTERNO_LAP sobre el commit 1cdb8e7, vuelta 25, 2026-10-05): true desde
+  // que `onAuthStateChanged` (dentro de `initAuth`) dio su PRIMERA respuesta, exito o fallo. Antes
+  // de eso, `auth.currentUser` puede todavia no estar poblado (tarda en aparecer al montar): el
+  // sondeo del regreso de Mercado Pago no debe afirmar "sin sesion" sobre esa duda — mientras
+  // `authReady` sea false, sigue mostrando "confirmando" (ver `decidirEstadoSondeo`).
+  const [authReady, setAuthReady] = useState(false);
+
   // Initialize auth listener
   useEffect(() => {
     const unsubscribe = initAuth(
@@ -199,12 +210,14 @@ export default function App() {
         setToken(activeToken);
         setNeedsAuth(false);
         setIsGmailActive(true);
+        setAuthReady(true);
         addLog(`Usuario de Google autenticado: ${currentUser.displayName}`, "success");
       },
       () => {
         setNeedsAuth(true);
         setIsGmailActive(false);
         setIsSheetsLinked(false);
+        setAuthReady(true);
       }
     );
     return () => unsubscribe();
@@ -215,38 +228,37 @@ export default function App() {
   // la app (con sesion real) y despues de cada lote enviado. La logica de texto/decision es pura
   // y vive en src/utils/plan.ts (probada con node:test sin React).
   const [cuenta, setCuenta] = useState<CuentaInfo | null>(null);
-  const cuentaRef = useRef<CuentaInfo | null>(null);
-  useEffect(() => {
-    cuentaRef.current = cuenta;
-  }, [cuenta]);
 
-  // Devuelve si pudo leer la cuenta ("ok"), si no hay sesion real de Firebase ("sin-sesion": Modo
-  // Invitado, o sin ID token — p. ej. justo al volver de Mercado Pago con la pagina recien
-  // cargada y needsAuth=true porque se perdio el access token de Gmail en memoria, pero SIN
-  // sesion de Firebase persistida tampoco) o si fallo la llamada ("error"). El sondeo del regreso
-  // de Mercado Pago (mas abajo) usa este resultado para no mentir: sin sesion, no es
-  // "confirmando" ni "en revision", es "inicia sesion" (G5, NO-GO del REVISOR_EXTERNO_LAP).
-  const fetchCuenta = async (): Promise<"ok" | "sin-sesion" | "error"> => {
+  // G7 (NO-GO del REVISOR_EXTERNO_LAP sobre el commit 1cdb8e7, vuelta 25, 2026-10-05): antes
+  // `fetchCuenta` devolvia solo un string y el sondeo leia la cuenta de un `cuentaRef` que un
+  // `useEffect` separado sincronizaba DESPUES de este `setCuenta` — en el mismo tick en que
+  // `fetchCuenta` resolvia, ese ref todavia podia tener el valor VIEJO (o `null` en la primera
+  // lectura), asi que la linea base del sondeo salia mal. Ahora `fetchCuenta` devuelve los datos
+  // LEIDOS en la respuesta misma (`ResultadoFetchCuenta`); quien la llama para el sondeo decide
+  // con ESO, nunca con un ref. `setCuenta` sigue siendo un efecto secundario (alimenta el badge
+  // "Mi plan" del header), pero deja de ser la fuente de verdad del sondeo.
+  const fetchCuenta = async (): Promise<ResultadoFetchCuenta> => {
     // Modo Invitado no tiene sesion real de Firebase (sin ID token, el servidor respondería 401):
     // se queda sin "Mi plan" en vez de pedir permiso de todos modos.
-    if (user?.isGuest) return "sin-sesion";
+    if (user?.isGuest) return { tipo: "sin-sesion" };
     try {
       const authHeader = await construirAuthHeader();
-      if (!authHeader.Authorization) return "sin-sesion";
+      if (!authHeader.Authorization) return { tipo: "sin-sesion" };
       const res = await fetch("/api/cuenta", { headers: authHeader });
-      if (!res.ok) return "error";
+      if (!res.ok) return { tipo: "error" };
       const data = await res.json();
-      setCuenta({
+      const leida: CuentaInfo = {
         plan: data.plan,
         enviosRestantes: data.enviosRestantes,
         vence: data.vence,
         renueva: data.renueva,
         ultimoPago: data.ultimoPago ?? null,
-      });
-      return "ok";
+      };
+      setCuenta(leida);
+      return { tipo: "ok", cuenta: leida };
     } catch (err) {
       console.error("No se pudo obtener tu cuenta:", err);
-      return "error";
+      return { tipo: "error" };
     }
   };
 
@@ -257,50 +269,53 @@ export default function App() {
     }
   }, [needsAuth, user]);
 
-  // `?pago=...` al volver de Mercado Pago: se lee UNA sola vez al montar (viene de la URL con la
-  // que cargo la pagina, nunca cambia dentro de la misma sesion de la app).
-  const [pagoParam] = useState<PagoParam>(() => leerPagoParam(window.location.search));
+  // `?pago=...`/`payment_id`/`status` al volver de Mercado Pago: se leen UNA sola vez al montar
+  // (vienen de la URL con la que cargo la pagina, nunca cambian dentro de la misma sesion de la
+  // app). G8: `paymentId` es el dato FIJO contra el que `decidirEstadoSondeo` compara
+  // `cuenta.ultimoPago.id` — nunca una linea base capturada en tiempo de ejecucion.
+  const [pagoInfo] = useState(() => ({
+    pago: leerPagoParam(window.location.search) as PagoParam,
+    paymentId: leerPaymentId(window.location.search),
+    statusMp: leerStatusMp(window.location.search),
+  }));
   const [pagoEstado, setPagoEstado] = useState<EstadoSondeoPago | null>(null);
 
+  // Depende de `authReady` ademas de `pagoInfo` (B28): `authReady` pasa de false a true UNA sola
+  // vez, cerca del montaje — si eso ocurre mientras este efecto ya esta sondeando, se reinicia con
+  // el valor de `authReady` ya resuelto (perder unos segundos del contador de 2 minutos en ese
+  // reinicio, que pasa como mucho una vez y muy cerca del arranque, es preferible a decidir con un
+  // `authReady` desactualizado via un ref). `pagoInfo` en si nunca cambia (viene de un `useState`
+  // con inicializador perezoso), asi que el unico reinicio real posible es ese.
   useEffect(() => {
-    if (pagoParam === "error") {
+    const { pago, paymentId, statusMp } = pagoInfo;
+    if (!pago) return; // no hay nada que sondear.
+
+    if (pago === "error" || statusMp === "rejected" || statusMp === "failure") {
       // Mercado Pago ya dijo que no se cobro nada: no hace falta sondear.
       setPagoEstado("rechazado");
       return;
     }
-    if (pagoParam !== "ok" && pagoParam !== "pendiente") return;
 
     const inicio = Date.now();
     let detenido = false;
-    // G6 (NO-GO del REVISOR_EXTERNO_LAP): el id de `ultimoPago` que la cuenta YA tenia al EMPEZAR
-    // a sondear (lo fija la primera lectura exitosa, `undefined` = todavia no se sabe). "activo"
-    // exige que este id CAMBIE, para no confundir un plan vigente de una compra VIEJA con la
-    // confirmacion de ESTE pago.
-    let ultimoPagoIdInicial: string | null | undefined = undefined;
     setPagoEstado("confirmando");
 
     // El exito NUNCA lo decide la URL: cada "revisar" vuelve a pedir /api/cuenta y
-    // `decidirEstadoSondeo` solo marca "activo" si el SERVIDOR dice que el plan ya esta activo
-    // CON un pago nuevo. Sin sesion real de Firebase (G5), no se sondea ni se miente: se pide
-    // iniciar sesion (el intervalo sigue corriendo para cuando el usuario inicie sesion).
+    // `ejecutarRevisionSondeo`/`decidirEstadoSondeo` decide con la respuesta real del servidor Y
+    // el `paymentId` fijo de la URL (G8) si ya toca "activo".
     const revisar = async () => {
-      const resultado = await fetchCuenta();
       if (detenido) return;
-      if (resultado === "sin-sesion") {
-        setPagoEstado("sin_sesion");
-        return;
-      }
-      if (ultimoPagoIdInicial === undefined) {
-        ultimoPagoIdInicial = cuentaRef.current?.ultimoPago?.id ?? null;
-      }
-      const estado = decidirEstadoSondeo({
-        pago: pagoParam,
-        cuenta: cuentaRef.current,
-        ultimoPagoIdInicial,
+      const { estado, detener } = await ejecutarRevisionSondeo({
+        pago,
+        paymentId,
+        statusMp,
+        leerCuenta: fetchCuenta,
+        authReady,
         msTranscurridos: Date.now() - inicio,
       });
+      if (detenido) return;
       if (estado) setPagoEstado(estado);
-      if (estado === "activo" || estado === "revision") {
+      if (detener) {
         detenido = true;
         clearInterval(timerId);
       }
@@ -314,7 +329,7 @@ export default function App() {
       clearInterval(timerId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pagoParam]);
+  }, [pagoInfo, authReady]);
 
   // Update sheet linkage status badge
   useEffect(() => {

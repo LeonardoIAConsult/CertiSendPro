@@ -142,11 +142,48 @@ export function leerPagoParam(search: string): PagoParam {
   return null;
 }
 
+// G7/G8 (NO-GO del REVISOR_EXTERNO_LAP sobre el commit 1cdb8e7, vuelta 25, 2026-10-05): Mercado
+// Pago agrega a CUALQUIERA de las tres `back_urls` (success/failure/pending) sus propios
+// parametros — `payment_id` (Checkout Pro) o `collection_id` (algunos flujos viejos), y
+// `status`/`collection_status` con el status REAL del pago segun Mercado Pago en ese instante
+// (puede no coincidir con cual back_url se uso: p. ej. `pending` puede volver por la URL de
+// `success` con `auto_return`). Esto reemplaza el viejo mecanismo de "ultimoPagoIdInicial"
+// (capturar el id de pago que la cuenta YA tenia al EMPEZAR a sondear, comparando contra eso):
+// esa captura dependia de una lectura async de /api/cuenta que corria en paralelo con el primer
+// `setInterval`, y lo que de verdad se guardaba no era "el id ANTES de este pago" sino "el id en
+// cualquier momento en que la promesa resolviera primero" — si el webhook de Mercado Pago ya
+// habia activado el Paquete ANTES de que esa primera lectura terminara, el id "inicial" capturado
+// YA ERA el nuevo, y `activo` nunca se alcanzaba (G8); si en cambio se leia via un `ref` que un
+// `useEffect` separado sincronizaba un render despues de `setCuenta`, la lectura podia quedarse en
+// `null` por una vuelta completa (G7). Comparar contra el `payment_id` que la URL YA TRAE (dato
+// fijo, nunca cambia durante el sondeo) en vez de un valor capturado en tiempo de ejecucion
+// elimina las dos carreras de una vez: no hace falta "antes" ni "despues", solo "¿el ultimo pago
+// de la cuenta es ESTE pago?".
+
+/** Lee `payment_id` (Checkout Pro) o, si falta, `collection_id` (flujos viejos) del query string
+ * que Mercado Pago agrega a las `back_urls`. `null` si no viene ninguno de los dos (p. ej. el
+ * usuario abrio `?pago=ok` a mano, o un flujo que no los manda). */
+export function leerPaymentId(search: string): string | null {
+  const params = new URLSearchParams(search);
+  const id = params.get("payment_id") || params.get("collection_id");
+  return id && id.trim() !== "" ? id : null;
+}
+
+/** Lee `status` o, si falta, `collection_status` del query string de Mercado Pago. Es el status
+ * REAL que Mercado Pago reporto en el momento del redirect — `"rejected"`/`"failure"` fuerza
+ * "rechazado" sin importar cual `back_url` (pago=ok/pendiente/error) se uso para volver. */
+export function leerStatusMp(search: string): string | null {
+  const params = new URLSearchParams(search);
+  const status = params.get("status") || params.get("collection_status");
+  return status && status.trim() !== "" ? status : null;
+}
+
 // G5 (NO-GO del REVISOR_EXTERNO_LAP sobre la Tarea 10, 2026-10-05): "sin_sesion" es el estado
 // cuando no hay sesion real de Firebase (ni siquiera el ID token, que SI sobrevive a volver de
 // Mercado Pago aunque se haya perdido el access token de Gmail en memoria) — no se sondea ni se
-// miente con "confirmando"/"en revision", se pide iniciar sesion. Lo decide App.tsx (sabe si
-// `getIdToken()` dio null), no esta funcion pura.
+// miente con "confirmando"/"en revision", se pide iniciar sesion. App.tsx decide SI hay sesion
+// (via `fetchCuenta`/`getIdToken()`, devuelto como `ResultadoFetchCuenta.tipo`); `decidirEstadoSondeo`
+// (abajo) es quien decide QUE mostrar con ese dato, junto con `authReady` (B28).
 export type EstadoSondeoPago = "confirmando" | "activo" | "revision" | "rechazado" | "sin_sesion";
 
 export const LIMITE_SONDEO_MS = 2 * 60 * 1000;
@@ -160,39 +197,110 @@ export function planActivo(cuenta: CuentaInfo | null, ahora: Date = new Date()):
   return planVigenteConSaldo(cuenta, ahora);
 }
 
+/** Lo que una vuelta de sondeo sabe sobre la sesion/cuenta — devuelto por `fetchCuenta` en
+ * App.tsx (G7, corrige vuelta 25): antes `fetchCuenta` solo devolvia un string
+ * (`"ok"|"sin-sesion"|"error"`) y hacia `setCuenta(...)` como efecto secundario; el sondeo leia la
+ * cuenta de un `cuentaRef` que un `useEffect` aparte sincronizaba un render DESPUES de ese
+ * `setCuenta` — asi que, en el mismo tick en que `fetchCuenta` resolvia, `cuentaRef.current`
+ * todavia podia ser el valor VIEJO (o `null` en la primera lectura). Ahora `fetchCuenta` devuelve
+ * los datos leidos en la union misma: el sondeo decide con ESO, nunca con un ref ni con un efecto
+ * que corre despues. */
+export type ResultadoFetchCuenta =
+  | { tipo: "ok"; cuenta: CuentaInfo }
+  | { tipo: "sin-sesion" }
+  | { tipo: "error" };
+
 /**
- * Decide que estado mostrar al volver de Mercado Pago, dado el parametro de la URL, la ULTIMA
- * respuesta conocida de /api/cuenta, el id de `ultimoPago` que la cuenta YA tenia al EMPEZAR a
- * sondear, y cuanto tiempo lleva sondeando. Pura: no hace fetch ni usa temporizadores (eso vive
- * en App.tsx); recibe el tiempo transcurrido como numero para poder probarla sin esperar reloj
- * real.
+ * Decide que estado mostrar al volver de Mercado Pago, dado el parametro `pago` de la URL, el
+ * `paymentId` (`payment_id`/`collection_id`) que Mercado Pago agrego a esa misma URL, el
+ * `statusMp` que tambien agrego, la lectura MAS RECIENTE de /api/cuenta (`lectura`, nunca un ref
+ * ni un valor cacheado de una vuelta anterior), si `onAuthStateChanged` ya dio su primera
+ * respuesta (`authReady`, B28) y cuanto tiempo lleva sondeando. Pura: no hace fetch ni usa
+ * temporizadores (eso vive en App.tsx/`ejecutarRevisionSondeo`); recibe el tiempo transcurrido
+ * como numero para poder probarla sin esperar reloj real.
  *
- * - `pago=error` -> "rechazado" de inmediato (Mercado Pago ya dijo que no se cobro nada), sin
- *   sondear nada mas.
- * - `pago=ok` o `pago=pendiente` -> "activo" exige DOS cosas (G6, hallazgo del REVISOR: antes
- *   bastaba con que la cuenta YA tuviera algun plan vigente, aunque fuera de una compra VIEJA y
- *   el pago de ESTA visita todavia no hubiera llegado):
- *     1. que `ultimoPago.id` haya CAMBIADO respecto a `ultimoPagoIdInicial` (el que tenia la
- *        cuenta cuando empezo este sondeo) — asi se sabe que el pago de ESTA vuelta ya se
- *        proceso, no que el usuario ya tenia un Paquete/Pro de antes;
+ * - sin parametro `pago` -> `null` (no hay nada que mostrar).
+ * - `pago="error"`, o `statusMp` es `"rejected"`/`"failure"` (Mercado Pago lo reporto asi en la
+ *   URL, sin importar CUAL `back_url` trajo de vuelta) -> "rechazado" de inmediato, sin sondear.
+ * - sin sesion de Firebase (`lectura.tipo === "sin-sesion"`): si `onAuthStateChanged` TODAVIA no
+ *   dio su primera respuesta, "confirmando" (B28 — no se afirma que no hay sesion sin saberlo
+ *   todavia; `auth.currentUser` puede tardar en poblarse justo al montar). Con `authReady=true`,
+ *   "sin_sesion" (pedir iniciar sesion; `debeDetenerSondeo`, abajo, decide cuando dejar de sondear).
+ * - error transitorio leyendo /api/cuenta (`lectura.tipo === "error"`): sigue "confirmando" hasta
+ *   `LIMITE_SONDEO_MS`, despues "revision" — nunca "rechazado" por un fallo de red propio.
+ * - con la cuenta leida de verdad (`lectura.tipo === "ok"`): "activo" exige DOS cosas (G8: el
+ *   match es contra `paymentId`, el dato FIJO de la URL — nunca contra un "ultimoPagoIdInicial"
+ *   capturado en tiempo de ejecucion, que es justo lo que corria la carrera con el webhook):
+ *     1. que `paymentId` no sea null Y que `cuenta.ultimoPago.id === paymentId` — el pago que la
+ *        cuenta dice haber procesado es, literalmente, EL MISMO que Mercado Pago puso en esta URL
+ *        (no "cualquier pago nuevo", no "cualquier ultimoPago" — sin `payment_id` en la URL,
+ *        nunca puede dar "activo", sin importar que tan vigente este el plan);
  *     2. que ese plan quede vigente y con saldo (`planActivo`).
  *   Si no se cumplen las dos, sigue "confirmando" hasta `LIMITE_SONDEO_MS`; agotado el plazo,
  *   "revision".
- * - sin parametro `pago` -> `null` (no hay nada que mostrar).
  */
 export function decidirEstadoSondeo(params: {
   pago: PagoParam;
-  cuenta: CuentaInfo | null;
-  ultimoPagoIdInicial: string | null;
+  paymentId: string | null;
+  statusMp: string | null;
+  lectura: ResultadoFetchCuenta;
+  authReady: boolean;
   msTranscurridos: number;
   ahora?: Date;
 }): EstadoSondeoPago | null {
-  const { pago, cuenta, ultimoPagoIdInicial, msTranscurridos, ahora } = params;
+  const { pago, paymentId, statusMp, lectura, authReady, msTranscurridos, ahora } = params;
   if (!pago) return null;
-  if (pago === "error") return "rechazado";
+  if (pago === "error" || statusMp === "rejected" || statusMp === "failure") return "rechazado";
 
-  const pagoNuevo = cuenta?.ultimoPago != null && cuenta.ultimoPago.id !== ultimoPagoIdInicial;
-  if (pagoNuevo && planActivo(cuenta, ahora)) return "activo";
+  if (lectura.tipo === "sin-sesion") {
+    // B28: antes de la primera respuesta de onAuthStateChanged no se sabe si hay sesion o no —
+    // nunca se afirma "inicia sesion" sobre una duda, se sigue mostrando "confirmando".
+    return authReady ? "sin_sesion" : "confirmando";
+  }
+  if (lectura.tipo === "error") {
+    return msTranscurridos >= LIMITE_SONDEO_MS ? "revision" : "confirmando";
+  }
+
+  // lectura.tipo === "ok"
+  const pagoConfirmado =
+    paymentId !== null && lectura.cuenta.ultimoPago != null && lectura.cuenta.ultimoPago.id === paymentId;
+  if (pagoConfirmado && planActivo(lectura.cuenta, ahora)) return "activo";
   if (msTranscurridos >= LIMITE_SONDEO_MS) return "revision";
   return "confirmando";
+}
+
+/** B29 (corrige vuelta 25): ademas de "activo"/"revision"/"rechazado" (estados terminales de
+ * siempre), un visitante que NUNCA inicia sesion se quedaria sondeando `/api/cuenta` cada
+ * `INTERVALO_SONDEO_MS` para siempre — `"sin_sesion"` tambien debe detener el intervalo una vez
+ * agotado `LIMITE_SONDEO_MS` (el mensaje sigue pidiendo iniciar sesion; solo se deja de gastar
+ * peticiones de red mientras nadie lo hace). Separada de `decidirEstadoSondeo` porque decide algo
+ * distinto (si HAY que seguir llamando al servidor, no que texto mostrar). */
+export function debeDetenerSondeo(estado: EstadoSondeoPago, msTranscurridos: number): boolean {
+  if (estado === "activo" || estado === "revision" || estado === "rechazado") return true;
+  if (estado === "sin_sesion" && msTranscurridos >= LIMITE_SONDEO_MS) return true;
+  return false;
+}
+
+/**
+ * Una vuelta COMPLETA del sondeo (lee la cuenta, decide el estado, decide si hay que detenerse):
+ * la pieza que `App.tsx` llama cada `INTERVALO_SONDEO_MS` desde su `setInterval`. Se extrae aqui
+ * (en vez de dejarla inline en el componente) para poder probarla con `node:test` inyectando un
+ * `leerCuenta` falso — sin React, sin DOM, sin temporizadores reales — y asi cubrir la secuencia
+ * completa (incluida la carrera G8: un `leerCuenta` que YA devuelve el pago activado simula que
+ * el webhook de Mercado Pago llego antes de esta primera lectura) sin depender de un arnes de
+ * render que este proyecto no tiene instalado (ver nota en tests/plan.test.ts sobre por que no
+ * hay una prueba que monte el componente real).
+ */
+export async function ejecutarRevisionSondeo(params: {
+  pago: PagoParam;
+  paymentId: string | null;
+  statusMp: string | null;
+  leerCuenta(): Promise<ResultadoFetchCuenta>;
+  authReady: boolean;
+  msTranscurridos: number;
+  ahora?: Date;
+}): Promise<{ estado: EstadoSondeoPago | null; detener: boolean }> {
+  const lectura = await params.leerCuenta();
+  const estado = decidirEstadoSondeo({ ...params, lectura });
+  return { estado, detener: estado !== null && debeDetenerSondeo(estado, params.msTranscurridos) };
 }
