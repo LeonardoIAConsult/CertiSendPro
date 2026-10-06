@@ -51,6 +51,7 @@ import {
 } from "../shared/textosCasillas";
 import { sanitizarCorreo } from "../shared/correo";
 import { decidirNecesitaAutorizar, type LecturaAutorizacion } from "./utils/autorizacionDatos";
+import { pausaAntesDelEnvioMs } from "./utils/envioLote";
 import JSZip from "jszip";
 import LandingPage from "./components/LandingPage";
 import LegalPage from "./components/LegalPage";
@@ -581,10 +582,17 @@ export default function App() {
               setAceptaTerminosUso(false);
               addLog("Aceptación de los Términos y Condiciones registrada.", "success");
             } else {
+              // Medio 1 (REVISOR_EXTERNO, 2026-10-06): un console.error no basta — si el POST
+              // falla (p. ej. la version cambio entre que se pinto la casilla y el login), el
+              // usuario queda SIN aceptacion vigente y sin saberlo. Reabrir el modal es lo que le
+              // permite reintentar; el servidor sigue exigiendo la aceptacion en /api/lote/iniciar
+              // y /api/mercadopago/create-preference si esto se cierra sin volver a intentar.
               console.error("No se pudo registrar la aceptación de los Términos tras el login (status no OK).");
+              setNecesitaAceptarTerminosUso(true);
             }
           } catch (errTerminos) {
             console.error("No se pudo registrar la aceptación de los Términos tras el login:", errTerminos);
+            setNecesitaAceptarTerminosUso(true);
           } finally {
             terminosUsoEnVueloRef.current = false;
           }
@@ -1514,6 +1522,12 @@ export default function App() {
         if (resLote.status === 403 && dataLote.motivo === "autorizacion") {
           setNecesitaAutorizarDatos(true);
         }
+        // Medio 1 (REVISOR_EXTERNO, 2026-10-06): mismo trato para `motivo: "terminos"` (O2) — un
+        // usuario YA logueado antes de esa tarea, sin aceptacion vigente de los Terminos, tambien
+        // debe ver el modal reabierto, no solo el texto de error.
+        if (resLote.status === 403 && dataLote.motivo === "terminos") {
+          setNecesitaAceptarTerminosUso(true);
+        }
         setIsDelivering(false);
         return;
       }
@@ -1526,9 +1540,19 @@ export default function App() {
       return;
     }
 
+    // Medio 6 (REVISOR_EXTERNO, 2026-10-06): pausa minima entre envios REALES (nunca entre paginas
+    // sin destinatario, que ni llaman a la red) para no chocar con el limitador de /api por uid —
+    // ver src/utils/envioLote.ts.
+    let enviosRealizados = 0;
     for (let i = 0; i < updatedPages.length; i++) {
       const page = updatedPages[i];
       if (!page.matchedRecipient) continue;
+
+      const pausaMs = pausaAntesDelEnvioMs(enviosRealizados);
+      if (pausaMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, pausaMs));
+      }
+      enviosRealizados++;
 
       updatedPages[i] = { ...page, status: "sending" };
       setPages([...updatedPages]);

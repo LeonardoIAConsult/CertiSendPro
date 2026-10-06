@@ -22,8 +22,24 @@ Para el relay de correo (Apps Script, avisos a Leonardo/compradores) ver
 | Audiencia OIDC | la MISMA URL del servicio: `https://certisend-api-522374745014.us-central1.run.app` |
 | API `cloudscheduler.googleapis.com` | ya habilitada |
 | SA del Scheduler | `certisend-scheduler@clever-spirit-436820-t7.iam.gserviceaccount.com` — ya existe y ya tiene `roles/run.invoker` sobre `certisend-api` |
-| SA de la API | `certisend-api@clever-spirit-436820-t7.iam.gserviceaccount.com` |
+| SA de la API | `certisend-api@clever-spirit-436820-t7.iam.gserviceaccount.com` — tiene `roles/firebaseauth.viewer` (ver nota abajo) |
 | Secretos ya creados (Secret Manager) | `huella-lote-secret`, `avisos-relay-secret` — ya accesibles por la SA de la API |
+
+**`roles/firebaseauth.viewer` (ya otorgado a `certisend-api@...` por el Brain):** `server.ts`
+verifica el ID token de cada peticion con `getAuth().verifyIdToken(token, comprobarRevocado)`
+(`comprobarRevocado=true` — ver el `match[1]` de la cabecera `Authorization`). Ese segundo
+parametro exige que el SDK, ademas de validar la firma del token, consulte a Identity Toolkit si
+el usuario fue deshabilitado o si sus tokens fueron revocados (`getUser` por debajo) — sin este
+rol, esa consulta falla y CADA peticion autenticada (practicamente toda la API: `/api/lote/iniciar`,
+`/api/send-email`, `/api/mercadopago/create-preference`, `/api/cuenta`...) responde 401 aunque el
+token sea valido. No se ejecuta el otorgamiento desde esta pagina (mismo guardarraíl de siempre:
+sin `gcloud` de escritura) — se documenta porque ya esta otorgado en el proyecto real; si se
+recrea la SA desde cero, el comando (no ejecutado) seria:
+```bash
+gcloud projects add-iam-policy-binding clever-spirit-436820-t7 \
+  --member="serviceAccount:certisend-api@clever-spirit-436820-t7.iam.gserviceaccount.com" \
+  --role="roles/firebaseauth.viewer"
+```
 
 **B-1 (corrige vuelta 34 del REVISOR_EXTERNO): el servicio Cloud Run `certisend-api` corre HOY con
 la cuenta de servicio de compute POR DEFECTO** (nunca se le asigno una dedicada) — la tabla de
@@ -43,6 +59,39 @@ gcloud run services update certisend-api \
 variante `update` de este flag, NUNCA la variante `set`, que REEMPLAZA TODOS los secretos
 existentes del servicio por solo los que se le pasen; la variante `update` agrega/actualiza sin
 tocar los demás).
+
+## 0bis. Orden de deploy (backend → Hosting) y rollback de los dos juntos
+
+Este proyecto se despliega en DOS piezas separadas (Cloud Run `certisend-api` + Firebase Hosting
+para `dist/`, ver `firebase.json`) que deben quedar coherentes entre si en dos sitios distintos:
+
+1. **`PROVEEDOR_NOMBRE` (Cloud Run, servidor) debe ser IDENTICO, caracter por caracter, a
+   `VITE_PROVEEDOR_NOMBRE` (variable de BUILD de Hosting, horneada en el bundle del cliente).**
+   El cliente muestra el texto de autorización de datos (T11,
+   `shared/textosCasillas.ts` `textoAutorizacionDatos`) interpolando `VITE_PROVEEDOR_NOMBRE`; el
+   usuario acepta ESE texto. El servidor reconstruye el MISMO texto con su propio
+   `PROVEEDOR_NOMBRE` y lo compara contra `nombreProveedorMostrado` que manda el cliente
+   (`POST /api/autorizacion-datos`, "Medio 2, correccion vuelta 33") — si no coinciden, responde
+   `409` y nadie puede autorizar datos ni, por tanto, usar la cuenta. Un desajuste entre los dos
+   valores bloquea el login para TODOS los usuarios nuevos hasta corregirlo.
+2. **Orden de deploy: backend primero, Hosting enseguida después.** El backend (Cloud Run) es
+   retrocompatible por diseño con un Hosting mas viejo (rutas nuevas que el cliente viejo
+   simplemente no llama); lo inverso no es cierto — un Hosting nuevo puede llamar una ruta o
+   esperar un campo que el backend viejo todavia no tiene (p. ej. un `motivo` nuevo en un 403,
+   o un campo nuevo de `/api/health`/`/api/precios`). Desplegar Hosting ANTES que el backend deja
+   una ventana donde el cliente nuevo le habla a un servidor viejo que no entiende lo que pide.
+   ```bash
+   # 1) backend
+   npm run build:server && gcloud run deploy certisend-api --source . --project=clever-spirit-436820-t7 --region=us-central1
+   # 2) frontend, con las VITE_PROVEEDOR_* del build coincidiendo con el PROVEEDOR_NOMBRE ya fijado en (1)
+   npm run build && firebase deploy --only hosting
+   ```
+   (no ejecutado por esta página — mismo guardarraíl de siempre).
+3. **Rollback: los dos juntos, nunca uno solo.** Si hay que revertir, se revierte el backend a su
+   revision anterior de Cloud Run Y el Hosting a su version anterior (`firebase hosting:clone` o
+   `gcloud run services update-traffic` hacia la revision previa) EN EL MISMO movimiento — un
+   rollback parcial (solo uno de los dos) reproduce el mismo riesgo del punto 2: un lado nuevo
+   hablandole a un lado viejo con un contrato distinto.
 
 ## 1. Qué protege esto
 
@@ -287,7 +336,7 @@ Verificar que quedó encendido, sin revelar el valor:
 
 ```bash
 curl -s https://certisend-api-522374745014.us-central1.run.app/api/health
-# {"ok":true,"huella":true,"proveedor":true,"relay":true}
+# {"ok":true,"huella":true,"proveedor":true,"relay":true,"listo":true}
 ```
 
 Rotar el secreto (crear una nueva versión, sin publicarla hasta estar listo):

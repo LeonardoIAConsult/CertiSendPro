@@ -13,7 +13,12 @@
 // compartido directamente, para que la mutacion de abajo sea real.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { textoCasillaTerminos, textoCasillaRetracto, TERMINOS_VERSION as VERSION_SERVIDOR } from "../server/cuentas";
+import {
+  textoCasillaTerminos,
+  textoCasillaRetracto,
+  textoAceptacionTerminosUso,
+  TERMINOS_VERSION as VERSION_SERVIDOR,
+} from "../server/cuentas";
 import { textoTerminos, textoRetracto, TERMINOS_VERSION as VERSION_CLIENTE } from "../src/utils/checkout";
 
 const MONTOS = [49102, 61845];
@@ -36,6 +41,20 @@ for (const idioma of IDIOMAS) {
     const delServidor = textoCasillaRetracto(idioma);
     const delCliente = textoRetracto(idioma);
     assert.equal(delCliente, delServidor);
+  });
+
+  // Bajo (REVISOR_EXTERNO, 2026-10-06): la segunda casilla (O2, previa a "Entrar con Google")
+  // cita la version vigente de los Terminos — sin esto, un usuario que acepta hoy y otro que
+  // acepta despues de un cambio de version verian el MISMO texto, aunque `aceptacionesUso/{uid}`
+  // guarde versiones distintas (no se podria probar cual version aceptaron a simple vista). No
+  // hay una copia "cliente" separada para este texto (src/App.tsx importa la MISMA funcion de
+  // shared/textosCasillas.ts, sin wrapper en src/utils/checkout.ts), por eso esta prueba solo
+  // compara contra la propia constante, no cliente-vs-servidor como las de arriba.
+  test(`textosCasillas: textoAceptacionTerminosUso incluye TERMINOS_VERSION (idioma=${idioma})`, () => {
+    const texto = textoAceptacionTerminosUso(idioma);
+    // ES dice "versión {X}", EN dice "version {X}" — en los dos casos, la palabra va INMEDIATAMENTE
+    // antes del numero de version real (nunca un numero hardcodeado aparte de la constante).
+    assert.match(texto, new RegExp(`versi[oó]n ${VERSION_SERVIDOR}\\b`, "i"));
   });
 }
 

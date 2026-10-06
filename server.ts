@@ -262,30 +262,19 @@ async function getPageBase64(sessionId: string, pageIndex: number, requesterUid:
   return base64Str;
 }
 
-// ── Tope POR USUARIO de /api/analyze-page (Sentinel/security-review sobre ad80fd6, hallazgo
-// previo al diff) ────────────────────────────────────────────────────────────────────────────
-// Antes la ruta corria con `adjuntarAuthSiExiste` (login opcional): sin sesion, el unico freno
-// era el limitador global por IP (30/min, mas arriba) — insuficiente para una clave de Gemini de
-// pago (basta con rotar de IP). Ahora exige `exigirAuth` y, ademas, un tope propio por uid, mismo
-// patron que `limitarCobroPorUid` mas abajo (`evaluarLimite`, server/limitador.ts). El limite es
-// mas alto que el de cobros porque un lote real analiza una pagina POR CERTIFICADO.
-const VENTANA_ANALISIS_UID_MS = 60_000;
-const MAX_ANALISIS_POR_UID_VENTANA = Number(process.env.RATE_LIMIT_ANALYZE_UID_PER_MIN || 60);
-const estadosAnalisisPorUid = new Map<string, EstadoVentana>();
-const limitarAnalisisPorUid: express.RequestHandler = (req, res, next) => {
-  const uid = req.uid!; // exigirAuth ya corrio antes en la cadena de middlewares: siempre hay uid.
-  const ahora = Date.now();
-  const r = evaluarLimite(estadosAnalisisPorUid.get(uid) ?? null, ahora, VENTANA_ANALISIS_UID_MS, MAX_ANALISIS_POR_UID_VENTANA);
-  estadosAnalisisPorUid.set(uid, r.estado);
-  if (estadosAnalisisPorUid.size > 5000) {
-    for (const [k, val] of estadosAnalisisPorUid) if (ahora - val.desde > VENTANA_ANALISIS_UID_MS) estadosAnalisisPorUid.delete(k);
-  }
-  if (!r.permitido) {
-    res.setHeader("Retry-After", r.retryAfterSegundos!);
-    return res.status(429).json({ error: "Demasiados análisis de IA en este momento. Intenta de nuevo en un minuto." });
-  }
-  next();
-};
+// ── /api/analyze-page: SIN tope propio por uid (Medio 6, REVISOR_EXTERNO, 2026-10-06; corrige
+// Sentinel/security-review sobre ad80fd6) ───────────────────────────────────────────────────────
+// Hubo un `limitarAnalisisPorUid` aqui (tope de 60/min por uid). Era DECORATIVO: el limitador
+// GLOBAL por uid/IP de arriba (`app.use("/api", ...)`, MAX_POR_VENTANA = 30/min por defecto)
+// corre ANTES en la cadena de middlewares y cubre TODAS las rutas bajo /api, incluida esta — con
+// un tope mas ESTRICTO (30 < 60). Cualquier peticion que hubiera disparado el limite "propio" de
+// analyze-page ya habia sido rechazada por el global, que siempre llega primero y con el numero
+// mas bajo: el middleware especifico nunca llegaba a ser el que de verdad frenaba nada. Se quita
+// en vez de "ordenarlo" porque no hay orden que lo haga tener efecto sin bajar su propio tope por
+// debajo del global (en cuyo caso seria indistinguible de solo bajar `RATE_LIMIT_PER_MIN`). La
+// ruta sigue exigiendo `exigirAuth` (sin sesion, el unico freno seria el global por IP — mismo
+// motivo que exigio `exigirAuth` en primer lugar, eso no cambia); el freno por abuso de la clave
+// de Gemini lo sigue dando el limitador global por uid.
 
 // Endpoint to split multi-page PDF (Metadata only / Register Session)
 app.post("/api/split-pdf", adjuntarAuthSiExiste, async (req, res) => {
@@ -450,7 +439,7 @@ app.post("/api/canva/export-design", adjuntarAuthSiExiste, async (req, res) => {
 });
 
 // Endpoint to analyze a single PDF page with Gemini to extract the person's name
-app.post("/api/analyze-page", exigirAuth, limitarAnalisisPorUid, async (req, res) => {
+app.post("/api/analyze-page", exigirAuth, async (req, res) => {
   try {
     const { pdfPageBase64, sessionId, pageIndex, recipientNames } = req.body;
     let activePageBase64 = pdfPageBase64;
@@ -1141,8 +1130,18 @@ verificarRutaTareasRegistrada(app);
 // "[PENDIENTE]" — `proveedorConfigurado`, server/avisos.ts) y `relay` (si `AVISOS_RELAY_URL`/
 // `AVISOS_RELAY_SECRET` estan configurados — `relayConfigurado`, server/avisos.ts), mismo patron
 // que `huella`: nunca revela ningun valor, solo si la pieza esta lista.
+//
+// Medio 4 (REVISOR_EXTERNO, 2026-10-06): `ok` solo dice "el proceso esta vivo" (siempre `true` si
+// esta ruta respondio) — no basta para saber si el servicio puede OPERAR de verdad, sobre todo
+// con `PAGOS_ACTIVOS` apagado (sin cobro, lo minimo para operar es poder enviar el acuse de
+// compra: huella del lote + identidad del proveedor en el pie). `listo` es ESE minimo:
+// `huella && proveedor` — deliberadamente NO incluye `relay` (sin el, el acuse queda pendiente de
+// reintento por el barrido programado, no bloquea el envio en si) ni `pagosActivos` (apagarlos a
+// proposito es un estado operable, no una falla).
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, huella: huellaConfigurada(), proveedor: proveedorConfigurado(), relay: relayConfigurado() });
+  const huella = huellaConfigurada();
+  const proveedor = proveedorConfigurado();
+  res.json({ ok: true, huella, proveedor, relay: relayConfigurado(), listo: huella && proveedor });
 });
 
 // Endpoint publico de precios del dia (D3, decision del Brain 2026-10-05, Tarea 4): la web lo usa
