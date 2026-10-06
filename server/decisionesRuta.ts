@@ -7,7 +7,7 @@
 // la prueba ejercita la logica real.
 import { sanitizarCorreo } from "../shared/correo";
 import { decidirEnvioConHuella } from "./huellaLote";
-import { decidirAutorizacionLote, type AutorizacionDatos } from "./cuentas";
+import { decidirAutorizacionLote, decidirAceptacionUso, type AutorizacionDatos, type AceptacionUso } from "./cuentas";
 
 // ── POST /api/send-email: decision de la huella (sanear -> validar -> comparar) ─────────────────
 
@@ -91,4 +91,25 @@ export async function decidirAutorizacionLoteRuta(
 ): Promise<{ ok: true } | { ok: false; httpStatus: 403; error: string; motivo: "autorizacion" }> {
   const autorizacion = await deps.obtenerAutorizacionDatos(uid);
   return decidirAutorizacionLote(autorizacion, versionVigente);
+}
+
+// ── POST /api/lote/iniciar: decision de la aceptacion de Terminos y Condiciones (O2, Dictamen
+// Abogado_LAP ronda 5, 2026-10-06) ──────────────────────────────────────────────────────────────
+
+export interface DepsDecisionAceptacionUso {
+  obtenerAceptacionUso(uid: string): Promise<AceptacionUso | null>;
+}
+
+/**
+ * Lee la aceptacion de Terminos guardada del usuario y delega en `decidirAceptacionUso`
+ * (server/cuentas.ts, PURA) — mismo motivo que `decidirAutorizacionLoteRuta`: un unico punto de
+ * llamada en `server.ts` que SI se puede probar sin Firestore real.
+ */
+export async function decidirAceptacionUsoRuta(
+  uid: string,
+  versionVigente: string,
+  deps: DepsDecisionAceptacionUso
+): Promise<{ ok: true } | { ok: false; httpStatus: 403; error: string; motivo: "terminos" }> {
+  const aceptacion = await deps.obtenerAceptacionUso(uid);
+  return decidirAceptacionUso(aceptacion, versionVigente);
 }

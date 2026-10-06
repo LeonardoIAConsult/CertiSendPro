@@ -281,10 +281,15 @@ export function tienePlaceholderPendiente(texto: string): boolean {
 // ES es traduccion fiel de docs/legal/plantilla-confirmacion-compra.md v1.2 (texto plano, no
 // HTML: `enviarCorreo` solo manda `{para, asunto, texto}`). EN es traduccion de cortesia, mismo
 // nivel de fidelidad que las traducciones EN ya existentes de T4/T5 (docs/legal/textos-checkout.md
-// v1.2). El campo [PENDIENTE: ...] de IVA/facturacion DIAN sigue pendiente de que el contador lo
-// confirme (Tarea 0/13 del plan) — se mantiene como placeholder literal, igual que ya hace la
-// plantilla, en vez de inventar un dato que el Brain no tiene; mientras siga ahi, este correo
-// nunca sale al comprador (M36(2), ver `tienePlaceholderPendiente` arriba).
+// v1.2).
+//
+// O1 (Dictamen Abogado_LAP ronda 5, 2026-10-06, CRITICO): el precio pagado YA NO lleva el
+// marcador "[PENDIENTE: confirmar con contador si este precio incluye IVA]" — ese marcador
+// bloqueaba (via `tienePlaceholderPendiente`) el acuse de compra para TODA venta, asi que el
+// comprador nunca lo recibia (incumple Terminos sec. 6.5 y Ley 1480 art. 50). La decision de
+// Leonardo (sin contador; registrada en WIKI/registro-legal.md) ya resolvio el IVA: el precio es
+// "total y final, sin cargos adicionales" — Leonardo absorbe cualquier IVA que llegue a deber, el
+// comprador nunca paga de mas. Ver tests/avisos.test.ts ("O1: ...").
 
 export interface DatosConfirmacionCompra {
   paraEmail: string;
@@ -315,7 +320,7 @@ export function construirCorreoConfirmacionCompra(
         `PURCHASE SUMMARY\n` +
         `Plan: Bundle (150 sends)\n` +
         `What it includes: 150 successful sends, valid for 1 month or until used up, whichever comes first. Batches of 15 certificates or fewer never spend your Bundle balance. Unused sends expire and do not carry over.\n` +
-        `Price paid: COP $${copTexto} [PENDING: confirm with accountant whether this price already includes VAT]\n` +
+        `Price paid: COP $${copTexto}, total and final price, with no additional charges\n` +
         `Calculation: US$15 x TRM ${datos.trm} (official rate, effective ${datos.fechaTrm}), rounded to the peso\n` +
         `Payment date: ${fechaPagoTexto}\n` +
         `Mercado Pago reference: ${datos.refMp}\n\n` +
@@ -338,7 +343,7 @@ export function construirCorreoConfirmacionCompra(
       `RESUMEN DE LA COMPRA\n` +
       `Plan: Paquete (150 envíos)\n` +
       `Qué incluye: 150 envíos con éxito, 1 mes de vigencia o hasta gastarlos, lo que ocurra primero. Los lotes de 15 certificados o menos no gastan tu Paquete. Los envíos que no uses vencen y no se acumulan.\n` +
-      `Precio pagado: $${copTexto} COP [PENDIENTE: confirmar con contador si este precio incluye IVA]\n` +
+      `Precio pagado: $${copTexto} COP, precio total y final, sin cargos adicionales\n` +
       `Cálculo: US$15 × TRM ${datos.trm} (certificada por la Superintendencia Financiera, vigente el ${datos.fechaTrm}), redondeado al peso\n` +
       `Fecha del pago: ${fechaPagoTexto}\n` +
       `Referencia de Mercado Pago: ${datos.refMp}\n\n` +

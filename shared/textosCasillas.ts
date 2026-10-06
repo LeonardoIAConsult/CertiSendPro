@@ -75,6 +75,34 @@ export function textoCasillaRetracto(idioma: Idioma = "es"): string {
  * `import.meta.env.VITE_PROVEEDOR_NOMBRE` en el cliente — y, si falta o esta vacio, queda
  * "[dato pendiente]" (nunca se inventa).
  */
+/**
+ * Texto EXACTO de la segunda casilla, previa al boton "Entrar con Google" (O2, Dictamen
+ * Abogado_LAP ronda 5, 2026-10-06, Alto): acepta los Terminos y Condiciones TAMBIEN para un
+ * usuario del plan Gratis, que nunca pasa por el checkout del Paquete (T4/T5, que solo se ven al
+ * comprar). Sin esta casilla, un usuario Gratis nunca acepta la secc. 12 (responsable de los
+ * datos de sus destinatarios, contrato de transmision) ni la secc. 13.3 (revision obligatoria
+ * antes de enviar) — esas condiciones generales no le son oponibles (Ley 1480 art. 37).
+ *
+ * A diferencia de `textoAutorizacionDatos`, este texto NO interpola el nombre del proveedor (solo
+ * cita la version de los Terminos), asi que no hace falta un parametro de proveedor ni la
+ * verificacion de coincidencia que tiene `decidirRegistroAutorizacion` (server/cuentas.ts).
+ * Se guarda junto con la autorizacion de datos, en su PROPIA coleccion (`aceptacionesUso/{uid}`,
+ * ver server/cuentas.ts): versionTerminos, texto EXACTO, idioma y fecha del servidor. Si
+ * `TERMINOS_VERSION` cambia, se vuelve a pedir, igual que la autorizacion de datos.
+ */
+export function textoAceptacionTerminosUso(idioma: Idioma = "es"): string {
+  if (idioma === "en") {
+    return (
+      `I accept the Terms and Conditions (version ${TERMINOS_VERSION}), including the conditions on my ` +
+      `recipients' data (section 12) and the mandatory review before sending (section 13.3).`
+    );
+  }
+  return (
+    `Acepto los Términos y Condiciones (versión ${TERMINOS_VERSION}), incluidas las condiciones sobre los ` +
+    `datos de mis destinatarios (sección 12) y la revisión obligatoria antes de enviar (sección 13.3).`
+  );
+}
+
 export function textoAutorizacionDatos(idioma: Idioma, nombreProveedor: string | null | undefined): string {
   const nombre = nombreProveedor && nombreProveedor.trim() ? nombreProveedor.trim() : "[dato pendiente]";
   if (idioma === "en") {

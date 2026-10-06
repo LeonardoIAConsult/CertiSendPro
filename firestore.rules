@@ -45,5 +45,14 @@ service cloud.firestore {
     match /autorizaciones/{uid} {
       allow read, write: if false;
     }
+
+    // aceptacionesUso/{uid}: aceptacion de Terminos y Condiciones ANTES del primer uso (O2,
+    // Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto). Coleccion PROPIA, separada de cuentas/{uid}
+    // y de autorizaciones/{uid} por el mismo motivo que esa ultima: un `tx.set` sin merge de la
+    // activacion/reversion de un Paquete nunca puede volver a borrarla. Solo el servidor la
+    // lee/escribe (GET/POST /api/aceptacion-uso); el navegador nunca accede directo.
+    match /aceptacionesUso/{uid} {
+      allow read, write: if false;
+    }
   }
 }

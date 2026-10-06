@@ -13,7 +13,7 @@
 //      interno (saneado SI coincide con la huella guardada) se rechazaria con 409 por error.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta } from "../server/decisionesRuta";
+import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta, decidirAceptacionUsoRuta } from "../server/decisionesRuta";
 import { huellaPar } from "../server/huellaLote";
 import type { AutorizacionDatos } from "../server/cuentas";
 import { Timestamp } from "firebase-admin/firestore";
@@ -134,4 +134,64 @@ test("decidirAutorizacionLoteRuta: pasa el uid tal cual a obtenerAutorizacionDat
     },
   });
   assert.equal(uidRecibido, "uid-especifico");
+});
+
+// ── decidirAceptacionUsoRuta (O2, Dictamen Abogado_LAP ronda 5, 2026-10-06) ─────────────────────
+// Mismo contrato que decidirAutorizacionLoteRuta, pero con motivo "terminos" — asi el cliente
+// (POST /api/lote/iniciar) sabe cual de los DOS modales reabrir.
+
+function aceptacionUsoFalsa(version: string) {
+  return { version, fecha: Timestamp.now(), idioma: "es" as const, texto: "texto-aceptado" };
+}
+
+test("decidirAceptacionUsoRuta: sin aceptacion guardada -> 403 motivo terminos", async () => {
+  const resultado = await decidirAceptacionUsoRuta("uid-1", VERSION_VIGENTE, {
+    obtenerAceptacionUso: async () => null,
+  });
+  assert.equal(resultado.ok, false);
+  if (resultado.ok === false) {
+    assert.equal(resultado.httpStatus, 403);
+    assert.equal(resultado.motivo, "terminos");
+  }
+});
+
+test("decidirAceptacionUsoRuta: aceptacion de una VERSION VIEJA de los Terminos -> 403 (se vuelve a pedir)", async () => {
+  const resultado = await decidirAceptacionUsoRuta("uid-1", VERSION_VIGENTE, {
+    obtenerAceptacionUso: async () => aceptacionUsoFalsa("1.2"),
+  });
+  assert.equal(resultado.ok, false);
+});
+
+test("decidirAceptacionUsoRuta: aceptacion de la version VIGENTE -> ok:true", async () => {
+  const resultado = await decidirAceptacionUsoRuta("uid-1", VERSION_VIGENTE, {
+    obtenerAceptacionUso: async () => aceptacionUsoFalsa(VERSION_VIGENTE),
+  });
+  assert.equal(resultado.ok, true);
+});
+
+test("decidirAceptacionUsoRuta: pasa el uid tal cual a obtenerAceptacionUso (nunca otro)", async () => {
+  let uidRecibido: string | null = null;
+  await decidirAceptacionUsoRuta("uid-especifico", VERSION_VIGENTE, {
+    obtenerAceptacionUso: async (uid) => {
+      uidRecibido = uid;
+      return null;
+    },
+  });
+  assert.equal(uidRecibido, "uid-especifico");
+});
+
+// ── Mutacion del oraculo O2: si /api/lote/iniciar dejara de llamar a decidirAceptacionUsoRuta (o
+// ignorara su resultado), un lote sin aceptacion de Terminos se autorizaria igual. Esta prueba fija
+// el CONTRATO que server.ts debe respetar; la mutacion real se verifica quitando esa llamada de
+// server.ts y confirmando a mano que un lote sin aceptacion deja de dar 403 (cubierto en el pase
+// manual del oraculo, no aqui, porque server.ts no se importa en estas pruebas de unidad).
+
+test("decidirAceptacionUsoRuta: el resultado 'ok:false' NUNCA debe confundirse con el de autorizacion (motivo distinto)", async () => {
+  const resultadoAutorizacion = await decidirAutorizacionLoteRuta("uid-1", VERSION_VIGENTE, { obtenerAutorizacionDatos: async () => null });
+  const resultadoTerminos = await decidirAceptacionUsoRuta("uid-1", VERSION_VIGENTE, { obtenerAceptacionUso: async () => null });
+  assert.equal(resultadoAutorizacion.ok, false);
+  assert.equal(resultadoTerminos.ok, false);
+  if (resultadoAutorizacion.ok === false && resultadoTerminos.ok === false) {
+    assert.notEqual(resultadoAutorizacion.motivo, resultadoTerminos.motivo);
+  }
 });

@@ -58,11 +58,11 @@ Esta identificación es la misma que aparece en la Política de Privacidad y en 
 
 4.3. **Qué es un «envío con éxito».** Es cada correo que la API de Gmail acepta para envío desde tu cuenta (Gmail devuelve un identificador del mensaje). Los envíos que Gmail rechaza o que fallan **no se descuentan** de tu Paquete. CertiSend no puede garantizar que el destinatario abra o reciba el correo una vez Gmail lo aceptó (por ejemplo, si la dirección no existe o el correo cae en spam).
 
-4.4. **Antes de empezar un lote**, CertiSend verifica en su servidor que tu plan lo permite: en Gratis, que el lote no supere 15 certificados; en Paquete, que tengas envíos suficientes y vigentes para todo el lote. Si no alcanzan, el lote no empieza y te lo decimos antes: no hacemos envíos a medias.
+4.4. **Antes de empezar un lote**, CertiSend verifica en su servidor que tu plan lo permite: en Gratis, que el lote no supere 15 certificados; en Paquete, que tengas envíos suficientes y vigentes para todo el lote. Si no alcanzan, el lote no empieza y te lo decimos antes. Ya iniciado, un lote puede quedar incompleto por causas ajenas a tu plan (por ejemplo, los límites que Gmail aplica a tu cuenta o una falla de conexión); los envíos que no salgan no se descuentan.
 
 4.4-bis. **Los lotes pequeños no gastan tu Paquete.** Los lotes de **15 certificados o menos** se envían siempre con las condiciones del plan Gratis y **nunca descuentan** envíos de tu Paquete, aunque lo tengas activo y con saldo. El saldo del Paquete **solo se usa para lotes de más de 15 certificados**, y en ese caso cada envío con éxito de ese lote descuenta uno. Si tu saldo no alcanza para un lote de más de 15, puedes dividirlo en lotes de 15 o menos.
 
-4.5. **Sobrantes del Paquete.** Los envíos del Paquete **vencen** al mes de la confirmación del pago. **Los envíos que no uses en ese mes se pierden y no se acumulan** a otro Paquete que compres después. Este vencimiento se te muestra antes de pagar y dentro de la app («te quedan N envíos, vencen el DD/MM»). **No puedes comprar un Paquete nuevo mientras el actual esté vigente y tenga saldo:** debes agotarlo o esperar a que venza antes de comprar otro; si lo intentas, el pago se rechaza y se te muestra el aviso correspondiente (T6-bis de `textos-checkout.md`).
+4.5. **Sobrantes del Paquete.** Los envíos del Paquete **vencen** al mes de la confirmación del pago. **Los envíos que no uses en ese mes se pierden y no se acumulan** a otro Paquete que compres después. Este vencimiento se te muestra antes de pagar y dentro de la app («te quedan N envíos, vencen el DD/MM»). **No puedes comprar un Paquete nuevo mientras el actual esté vigente y tenga saldo:** debes agotarlo o esperar a que venza antes de comprar otro; si lo intentas, no podrás iniciar el pago y te mostraremos el aviso correspondiente.
 
 4.6. **Plan Gratis.** El plan Gratis no tiene costo. Sus condiciones (por ejemplo, el tope de 15 certificados por lote) pueden cambiar solo con el aviso previo de la sección 11.
 
@@ -92,7 +92,7 @@ Donde:
 
 6.3. **Aceptación expresa.** Para pagar debes marcar dos casillas —que aparecen **sin marcar**—: con la primera aceptas la versión vigente de estos Términos; con la segunda declaras que quieres que el servicio empiece de inmediato (sección 8). Guardamos un registro de esa aceptación (versión de los Términos, texto de cada casilla, idioma, fecha y hora, cuenta, correo, plan, monto y TRM) como prueba de la relación comercial.
 
-6.4. **Activación.** Tu plan se activa **solo cuando Mercado Pago confirma el pago** a nuestro servidor. Volver a la página de CertiSend no activa nada por sí solo. Si la confirmación tarda, verás «Tu pago está en revisión» y te avisaremos por correo cuando se confirme. Si el pago es rechazado, **no se realiza ningún cobro** y tu plan no cambia.
+6.4. **Activación.** Tu plan se activa **solo cuando Mercado Pago confirma el pago** a nuestro servidor. Volver a la página de CertiSend no activa nada por sí solo. Si la confirmación tarda, te lo indicamos en pantalla y, cuando Mercado Pago la confirme, te llega el correo de la sección 6.5. Si el pago es rechazado, **no se realiza ningún cobro** y tu plan no cambia.
 
 6.5. **Confirmación de compra.** A más tardar el día calendario siguiente a la confirmación del pago, te enviamos al correo de tu cuenta un acuse de recibo con el detalle de la compra, el precio final pagado, la fecha de activación y vencimiento, y un enlace a estos Términos.
 
@@ -134,13 +134,13 @@ Donde:
 
 | Caso | Qué devolvemos |
 |---|---|
-| Cobro duplicado | El cobro repetido, completo |
+| Cobro duplicado | El cobro repetido, completo, sin que lo pidas |
 | Cobro distinto del monto que aceptaste en el resumen | La diferencia, sin que lo pidas |
 | Paquete sin ningún envío con éxito, pedido dentro de los 5 días hábiles siguientes al pago (sección 8.4) | El pago completo de ese Paquete |
 | El servicio no se prestó, en todo o en parte, por una falla nuestra (por ejemplo, el servidor de CertiSend no permitió enviar durante la vigencia del Paquete) | La parte no prestada, en proporción |
 | Los demás casos que la ley del consumidor reconozca | Lo que la ley disponga |
 
-10.2. **Plazos.** Respondemos tu solicitud de reembolso, aceptándola o explicando por qué no procede, en un máximo de **quince (15) días hábiles** desde que la recibimos. Si procede, hacemos el reembolso por medio de Mercado Pago al mismo medio de pago en un máximo de **treinta (30) días calendario** desde nuestra respuesta. Cuando el reembolso no requiere solicitud (cobro distinto del aceptado), los 30 días calendario se cuentan desde el cobro. Los tiempos que tarde tu banco o emisor en reflejarlo dependen de ellos.
+10.2. **Plazos.** Respondemos tu solicitud de reembolso, aceptándola o explicando por qué no procede, en un máximo de **quince (15) días hábiles** desde que la recibimos. Si procede, hacemos el reembolso por medio de Mercado Pago al mismo medio de pago en un máximo de **treinta (30) días calendario** desde nuestra respuesta. Cuando el reembolso no requiere solicitud (cobro duplicado o cobro distinto del aceptado), los 30 días calendario se cuentan desde el cobro. Los tiempos que tarde tu banco o emisor en reflejarlo dependen de ellos.
 
 10.3. Fuera de los casos anteriores, un Paquete que ya empezaste a usar no se reembolsa; lo conservas hasta su vencimiento (sección 4.5). Nada de esta sección limita los derechos que la ley te reconoce.
 
@@ -169,14 +169,14 @@ Donde:
 12.4. **Condiciones del encargo (contrato de transmisión).** Al aceptar estos Términos, tú y CertiSend acuerdan lo siguiente sobre los datos de tus destinatarios, conforme al artículo 25 del Decreto 1377 de 2013:
 
 - **Alcance y actividades:** CertiSend solo lee la lista de la hoja de cálculo que tú indiques (el permiso de Google `spreadsheets.readonly` que concedes habilita, por cómo lo define Google, leer todas tus hojas, pero CertiSend solo abre la que indicas y nunca puede modificarla), lee los nombres de tus certificados con IA, empareja cada certificado con su destinatario y envía el correo desde tu Gmail. Nada más.
-- **Finalidad:** únicamente entregar los certificados que tú decides enviar. CertiSend no usa esos datos para fines propios, no los vende ni los usa para publicidad.
+- **Finalidad:** únicamente entregar los certificados que tú decides enviar y conservar la huella seudonimizada de tu confirmación de cada lote (sección 13.3 (c)), para probar, si hay un reclamo, qué emparejamiento confirmaste. CertiSend no usa esos datos para ningún otro fin, no los vende ni los usa para publicidad.
 - **Conservación y supresión:** los PDF se guardan solo en la memoria temporal del servidor y se eliminan automáticamente a más tardar unas dos (2) horas y diez (10) minutos después de cargarlos. CertiSend no guarda tu lista de destinatarios en una base de datos. Los registros técnicos del servidor pueden conservar durante treinta (30) días una dirección de correo que haya provocado un error de envío (ver Política de Privacidad). **Gemini (Google):** según los términos del servicio pago de la API de Gemini, Google no usa el contenido que le enviamos para mejorar sus productos, pero puede conservarlo por un periodo limitado, que Google no fija en días, solo para detectar abusos de su política de uso y para requerimientos legales; ese plazo no lo controla CertiSend. **Registro de confirmación de cada lote:** CertiSend conserva, como dato seudonimizado, la huella con clave secreta de cada par página–fila–correo que confirmaste (sección 13.3 (c)), junto con la fecha y hora y el número de certificados, durante el mismo plazo que los registros de pagos; no permite leer los correos sin la clave, y la clave se guarda fuera de la base de datos.
 - **Seguridad y confidencialidad:** CertiSend aplica medidas de seguridad razonables para proteger esos datos y guarda confidencialidad sobre ellos.
 - **Incidentes de seguridad:** si CertiSend conoce un incidente que afecte los datos de tus destinatarios, **te lo comunicará por correo sin demora injustificada** desde que lo conozca, con lo que se sepa del incidente, los datos afectados y las medidas tomadas, para que tú, como responsable, puedas informar a la Superintendencia de Industria y Comercio y a los titulares. CertiSend no decide a su criterio si te informa o no.
 - **Subencargados:** para prestar el servicio, los datos pasan por Google (Gmail, Google Sheets, Gemini y la infraestructura de Google Cloud) y, si la usas, por Canva. La lista está en la Política de Privacidad.
 - **Consultas y reclamos:** si una persona destinataria nos escribe para ejercer sus derechos, te remitiremos la solicitud y te apoyaremos para atenderla dentro de los plazos legales.
 
-**En corto:** lo que subes es tuyo; de los datos de tus destinatarios respondes tú, y nosotros solo los usamos para enviar lo que tú decidiste, y los borramos en horas.
+**En corto:** lo que subes es tuyo; de los datos de tus destinatarios respondes tú. Nosotros solo los usamos para enviar lo que decidiste, borramos los PDF en horas y guardamos, como prueba, una huella con clave de cada envío confirmado, que no deja leer los correos.
 
 ## 13. Uso de inteligencia artificial
 

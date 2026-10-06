@@ -21,6 +21,12 @@ const ARCHIVOS_LEGALES = ["src/legal/terminos.md", "src/legal/privacidad.md"] as
 // instruccion interna "Leonardo debe...". `vuelta\s+\d` (no solo "vuelta ") evita un falso
 // positivo con la prosa legitima de la Politica de Privacidad ("CertiSend recibe de vuelta solo
 // lo descrito...", sección 6) que SI contiene la palabra "vuelta" sin ser una nota de revision.
+// O8 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Medio): §4.5 de terminos.md citaba
+// "T6-bis de `textos-checkout.md`" — una referencia interna a un documento de trabajo
+// (docs/legal/textos-checkout.md, BORRADOR, gitignored) que un usuario real nunca puede abrir.
+// Igual que "vuelta N" o "server/"/"src/", ninguna de las dos cadenas debe volver a aparecer en
+// el texto PUBLICADO: ni el nombre del documento interno ("textos-checkout") ni el id de la
+// clausula de trabajo ("T6-bis").
 const PATRONES_PROHIBIDOS: RegExp[] = [
   /CONDICI[ÓO]N DE PRODUCTO/i,
   /PRODUCTO CUMPLIDA/i,
@@ -29,6 +35,8 @@ const PATRONES_PROHIBIDOS: RegExp[] = [
   /vuelta\s+\d+/i,
   /Leonardo debe/i,
   /<!--/,
+  /textos-checkout/i,
+  /T6-bis/i,
 ];
 
 function valoresDePrueba() {
@@ -46,6 +54,12 @@ for (const archivo of ARCHIVOS_LEGALES) {
   test(`${archivo}: el archivo CRUDO no contiene ninguna nota interna de "CONDICIÓN DE PRODUCTO"`, () => {
     const crudo = fs.readFileSync(rutaAbsoluta, "utf8");
     assert.doesNotMatch(crudo, /CONDICI[ÓO]N DE PRODUCTO/i, `${archivo} todavia tiene una nota [CONDICIÓN DE PRODUCTO ...]`);
+  });
+
+  test(`${archivo}: el archivo CRUDO no referencia "textos-checkout" ni "T6-bis" (O8, Dictamen ronda 5)`, () => {
+    const crudo = fs.readFileSync(rutaAbsoluta, "utf8");
+    assert.doesNotMatch(crudo, /textos-checkout/i, `${archivo} todavia referencia el documento interno textos-checkout.md`);
+    assert.doesNotMatch(crudo, /T6-bis/i, `${archivo} todavia referencia la clausula interna T6-bis`);
   });
 
   test(`${archivo}: renderizado con reemplazarPlaceholdersProveedor + markdownAHtml, nunca expone una nota interna`, () => {

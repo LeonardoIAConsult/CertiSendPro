@@ -23,11 +23,15 @@ import {
   tienePaqueteVigenteConSaldo,
   guardarAutorizacionDatos,
   obtenerAutorizacionDatos,
+  guardarAceptacionUso,
+  obtenerAceptacionUso,
   guardarConfirmacionLote,
   obtenerHuellasLote,
   normalizarIdioma,
   textoAutorizacionDatos,
+  textoAceptacionTerminosUso,
   decidirRegistroAutorizacion,
+  TERMINOS_VERSION,
 } from "./server/cuentas";
 import {
   huellasLote,
@@ -35,7 +39,7 @@ import {
   validarSecretoYPares,
   type ParConfirmacion,
 } from "./server/huellaLote";
-import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta } from "./server/decisionesRuta";
+import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta, decidirAceptacionUsoRuta } from "./server/decisionesRuta";
 import { trmHoy, copDesdeUsd } from "./server/trm";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete } from "./server/cobroPaquete";
@@ -1154,6 +1158,36 @@ app.post("/api/autorizacion-datos", exigirAuth, async (req, res) => {
   }
 });
 
+// Aceptacion de Terminos y Condiciones ANTES del primer uso (O2, Dictamen Abogado_LAP ronda 5,
+// 2026-10-06, Alto): mismo patron EXACTO que GET/POST /api/autorizacion-datos arriba, en su propia
+// coleccion (`aceptacionesUso/{uid}`, ver server/cuentas.ts) — un usuario Gratis nunca pasaba por
+// el checkout del Paquete (unico lugar donde se aceptaban los Terminos), asi que nunca aceptaba la
+// secc. 12 (responsable de los datos de sus destinatarios) ni la secc. 13.3 (revision obligatoria).
+// A diferencia de la autorizacion de datos, este texto no interpola el nombre del proveedor: no
+// hace falta una comprobacion de coincidencia como `decidirRegistroAutorizacion`.
+app.get("/api/aceptacion-uso", exigirAuth, async (req, res) => {
+  try {
+    const aceptacion = await obtenerAceptacionUso(req.uid!);
+    const aceptado = aceptacion !== null && aceptacion.version === TERMINOS_VERSION;
+    res.json({ aceptado, version: aceptacion?.version ?? null });
+  } catch (error: any) {
+    console.error("Error al consultar la aceptacion de terminos:", error);
+    res.status(500).json({ error: "No se pudo consultar tu aceptación en este momento." });
+  }
+});
+
+app.post("/api/aceptacion-uso", exigirAuth, async (req, res) => {
+  try {
+    const idioma = normalizarIdioma(req.body?.idioma);
+    const texto = textoAceptacionTerminosUso(idioma);
+    await guardarAceptacionUso(req.uid!, TERMINOS_VERSION, idioma, texto);
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error("Error al guardar la aceptacion de terminos:", error);
+    res.status(500).json({ error: "No se pudo guardar tu aceptación. Intenta de nuevo." });
+  }
+});
+
 // Endpoint para pedir permiso de envio ANTES de empezar un lote (Tarea 3, 2026-10-05). El
 // navegador manda cuantos certificados quiere enviar; el servidor decide segun el plan real de
 // la cuenta (nunca segun lo que diga el navegador) y, si lo aprueba, crea un lote autorizado que
@@ -1201,6 +1235,17 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
       return res.status(decisionAutorizacion.httpStatus).json({
         error: decisionAutorizacion.error,
         motivo: decisionAutorizacion.motivo,
+      });
+    }
+
+    // O2 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto): sin aceptacion VIGENTE de los Terminos
+    // y Condiciones, tampoco se inicia ningun lote — motivo "terminos" (distinto de "autorizacion")
+    // para que el cliente reabra el modal correcto.
+    const decisionTerminos = await decidirAceptacionUsoRuta(req.uid!, TERMINOS_VERSION, { obtenerAceptacionUso });
+    if (decisionTerminos.ok === false) {
+      return res.status(decisionTerminos.httpStatus).json({
+        error: decisionTerminos.error,
+        motivo: decisionTerminos.motivo,
       });
     }
 

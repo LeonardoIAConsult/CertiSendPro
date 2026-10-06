@@ -45,7 +45,10 @@ import {
   sincronizarEmparejamiento as sincronizarEmparejamientoPuro,
   paginaConFilaAsignada,
 } from "./utils/matching";
-import { textoAutorizacionDatos as textoAutorizacionDatosCompartido } from "../shared/textosCasillas";
+import {
+  textoAutorizacionDatos as textoAutorizacionDatosCompartido,
+  textoAceptacionTerminosUso as textoAceptacionTerminosUsoCompartido,
+} from "../shared/textosCasillas";
 import { sanitizarCorreo } from "../shared/correo";
 import { decidirNecesitaAutorizar, type LecturaAutorizacion } from "./utils/autorizacionDatos";
 import JSZip from "jszip";
@@ -369,6 +372,67 @@ export default function App() {
     }
   };
 
+  // ── Aceptacion de Terminos y Condiciones, ANTES del primer uso (O2, Dictamen Abogado_LAP ronda
+  // 5, 2026-10-06, Alto) ─────────────────────────────────────────────────────────────────────────
+  // Mismo patron EXACTO que la autorizacion de datos de arriba, en su PROPIA casilla/coleccion
+  // (`aceptacionesUso/{uid}`, GET/POST /api/aceptacion-uso): un usuario del plan Gratis nunca
+  // pasaba por el checkout del Paquete (unico lugar donde se aceptaban los Terminos), asi que
+  // nunca aceptaba la secc. 12 (responsable de los datos de sus destinatarios) ni la secc. 13.3
+  // (revision obligatoria antes de enviar). El servidor vuelve a exigirla en /api/lote/iniciar Y
+  // en /api/mercadopago/create-preference (403 motivo "terminos") por si este aviso se cierra sin
+  // aceptar.
+  const [necesitaAceptarTerminosUso, setNecesitaAceptarTerminosUso] = useState(false);
+  const [aceptaTerminosUso, setAceptaTerminosUso] = useState(false);
+  const [aceptandoTerminosUso, setAceptandoTerminosUso] = useState(false);
+  const terminosUsoEnVueloRef = useRef(false);
+
+  useEffect(() => {
+    if (needsAuth || !user || user.isGuest) return;
+    (async () => {
+      let lectura: LecturaAutorizacion;
+      try {
+        const authHeader = await construirAuthHeader();
+        if (!authHeader.Authorization) return;
+        const res = await fetch("/api/aceptacion-uso", { headers: authHeader });
+        if (!res.ok) {
+          lectura = { tipo: "error" };
+        } else {
+          const data = await res.json();
+          lectura = { tipo: "ok", autorizado: data.aceptado === true };
+        }
+      } catch (err) {
+        console.error("No se pudo consultar la aceptación de los Términos:", err);
+        lectura = { tipo: "error" };
+      }
+      const decision = decidirNecesitaAutorizar(lectura, terminosUsoEnVueloRef.current);
+      if (decision !== null) setNecesitaAceptarTerminosUso(decision);
+    })();
+  }, [needsAuth, user]);
+
+  const handleAceptarTerminosUso = async () => {
+    if (!aceptaTerminosUso) return;
+    setAceptandoTerminosUso(true);
+    terminosUsoEnVueloRef.current = true;
+    try {
+      const res = await fetch("/api/aceptacion-uso", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(await construirAuthHeader()) },
+        body: JSON.stringify({ idioma: language }),
+      });
+      if (!res.ok) {
+        triggerBanner("error", "No se pudo guardar tu aceptación de los Términos. Intenta de nuevo.");
+        return;
+      }
+      setNecesitaAceptarTerminosUso(false);
+      addLog("Aceptación de los Términos y Condiciones registrada.", "success");
+    } catch (err: any) {
+      triggerBanner("error", "No se pudo guardar tu aceptación de los Términos. Intenta de nuevo.");
+    } finally {
+      setAceptandoTerminosUso(false);
+      terminosUsoEnVueloRef.current = false;
+    }
+  };
+
   // `?pago=...`/`payment_id`/`status` al volver de Mercado Pago: se leen UNA sola vez al montar
   // (vienen de la URL con la que cargo la pagina, nunca cambian dentro de la misma sesion de la
   // app). G8: `paymentId` es el dato FIJO contra el que `decidirEstadoSondeo` compara
@@ -497,6 +561,32 @@ export default function App() {
             console.error("No se pudo registrar la autorización de datos tras el login:", errAuth);
           } finally {
             autorizacionEnVueloRef.current = false;
+          }
+        }
+
+        // O2 (Dictamen Abogado_LAP ronda 5, 2026-10-06): misma logica que la autorizacion de
+        // datos arriba, para la SEGUNDA casilla (aceptacion de los Terminos y Condiciones) — vive
+        // junto a la de autorizacion, ANTES del boton "Entrar con Google"; los botones quedan
+        // deshabilitados hasta marcar AMBAS (ver LandingPage.tsx).
+        if (aceptaTerminosUso) {
+          terminosUsoEnVueloRef.current = true;
+          try {
+            const res = await fetch("/api/aceptacion-uso", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...(await construirAuthHeader()) },
+              body: JSON.stringify({ idioma: language }),
+            });
+            if (res.ok) {
+              setNecesitaAceptarTerminosUso(false);
+              setAceptaTerminosUso(false);
+              addLog("Aceptación de los Términos y Condiciones registrada.", "success");
+            } else {
+              console.error("No se pudo registrar la aceptación de los Términos tras el login (status no OK).");
+            }
+          } catch (errTerminos) {
+            console.error("No se pudo registrar la aceptación de los Términos tras el login:", errTerminos);
+          } finally {
+            terminosUsoEnVueloRef.current = false;
           }
         }
       }
@@ -1604,6 +1694,10 @@ export default function App() {
   // inventa). Se calcula ANTES del `if (needsAuth)` de abajo porque GRAVE 3(c) exige mostrar la
   // casilla de autorizacion EN LA LANDING, antes del boton de login.
   const textoAutorizacionDatos = textoAutorizacionDatosCompartido(language, import.meta.env.VITE_PROVEEDOR_NOMBRE);
+  // O2 (Dictamen Abogado_LAP ronda 5, 2026-10-06): texto de la SEGUNDA casilla (aceptacion de los
+  // Terminos y Condiciones), tambien ANTES del boton "Entrar con Google" — mismo motivo que la de
+  // arriba: se calcula aqui porque LandingPage la necesita antes de cualquier login.
+  const textoAceptacionTerminosUso = textoAceptacionTerminosUsoCompartido(language);
 
   if (needsAuth) {
     return (
@@ -1621,6 +1715,9 @@ export default function App() {
           textoAutorizacionDatos={textoAutorizacionDatos}
           aceptaAutorizacionDatos={aceptaAutorizacionDatos}
           onToggleAceptaAutorizacionDatos={setAceptaAutorizacionDatos}
+          textoAceptacionTerminosUso={textoAceptacionTerminosUso}
+          aceptaTerminosUso={aceptaTerminosUso}
+          onToggleAceptaTerminosUso={setAceptaTerminosUso}
         />
       </>
     );
@@ -1788,6 +1885,64 @@ export default function App() {
                 className="w-full mt-5 py-2.5 rounded-lg text-xs font-bold bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-95 transition-opacity"
               >
                 {autorizandoDatos ? <Loader2 className="w-4 h-4 animate-spin" /> : (language === "en" ? "Continue" : "Continuar")}
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Aviso de aceptacion de los Terminos y Condiciones ANTES del primer uso (O2, Dictamen
+          Abogado_LAP ronda 5, 2026-10-06, Alto): mismo patron EXACTO que el aviso de autorizacion
+          de datos de arriba, para usuarios con sesion ya iniciada ANTES de que esta casilla
+          existiera. El servidor (POST /api/lote/iniciar y /api/mercadopago/create-preference)
+          vuelve a exigirla (403 motivo "terminos") aunque este aviso se cierre sin aceptar. */}
+      <AnimatePresence>
+        {necesitaAceptarTerminosUso && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className={`w-full max-w-md rounded-2xl border p-6 ${
+                isDark ? "bg-[#13151F] border-[#222530] text-white" : "bg-white border-gray-200 text-gray-900"
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-3">
+                <Shield className="w-5 h-5 text-indigo-500 shrink-0" />
+                <h2 className="text-sm font-extrabold">
+                  {language === "en" ? "Accept the Terms before continuing" : "Acepta los Términos antes de continuar"}
+                </h2>
+              </div>
+              <label className="flex items-start gap-2.5 text-xs leading-relaxed cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={aceptaTerminosUso}
+                  onChange={(e) => setAceptaTerminosUso(e.target.checked)}
+                  className="mt-0.5 shrink-0"
+                />
+                <span>
+                  {textoAceptacionTerminosUso}{" "}
+                  <button
+                    type="button"
+                    onClick={handleNavigateToTerminos}
+                    className="text-indigo-400 underline font-semibold"
+                  >
+                    {language === "en" ? "Terms and Conditions" : "Términos y Condiciones"}
+                  </button>
+                  .
+                </span>
+              </label>
+              <button
+                onClick={handleAceptarTerminosUso}
+                disabled={!aceptaTerminosUso || aceptandoTerminosUso}
+                className="w-full mt-5 py-2.5 rounded-lg text-xs font-bold bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-95 transition-opacity"
+              >
+                {aceptandoTerminosUso ? <Loader2 className="w-4 h-4 animate-spin" /> : (language === "en" ? "Continue" : "Continuar")}
               </button>
             </motion.div>
           </motion.div>

@@ -28,7 +28,7 @@ import {
   type AvisarPagoDobleDeps,
 } from "../server/notificaciones";
 import { reclamarEnvioCorreoTx, marcarCorreoEnviadoTx, liberarReclamoCorreoTx, type DestinatarioCorreo } from "../server/cuentas";
-import { construirCorreoConfirmacionCompra, type DatosCorreo } from "../server/avisos";
+import { construirCorreoConfirmacionCompra, construirAvisoReversionComprador, type DatosCorreo } from "../server/avisos";
 import { FirestoreFalso } from "./_fakeFirestore";
 
 const AHORA = new Date("2026-10-06T12:00:00.000Z");
@@ -490,6 +490,24 @@ test("Medio 1: dos avisos casi simultaneos del mismo pago -> 1 solo correo al co
   await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps);
   await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps);
   assert.equal(correosEnviados.filter((c) => c.para === "comprador@test.com").length, 1);
+});
+
+// ── O4 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto): el comprador SI recibe el correo de
+// reversion (Terminos sec. 9.2), con el texto exacto de `construirAvisoReversionComprador` —
+// confirma que `merge/acuses` ya trae este correo cableado de punta a punta, como dice ad80fd6.
+// Mutacion: si `avisarReversionAlComprador` dejara de llamar a `deps.enviarCorreo` para el
+// comprador (o la reversion quedara best-effort SIN reclamo), esta prueba cae.
+test("O4: avisarReembolsoPaquete manda al comprador el texto EXACTO de construirAvisoReversionComprador (sec. 9.2)", async () => {
+  const { deps, correosEnviados } = depsReembolsoFalsas({
+    obtenerAceptacion: async () => ({ email: "comprador@test.com", idioma: "es" }),
+  });
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps);
+  const alComprador = correosEnviados.find((c) => c.para === "comprador@test.com");
+  assert.ok(alComprador, "el comprador DEBE recibir un correo de reversion");
+  const esperado = construirAvisoReversionComprador({ idioma: "es", paymentId: "pago-1" });
+  assert.equal(alComprador!.asunto, esperado.asunto);
+  assert.equal(alComprador!.texto, esperado.texto);
+  assert.match(alComprador!.texto, /sección 9\.2/);
 });
 
 // ── Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): aviso a Leonardo ──

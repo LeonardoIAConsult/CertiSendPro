@@ -58,6 +58,14 @@ interface LandingPageProps {
   textoAutorizacionDatos: string;
   aceptaAutorizacionDatos: boolean;
   onToggleAceptaAutorizacionDatos: (valor: boolean) => void;
+  /** O2 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto): segunda casilla, tambien ANTES del
+   * boton de login — acepta los Terminos y Condiciones (secc. 12 datos de destinatarios, secc.
+   * 13.3 revision obligatoria), que un usuario del plan Gratis nunca veia porque solo se
+   * mostraban en el checkout del Paquete. Todos los botones que llaman a `onStart` quedan
+   * deshabilitados hasta marcar ESTA casilla Y la de autorizacion de datos. */
+  textoAceptacionTerminosUso: string;
+  aceptaTerminosUso: boolean;
+  onToggleAceptaTerminosUso: (valor: boolean) => void;
 }
 
 export default function LandingPage({
@@ -72,10 +80,17 @@ export default function LandingPage({
   textoAutorizacionDatos,
   aceptaAutorizacionDatos,
   onToggleAceptaAutorizacionDatos,
+  textoAceptacionTerminosUso,
+  aceptaTerminosUso,
+  onToggleAceptaTerminosUso,
 }: LandingPageProps) {
   const t = translations[language];
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null);
+
+  // O2: "Entrar con Google" (y cualquier boton que empiece el login) exige las DOS casillas
+  // marcadas — autorizacion de datos (T11) Y aceptacion de los Terminos y Condiciones.
+  const puedeEntrar = aceptaAutorizacionDatos && aceptaTerminosUso;
 
   // ── Checkout del Paquete (M30, cobro real con planes, corrige vuelta 24) ────────────────────
   // El panel vive aqui (no en App.tsx): comprar el Paquete solo exige el ID token de Firebase
@@ -267,12 +282,13 @@ export default function LandingPage({
               {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
 
-            {/* CTA Login Button — GRAVE 3(c): deshabilitado hasta marcar la casilla de
-                autorizacion de datos (T11), que vive antes del CTA principal del hero, abajo. */}
+            {/* CTA Login Button — GRAVE 3(c)/O2: deshabilitado hasta marcar las DOS casillas
+                (autorizacion de datos T11 + aceptacion de los Terminos), que viven antes del CTA
+                principal del hero, abajo. */}
             <button
               onClick={onStart}
-              disabled={isLoggingIn || !aceptaAutorizacionDatos}
-              title={!aceptaAutorizacionDatos ? t.autorizacionDatosRequerida : undefined}
+              disabled={isLoggingIn || !puedeEntrar}
+              title={!puedeEntrar ? t.autorizacionDatosRequerida : undefined}
               className="bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-md shadow-blue-900/10 hover:opacity-95 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {isLoggingIn ? (
@@ -350,33 +366,62 @@ export default function LandingPage({
             {t.heroSub}
           </motion.p>
 
-          {/* GRAVE 3(c) (correccion vuelta 31, 2026-10-06): casilla de autorizacion de
-              tratamiento de datos (T11, Ley 1581) ANTES del boton de login — el boton queda
-              deshabilitado hasta marcarla. Al iniciar sesion, App.tsx registra esta autorizacion
-              de inmediato (POST /api/autorizacion-datos), con el idioma y el texto EXACTO que se
-              ve aqui. */}
-          <motion.label
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.25 }}
-            className={`flex items-start gap-2.5 max-w-xl mx-auto text-left text-xs leading-relaxed cursor-pointer px-4 py-3 rounded-xl border ${
-              theme === "dark" ? "bg-[#11131A]/70 border-[#222530] text-gray-300" : "bg-white/70 border-gray-200 text-gray-600"
-            }`}
-          >
-            <input
-              type="checkbox"
-              checked={aceptaAutorizacionDatos}
-              onChange={(e) => onToggleAceptaAutorizacionDatos(e.target.checked)}
-              className="mt-0.5 shrink-0"
-            />
-            <span>
-              {textoAutorizacionDatos}{" "}
-              <button type="button" onClick={onViewPrivacy} className="text-indigo-400 underline font-semibold">
-                {language === "en" ? "Privacy Policy" : "Política de Privacidad"}
-              </button>
-              .
-            </span>
-          </motion.label>
+          {/* GRAVE 3(c) (correccion vuelta 31, 2026-10-06) + O2 (Dictamen Abogado_LAP ronda 5,
+              2026-10-06, Alto): DOS casillas ANTES del boton de login — (1) autorizacion de
+              tratamiento de datos (T11, Ley 1581) y (2) aceptacion de los Terminos y Condiciones
+              (secc. 12 datos de destinatarios, secc. 13.3 revision obligatoria). Los botones
+              quedan deshabilitados hasta marcar AMBAS. Al iniciar sesion, App.tsx registra las dos
+              de inmediato (POST /api/autorizacion-datos y POST /api/aceptacion-uso), con el idioma
+              y el texto EXACTO que se ve aqui. `id` usado para hacer scroll + resaltar desde el
+              panel de pago si alguien intenta pagar sin sesion y sin marcarlas (ver
+              `handlePagarPaquete` mas abajo). */}
+          <div id="landing-checkboxes-aceptacion" className="max-w-xl mx-auto space-y-2.5">
+            <motion.label
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.25 }}
+              className={`flex items-start gap-2.5 text-left text-xs leading-relaxed cursor-pointer px-4 py-3 rounded-xl border transition-colors ${
+                theme === "dark" ? "bg-[#11131A]/70 border-[#222530] text-gray-300" : "bg-white/70 border-gray-200 text-gray-600"
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={aceptaAutorizacionDatos}
+                onChange={(e) => onToggleAceptaAutorizacionDatos(e.target.checked)}
+                className="mt-0.5 shrink-0"
+              />
+              <span>
+                {textoAutorizacionDatos}{" "}
+                <button type="button" onClick={onViewPrivacy} className="text-indigo-400 underline font-semibold">
+                  {language === "en" ? "Privacy Policy" : "Política de Privacidad"}
+                </button>
+                .
+              </span>
+            </motion.label>
+
+            <motion.label
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6, delay: 0.3 }}
+              className={`flex items-start gap-2.5 text-left text-xs leading-relaxed cursor-pointer px-4 py-3 rounded-xl border transition-colors ${
+                theme === "dark" ? "bg-[#11131A]/70 border-[#222530] text-gray-300" : "bg-white/70 border-gray-200 text-gray-600"
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={aceptaTerminosUso}
+                onChange={(e) => onToggleAceptaTerminosUso(e.target.checked)}
+                className="mt-0.5 shrink-0"
+              />
+              <span>
+                {textoAceptacionTerminosUso}{" "}
+                <button type="button" onClick={onViewTerminos} className="text-indigo-400 underline font-semibold">
+                  {language === "en" ? "Terms and Conditions" : "Términos y Condiciones"}
+                </button>
+                .
+              </span>
+            </motion.label>
+          </div>
 
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
@@ -386,8 +431,8 @@ export default function LandingPage({
           >
             <button
               onClick={onStart}
-              disabled={!aceptaAutorizacionDatos || isLoggingIn}
-              title={!aceptaAutorizacionDatos ? t.autorizacionDatosRequerida : undefined}
+              disabled={!puedeEntrar || isLoggingIn}
+              title={!puedeEntrar ? t.autorizacionDatosRequerida : undefined}
               className="w-full sm:w-auto px-8 py-4 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] hover:opacity-95 transition-all shadow-xl shadow-indigo-600/20 flex items-center justify-center gap-2 group disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <span>{t.loginWithGoogle}</span>
@@ -517,8 +562,8 @@ export default function LandingPage({
               </div>
               <button
                 onClick={onStart}
-                disabled={!aceptaAutorizacionDatos || isLoggingIn}
-                title={!aceptaAutorizacionDatos ? t.autorizacionDatosRequerida : undefined}
+                disabled={!puedeEntrar || isLoggingIn}
+                title={!puedeEntrar ? t.autorizacionDatosRequerida : undefined}
                 className={`w-full mt-8 py-3 rounded-xl font-bold text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                   theme === "dark"
                     ? "bg-[#222530] hover:bg-[#2F3345] text-white"
@@ -583,6 +628,12 @@ export default function LandingPage({
                       </p>
                       <p className="text-[11px] text-slate-500 mt-1">
                         {t.checkoutReferencia.replace("{usd}", String(precios.usd))}
+                      </p>
+                      {/* O3 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto; T1 de
+                          docs/legal/textos-checkout.md): la tarjeta del plan tambien debe decir
+                          "precio total, sin cargos adicionales", no solo el panel de pago. */}
+                      <p className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                        {t.checkoutPrecioTotalSinCargos}
                       </p>
                     </>
                   ) : (
@@ -771,6 +822,18 @@ export default function LandingPage({
                   {t.checkoutReferencia.replace("{usd}", String(precios.usd))} ·{" "}
                   {t.checkoutTrmNota.replace("{trm}", String(precios.trm)).replace("{fecha}", precios.fechaDesde)}
                 </p>
+              </div>
+
+              {/* O3 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto; T3/T6 de
+                  docs/legal/textos-checkout.md): el resumen previo al pago faltaba "precio total,
+                  sin cargos adicionales", "pago único" y el vencimiento con la perdida de los
+                  envios no usados — Terminos §6.2/§4.5 ya lo prometian, pero esta pantalla solo
+                  mostraba el monto, la referencia USD y la TRM. */}
+              <div className="space-y-1.5 text-[11px] leading-relaxed">
+                <p className="font-semibold text-emerald-600 dark:text-emerald-400">{t.checkoutPrecioTotalSinCargos}</p>
+                <p className="text-slate-500">{t.checkoutPagoUnicoNota}</p>
+                <p className="text-amber-600 dark:text-amber-400">{t.checkoutVencimientoNota}</p>
+                <p className="text-slate-500">{t.checkoutMercadoPagoNota}</p>
               </div>
 
               <label className="flex items-start gap-2.5 text-[11px] leading-relaxed cursor-pointer">

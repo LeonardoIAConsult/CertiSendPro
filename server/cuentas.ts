@@ -10,6 +10,7 @@ import {
   textoCasillaRetracto,
   textoCasillaTerminos,
   textoAutorizacionDatos,
+  textoAceptacionTerminosUso,
   TEXTO_CASILLA_RETRACTO,
   TEXTO_CASILLA_RETRACTO_EN,
   type Idioma,
@@ -21,7 +22,7 @@ import {
 // (server/cobroPaquete.ts, server.ts, tests existentes). Antes este archivo y
 // `src/utils/checkout.ts` tenian el MISMO texto copiado a mano en dos sitios; ahora los dos
 // importan de la misma fuente (`tests/textosCasillas.test.ts` prueba que coincidan).
-export { TERMINOS_VERSION, normalizarIdioma, textoCasillaRetracto, textoCasillaTerminos, textoAutorizacionDatos, TEXTO_CASILLA_RETRACTO, TEXTO_CASILLA_RETRACTO_EN };
+export { TERMINOS_VERSION, normalizarIdioma, textoCasillaRetracto, textoCasillaTerminos, textoAutorizacionDatos, textoAceptacionTerminosUso, TEXTO_CASILLA_RETRACTO, TEXTO_CASILLA_RETRACTO_EN };
 export type { Idioma };
 
 // Base de datos NOMBRADA de Firestore (us-west1), ya existente. NUNCA la "(default)".
@@ -1112,6 +1113,73 @@ export function decidirAutorizacionLote(
       httpStatus: 403,
       error: "Debes autorizar el tratamiento de tus datos personales antes de enviar.",
       motivo: "autorizacion",
+    };
+  }
+  return { ok: true };
+}
+
+// ── Aceptacion de Terminos y Condiciones ANTES del primer uso (O2, Dictamen Abogado_LAP ronda 5,
+// 2026-10-06, Alto) ──────────────────────────────────────────────────────────────────────────────
+// La UNICA casilla de Terminos que existia vivia en el checkout del Paquete (`aceptaciones/{id}`,
+// T4/T5 de textos-checkout.md): un usuario del plan Gratis nunca la ve, asi que nunca acepta la
+// secc. 12 (responsable de los datos de sus destinatarios) ni la secc. 13.3 (revision obligatoria
+// antes de enviar) de los Terminos. Mismo patron que `autorizaciones/{uid}` (coleccion PROPIA,
+// deny-all en firestore.rules, separada de `cuentas/{uid}` para que un `tx.set` sin merge de la
+// activacion/reversion de un Paquete nunca la borre): `aceptacionesUso/{uid}`.
+export interface AceptacionUso {
+  version: string;
+  fecha: Timestamp;
+  idioma: Idioma;
+  /** Texto LITERAL que el usuario vio y acepto (shared/textosCasillas.ts, `textoAceptacionTerminosUso`). */
+  texto: string;
+}
+
+export type AceptacionUsoHistorialEntrada = AceptacionUso;
+
+export interface AceptacionUsoGuardada extends AceptacionUso {
+  /** Aceptaciones ANTERIORES (p. ej. si los Terminos cambiaron de version y se volvio a pedir) —
+   * nunca se borran, se archivan aqui, igual que `AutorizacionGuardada.historial`. */
+  historial: AceptacionUsoHistorialEntrada[];
+}
+
+/** Guarda la aceptacion de Terminos y Condiciones del usuario para la version vigente, con el
+ * idioma y el texto EXACTO que vio y acepto. Si ya existia una aceptacion previa (de una version
+ * anterior de los Terminos), la archiva en `historial` antes de reemplazarla. */
+export async function guardarAceptacionUso(uid: string, version: string, idioma: Idioma, texto: string): Promise<void> {
+  const ref = db().collection("aceptacionesUso").doc(uid);
+  const snap = await ref.get();
+  const actual = snap.exists ? (snap.data() as AceptacionUsoGuardada) : null;
+  const historial: AceptacionUsoHistorialEntrada[] = actual
+    ? [...(actual.historial ?? []), { version: actual.version, fecha: actual.fecha, idioma: actual.idioma, texto: actual.texto }]
+    : [];
+  const nueva: AceptacionUsoGuardada = { version, fecha: Timestamp.now(), idioma, texto, historial };
+  await ref.set(nueva);
+}
+
+/** Devuelve la aceptacion de Terminos guardada del usuario (version/fecha/idioma/texto VIGENTES,
+ * sin el historial), o `null` si nunca la dio. Quien llama decide si la `version` devuelta
+ * coincide con la vigente (`TERMINOS_VERSION`). */
+export async function obtenerAceptacionUso(uid: string): Promise<AceptacionUso | null> {
+  const snap = await db().collection("aceptacionesUso").doc(uid).get();
+  if (!snap.exists) return null;
+  const datos = snap.data() as AceptacionUsoGuardada;
+  return { version: datos.version, fecha: datos.fecha, idioma: datos.idioma, texto: datos.texto };
+}
+
+/** Decision de `POST /api/lote/iniciar` sobre la aceptacion de Terminos y Condiciones (O2):
+ * mismo contrato que `decidirAutorizacionLote` (403 + `motivo` dedicado cuando falta o la version
+ * no es la vigente), con `motivo: "terminos"` para que el cliente reabra el modal correcto (en vez
+ * de reabrir, por error, el de autorizacion de datos). Funcion PURA: no toca Firestore. */
+export function decidirAceptacionUso(
+  aceptacion: AceptacionUso | null,
+  versionVigente: string
+): { ok: true } | { ok: false; httpStatus: 403; error: string; motivo: "terminos" } {
+  if (!aceptacion || aceptacion.version !== versionVigente) {
+    return {
+      ok: false,
+      httpStatus: 403,
+      error: "Debes aceptar los Términos y Condiciones antes de enviar.",
+      motivo: "terminos",
     };
   }
   return { ok: true };

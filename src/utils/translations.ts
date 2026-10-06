@@ -130,6 +130,15 @@ export interface TranslationDict {
   checkoutCerrar: string;
   checkoutErrorGenerico: string;
   checkoutSinPrecios: string;
+
+  // O3 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto; T1/T3/T6 de
+  // docs/legal/textos-checkout.md): "precio total, sin cargos adicionales" (tarjeta Y panel de
+  // pago), "pago único" y el vencimiento con la perdida de los envios no usados — Terminos
+  // §6.2/§4.5 ya lo prometian, la pantalla no lo mostraba.
+  checkoutPrecioTotalSinCargos: string;
+  checkoutPagoUnicoNota: string;
+  checkoutVencimientoNota: string;
+  checkoutMercadoPagoNota: string;
 }
 
 export type Lang = "es" | "en";
@@ -167,14 +176,19 @@ export const translations: Record<Lang, TranslationDict> = {
     securityTitle: "Cómo cuidamos tus datos",
     securitySub: "Lo que guardamos, lo que no y quién más los procesa, sin letra pequeña.",
     sec1Title: "Tus listas y certificados no se guardan",
-    sec1Desc: "Tu lista de destinatarios no se guarda en nuestros servidores y tus PDF se borran solos en unas 2 horas. Guardamos solo tu cuenta, tu plan y tus pagos, como explica la Política de Privacidad.",
+    // O11 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Bajo): "Guardamos solo..." omitia que
+    // tambien se guarda la prueba de lo que el usuario acepto/confirmo (aceptaciones,
+    // autorizaciones, aceptacionesUso — ver Política de Privacidad §3).
+    sec1Desc: "Tu lista de destinatarios no se guarda en nuestros servidores y tus PDF se borran solos en unas 2 horas. Guardamos tu cuenta, tu plan, tus pagos y la prueba de lo que aceptaste y confirmaste, como explica la Política de Privacidad.",
     sec2Title: "Conexión Directa de API",
     sec2Desc: "La aplicación utiliza tokens de acceso temporales directos de Google OAuth 2.0. Los correos se envían desde tu propia bandeja de salida de Gmail.",
     sec3Title: "Tu sesión es tuya",
     sec3Desc: "Tus archivos y tu lista se procesan solo en tu sesión; no los mostramos a otros usuarios.",
 
     pricingTitle: "Planes Sencillos y Transparentes",
-    pricingSub: "Sin permanencia: cancelas cuando quieres y conservas lo pagado hasta su fecha.",
+    // O11 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Bajo): v1 no tiene nada que cancelar (pago
+    // único, sin suscripcion) — "cancelas cuando quieres" sugiere una suscripcion que no existe.
+    pricingSub: "Sin permanencia: pagas una vez y no hay nada que cancelar.",
     buyNow: "Hablemos de este plan",
 
     planFreeName: "Plan Gratuito",
@@ -243,6 +257,11 @@ export const translations: Record<Lang, TranslationDict> = {
     checkoutCerrar: "Cerrar",
     checkoutErrorGenerico: "No se pudo iniciar el pago con Mercado Pago.",
     checkoutSinPrecios: "No podemos calcular el precio de hoy; intenta más tarde.",
+
+    checkoutPrecioTotalSinCargos: "Total a pagar hoy · precio total, sin cargos adicionales.",
+    checkoutPagoUnicoNota: "Pago único: no se renueva y no habrá más cobros. Se activa cuando Mercado Pago confirme el pago.",
+    checkoutVencimientoNota: "Importante: tus 150 envíos vencen un mes después de confirmarse el pago o cuando los gastes, lo que ocurra primero. Los envíos que no uses se pierden y no se acumulan.",
+    checkoutMercadoPagoNota: "Pagas con Mercado Pago. CertiSend no ve ni guarda los datos de tu tarjeta.",
   },
   en: {
     appName: "CertiSend Pro",
@@ -276,14 +295,14 @@ export const translations: Record<Lang, TranslationDict> = {
     securityTitle: "How we look after your data",
     securitySub: "What we keep, what we don't, and who else processes it, no fine print.",
     sec1Title: "Your lists and certificates are not stored",
-    sec1Desc: "Your recipient list is not stored on our servers and your PDFs are deleted automatically within about 2 hours. We only keep your account, plan and payments, as explained in the Privacy Policy.",
+    sec1Desc: "Your recipient list is not stored on our servers and your PDFs are deleted automatically within about 2 hours. We keep your account, plan, payments, and proof of what you accepted and confirmed, as explained in the Privacy Policy.",
     sec2Title: "Direct API Integration",
     sec2Desc: "The app relies on temporary secure access tokens from Google OAuth 2.0. Emails are dispatched directly from your own Gmail outbox.",
     sec3Title: "Your session is yours",
     sec3Desc: "Your files and list are processed only in your session; we don't show them to other users.",
 
     pricingTitle: "Simple and Transparent Pricing",
-    pricingSub: "No minimum term: cancel anytime and keep what you paid until its end date.",
+    pricingSub: "No minimum term: you pay once and there's nothing to cancel.",
     buyNow: "Let's talk about this plan",
 
     planFreeName: "Free Plan",
@@ -351,5 +370,12 @@ export const translations: Record<Lang, TranslationDict> = {
     checkoutCerrar: "Close",
     checkoutErrorGenerico: "We couldn't start the payment with Mercado Pago.",
     checkoutSinPrecios: "We couldn't get today's price; please try again later.",
+
+    // O3 (sin "even if you renew": v1 solo tiene el Paquete de pago único, nunca renovable — ver
+    // el dictamen, que pide quitar esa clausula de la frase EN de T6).
+    checkoutPrecioTotalSinCargos: "Total due today · total price, no additional charges.",
+    checkoutPagoUnicoNota: "One-time payment: it does not renew and there will be no further charges. It's activated once Mercado Pago confirms the payment.",
+    checkoutVencimientoNota: "Important: your 150 sends expire one month after the payment is confirmed or when used up, whichever comes first. Unused sends are lost and do not carry over.",
+    checkoutMercadoPagoNota: "Payment is processed by Mercado Pago. CertiSend never sees or stores your card details.",
   }
 };
