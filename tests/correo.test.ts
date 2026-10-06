@@ -5,7 +5,7 @@
 // prueba a traves de `normalizarCorreo` (uno de sus consumidores reales).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sanitizarCorreo } from "../shared/correo";
+import { sanitizarCorreo, enmascararCorreo, enmascararCorreosEnTexto } from "../shared/correo";
 
 test("sanitizarCorreo: correo ya limpio queda igual (en minuscula)", () => {
   assert.equal(sanitizarCorreo("ana@x.com"), "ana@x.com");
@@ -40,4 +40,40 @@ test("sanitizarCorreo: varios caracteres invisibles combinados con espacios y ma
 
 test("sanitizarCorreo: nunca lanza con una cadena vacia", () => {
   assert.equal(sanitizarCorreo(""), "");
+});
+
+// ── enmascararCorreo / enmascararCorreosEnTexto (Sentinel/security-review sobre ad80fd6, hallazgo
+// Bajo: ningun log del servidor debe contener un "@" del destinatario) ─────────────────────────
+
+test("enmascararCorreo: nunca deja un '@' en el resultado", () => {
+  assert.ok(!enmascararCorreo("ana@dominio.com").includes("@"));
+});
+
+test("enmascararCorreo: conserva el dominio (util para depurar) pero oculta el usuario", () => {
+  const resultado = enmascararCorreo("ana@dominio.com");
+  assert.match(resultado, /^a\*\*\* en dominio\.com$/);
+});
+
+test("enmascararCorreo: normaliza (mayusculas/espacios) antes de enmascarar, igual que sanitizarCorreo", () => {
+  assert.equal(enmascararCorreo("Ana@Dominio.Com "), enmascararCorreo("ana@dominio.com"));
+});
+
+test("enmascararCorreo: entrada sin '@' (formato invalido) -> '***' generico, nunca lanza", () => {
+  assert.equal(enmascararCorreo("no-es-un-correo"), "***");
+  assert.equal(enmascararCorreo(""), "***");
+});
+
+test("enmascararCorreosEnTexto: reemplaza TODOS los correos de un texto libre, nunca deja un '@'", () => {
+  const texto = 'La API de Gmail rechazó la dirección "ana@dominio.com" y también falló para otro@x.com.';
+  const resultado = enmascararCorreosEnTexto(texto);
+  assert.ok(!resultado.includes("@"), `no debe quedar ningun '@': "${resultado}"`);
+  assert.ok(!resultado.includes("ana@dominio.com"));
+  assert.ok(!resultado.includes("otro@x.com"));
+  assert.match(resultado, /a\*\*\* en dominio\.com/);
+  assert.match(resultado, /o\*\*\* en x\.com/);
+});
+
+test("enmascararCorreosEnTexto: texto sin ningun correo queda intacto", () => {
+  const texto = "Detalle de API de Gmail: Invalid To header (Código 400)";
+  assert.equal(enmascararCorreosEnTexto(texto), texto);
 });

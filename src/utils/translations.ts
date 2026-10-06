@@ -86,7 +86,9 @@ export interface TranslationDict {
   faq4Q: string;
   faq4A: string;
 
-  // Footer
+  // Footer. `footerText` usa el marcador `{proveedor}`, reemplazado en LandingPage.tsx con
+  // `VITE_PROVEEDOR_NOMBRE` (Verify v2 sobre ad80fd6, hallazgo Bajo: nunca hardcodear el nombre
+  // legal del proveedor en un archivo versionado — mismo criterio que shared/textosCasillas.ts).
   footerText: string;
   footerRights: string;
 
@@ -139,6 +141,10 @@ export interface TranslationDict {
   checkoutPagoUnicoNota: string;
   checkoutVencimientoNota: string;
   checkoutMercadoPagoNota: string;
+
+  // Verify v2 (ad80fd6, hallazgo Bajo): "Próximamente" de la tarjeta de Pro estaba escrito fijo
+  // en LandingPage.tsx en vez de venir de translations.ts.
+  proximamenteBadge: string;
 }
 
 export type Lang = "es" | "en";
@@ -226,7 +232,7 @@ export const translations: Record<Lang, TranslationDict> = {
     faq4Q: "¿Cuáles son los métodos de pago aceptados?",
     faq4A: "Pagos en pesos colombianos con Mercado Pago, con los medios que Mercado Pago muestre al pagar.",
 
-    footerText: "CertiSend Pro es un servicio de Leonardo Antolinez P. para enviar certificados desde tu propio Gmail.",
+    footerText: "CertiSend Pro es un servicio de {proveedor} para enviar certificados desde tu propio Gmail.",
     footerRights: "Todos los derechos reservados.",
 
     autorizacionDatosRequerida: "Marca la casilla de autorización de datos para continuar.",
@@ -262,6 +268,8 @@ export const translations: Record<Lang, TranslationDict> = {
     checkoutPagoUnicoNota: "Pago único: no se renueva y no habrá más cobros. Se activa cuando Mercado Pago confirme el pago.",
     checkoutVencimientoNota: "Importante: tus 150 envíos vencen un mes después de confirmarse el pago o cuando los gastes, lo que ocurra primero. Los envíos que no uses se pierden y no se acumulan.",
     checkoutMercadoPagoNota: "Pagas con Mercado Pago. CertiSend no ve ni guarda los datos de tu tarjeta.",
+
+    proximamenteBadge: "Próximamente",
   },
   en: {
     appName: "CertiSend Pro",
@@ -340,7 +348,7 @@ export const translations: Record<Lang, TranslationDict> = {
     faq4Q: "What payment methods are supported?",
     faq4A: "Payments in Colombian pesos through Mercado Pago, with the methods Mercado Pago shows at checkout.",
 
-    footerText: "CertiSend Pro is a service by Leonardo Antolinez P. to send certificates from your own Gmail.",
+    footerText: "CertiSend Pro is a service by {proveedor} to send certificates from your own Gmail.",
     footerRights: "All rights reserved.",
 
     autorizacionDatosRequerida: "Check the data-authorization box to continue.",
@@ -377,5 +385,7 @@ export const translations: Record<Lang, TranslationDict> = {
     checkoutPagoUnicoNota: "One-time payment: it does not renew and there will be no further charges. It's activated once Mercado Pago confirms the payment.",
     checkoutVencimientoNota: "Important: your 150 sends expire one month after the payment is confirmed or when used up, whichever comes first. Unused sends are lost and do not carry over.",
     checkoutMercadoPagoNota: "Payment is processed by Mercado Pago. CertiSend never sees or stores your card details.",
+
+    proximamenteBadge: "Coming soon",
   }
 };

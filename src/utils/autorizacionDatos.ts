@@ -23,3 +23,15 @@ export function decidirNecesitaAutorizar(lectura: LecturaAutorizacion, postEnVue
   if (lectura.tipo === "error") return true;
   return lectura.autorizado !== true;
 }
+
+/**
+ * O2 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto): "Entrar con Google" (y cualquier boton que
+ * empiece el login) SOLO se habilita con las DOS casillas marcadas — autorizacion de tratamiento
+ * de datos (T11, Ley 1581) Y aceptacion de los Terminos y Condiciones (secc. 12/13.3). Extraida
+ * como funcion PURA (antes vivia inline en LandingPage.tsx, `aceptaAutorizacionDatos &&
+ * aceptaTerminosUso`, sin cobertura de node:test) para que el oraculo "login habilitado con una
+ * sola casilla" tenga una prueba real que lo tumbe si alguien la rompe.
+ */
+export function puedeEntrarConGoogle(aceptaAutorizacionDatos: boolean, aceptaTerminosUso: boolean): boolean {
+  return aceptaAutorizacionDatos === true && aceptaTerminosUso === true;
+}

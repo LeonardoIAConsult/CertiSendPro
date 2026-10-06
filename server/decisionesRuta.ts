@@ -72,6 +72,26 @@ export async function decidirEnvioSendEmail(
   return { ok: true, correo };
 }
 
+// ── Sesiones de PDF en cache (POST /api/split-pdf + consumidores: get-page-pdf, analyze-page,
+// send-email) — Sentinel/security-review sobre ad80fd6, hallazgo previo al diff ────────────────
+// Extraida de server.ts (que guarda `pdfCache` en memoria, no Firestore) para poder probar el
+// contrato de ownership con node:test sin montar Express: una sesion sin dueño (`uid: null`,
+// creada sin sesion de Firebase — Modo Invitado, que SI sube PDFs reales) sigue siendo accesible
+// por cualquiera que tenga el id (comportamiento historico, ahora con un id impredecible via
+// `crypto.randomUUID()`); una sesion CON dueño solo la puede volver a leer ESE uid — cualquier
+// otro (incluido anonimo) la ve igual que si no existiera.
+
+/**
+ * `cachedUid`: `undefined` si la sesion no existe en el cache; el valor de `PdfCacheEntry.uid` si
+ * existe (`null` = sesion anonima, `string` = uid del dueño). `requesterUid`: el uid de quien pide
+ * la pagina (`req.uid ?? null`). `true` = acceso permitido.
+ */
+export function decidirAccesoSesionPdf(cachedUid: string | null | undefined, requesterUid: string | null): boolean {
+  if (cachedUid === undefined) return false; // la sesion no existe (o expiro).
+  if (cachedUid === null) return true; // sesion anonima: accesible por cualquiera que tenga el id.
+  return cachedUid === requesterUid; // sesion con dueño: solo ESE uid.
+}
+
 // ── POST /api/lote/iniciar: decision de la autorizacion de datos (Ley 1581, B.3) ────────────────
 
 export interface DepsDecisionAutorizacionLote {

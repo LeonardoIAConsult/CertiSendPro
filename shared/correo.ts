@@ -26,3 +26,31 @@ export function sanitizarCorreo(correo: string): string {
     .replace(/\s+/g, "")
     .toLowerCase();
 }
+
+// ── Enmascarado para logs (Sentinel/security-review sobre ad80fd6, hallazgo Bajo) ──────────────
+// La Politica de Privacidad (seccion 3, "Registros tecnicos") declara que los logs del servidor
+// "pueden conservar durante 30 dias una direccion de correo que haya provocado un error de
+// envio" — pero eso debe seguir siendo la EXCEPCION declarada, no la norma: cuanto menos aparezca
+// un correo completo en Cloud Logging, mas fuerte es esa promesa. Estas dos funciones NUNCA dejan
+// un caracter "@" en el resultado (oraculo: "ningun '@' del destinatario en los logs").
+
+/** Enmascara UN correo para un log: primer caracter del usuario + "***", dominio sin tocar, unidos
+ * con " en " (nunca con "@"). Formato invalido (sin "@", o "@" al inicio) -> "***" generico. */
+export function enmascararCorreo(correo: string): string {
+  const limpio = sanitizarCorreo(correo);
+  const idx = limpio.indexOf("@");
+  if (idx <= 0) return "***";
+  const usuario = limpio.slice(0, idx);
+  const dominio = limpio.slice(idx + 1);
+  return `${usuario[0]}*** en ${dominio || "***"}`;
+}
+
+const PATRON_CORREO_GLOBAL = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+/** Enmascara CUALQUIER correo que aparezca dentro de un texto libre (p. ej. el mensaje de error
+ * de Gmail que `server.ts` compone en `/api/send-email` y que terminaba en `console.error`, con
+ * el destinatario en claro). Usada SOLO al loguear — el mensaje que se le devuelve al propio
+ * usuario (que ya conoce el correo: lo escribio el en su hoja) nunca pasa por aqui. */
+export function enmascararCorreosEnTexto(texto: string): string {
+  return texto.replace(PATRON_CORREO_GLOBAL, (correo) => enmascararCorreo(correo));
+}

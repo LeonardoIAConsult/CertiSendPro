@@ -95,7 +95,10 @@ test("enviarCorreo: sin relayUrl/relaySecret -> false, console.warn, nunca llama
   );
   assert.equal(ok, false);
   assert.equal(fetchLlamado, false);
-  assert.ok(logs.some((l) => l.includes("comprador@test.com")));
+  // Sentinel/security-review (ad80fd6, hallazgo Bajo): el log identifica el destinatario de forma
+  // enmascarada (c*** en test.com), nunca con el correo completo ni con un "@" literal.
+  assert.ok(logs.some((l) => l.includes("c*** en test.com")));
+  assert.ok(!logs.some((l) => l.includes("@")));
 });
 
 test("enviarCorreo: config completa, relay responde 200 -> true, body firmado correctamente (incluye nonce)", async () => {
@@ -104,7 +107,7 @@ test("enviarCorreo: config completa, relay responde 200 -> true, body firmado co
   const fetchLike: FetchLike = async (url, init) => {
     urlRecibida = url;
     cuerpoRecibido = JSON.parse(init.body);
-    return { ok: true, status: 200, text: async () => "ok" };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
   };
   const ahoraFija = new Date("2026-10-05T10:00:00.000Z");
   const ok = await enviarCorreo(
@@ -137,7 +140,7 @@ test("enviarCorreo: con idEnvio en DatosCorreo, se incluye en el cuerpo y en la 
   let cuerpoRecibido: any = null;
   const fetchLike: FetchLike = async (_url, init) => {
     cuerpoRecibido = JSON.parse(init.body);
-    return { ok: true, status: 200, text: async () => "ok" };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
   };
   const ahoraFija = new Date("2026-10-05T10:00:00.000Z");
   await enviarCorreo(
@@ -157,7 +160,7 @@ test("enviarCorreo: sin generarNonce inyectado, genera un nonce real distinto en
   const nonces: string[] = [];
   const fetchLike: FetchLike = async (_url, init) => {
     nonces.push(JSON.parse(init.body).nonce);
-    return { ok: true, status: 200, text: async () => "ok" };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
   };
   await enviarCorreo({ para: "x@test.com", asunto: "a", texto: "t" }, { relayUrl: "https://relay.test/exec", relaySecret: "s", fetchLike });
   await enviarCorreo({ para: "x@test.com", asunto: "a", texto: "t" }, { relayUrl: "https://relay.test/exec", relaySecret: "s", fetchLike });
@@ -198,6 +201,68 @@ test("enviarCorreo: nunca registra el secreto ni el cuerpo completo del correo e
     assert.ok(!l.includes("Contenido privado"), "el cuerpo completo del correo nunca debe aparecer en un log");
   }
 });
+
+// ── Sentinel/security-review (ad80fd6, hallazgo Bajo): ningun "@" del destinatario en los logs ──
+
+test("enviarCorreo: en TODAS las rutas de fallo (config, HTTP, body, excepcion), el log nunca contiene un '@' del destinatario", async () => {
+  const logs: string[] = [];
+  const log = (l: string) => logs.push(l);
+  const datos = { para: "destinatario-real@correo-sensible.com", asunto: "a", texto: "t" };
+
+  await enviarCorreo(datos, { relayUrl: undefined, relaySecret: undefined, log });
+  await enviarCorreo(datos, { relayUrl: "https://relay.test/exec", relaySecret: "s", log, fetchLike: async () => ({ ok: false, status: 500, text: async () => "" }) });
+  await enviarCorreo(datos, { relayUrl: "https://relay.test/exec", relaySecret: "s", log, fetchLike: async () => ({ ok: true, status: 200, text: async () => "no es json" }) });
+  await enviarCorreo(datos, { relayUrl: "https://relay.test/exec", relaySecret: "s", log, fetchLike: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ ok: false, error: "busy" }) }) });
+  await enviarCorreo(datos, { relayUrl: "https://relay.test/exec", relaySecret: "s", log, fetchLike: async () => { throw new Error("network down"); } });
+
+  assert.ok(logs.length >= 5, "cada rama de fallo debe dejar al menos un log");
+  for (const l of logs) {
+    assert.ok(!l.includes("@"), `ningun log debe contener '@' del destinatario: "${l}"`);
+    assert.ok(!l.includes("destinatario-real"), `ningun log debe contener el usuario del correo: "${l}"`);
+  }
+});
+
+// ── Sentinel/security-review (ad80fd6, hallazgo Medio): Apps Script SIEMPRE responde HTTP 200 —
+// hay que parsear el cuerpo y exigir ok===true, no confiar solo en el status HTTP. ─────────────
+
+test("enviarCorreo: HTTP 200 pero cuerpo {ok:false} -> false (el relay fallo de verdad, pero respondio 200)", async () => {
+  const fetchLike: FetchLike = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ ok: false, error: "firma_invalida" }),
+  });
+  const ok = await enviarCorreo(
+    { para: "x@test.com", asunto: "a", texto: "t" },
+    { relayUrl: "https://relay.test/exec", relaySecret: "s", fetchLike }
+  );
+  assert.equal(ok, false, "ok:false en el cuerpo del relay NUNCA debe tratarse como exito solo porque el HTTP fue 200");
+});
+
+test("enviarCorreo: HTTP 200 con cuerpo {ok:true,yaEnviado:true} (dedup del relay) -> true", async () => {
+  const fetchLike: FetchLike = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ ok: true, yaEnviado: true }),
+  });
+  const ok = await enviarCorreo(
+    { para: "x@test.com", asunto: "a", texto: "t" },
+    { relayUrl: "https://relay.test/exec", relaySecret: "s", fetchLike }
+  );
+  assert.equal(ok, true);
+});
+
+test("enviarCorreo: HTTP 200 con un cuerpo que no es JSON valido -> false, nunca lanza", async () => {
+  const fetchLike: FetchLike = async () => ({ ok: true, status: 200, text: async () => "<html>no es json</html>" });
+  const ok = await enviarCorreo(
+    { para: "x@test.com", asunto: "a", texto: "t" },
+    { relayUrl: "https://relay.test/exec", relaySecret: "s", fetchLike }
+  );
+  assert.equal(ok, false);
+});
+
+// ── Mutacion del oraculo: volver a confiar solo en `respuesta.ok` (sin mirar el cuerpo) haria que
+// la prueba de "HTTP 200 pero cuerpo {ok:false}" de arriba fallara — confirmado a mano revirtiendo
+// temporalmente el chequeo del cuerpo en server/avisos.ts y viendo caer esa prueba.
 
 // ── sumarDiasHabiles ─────────────────────────────────────────────────────────────────────────
 

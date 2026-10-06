@@ -3,7 +3,7 @@
 // tests/plan.test.ts (`decidirEstadoSondeo`/`ejecutarRevisionSondeo`).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decidirNecesitaAutorizar, type LecturaAutorizacion } from "../src/utils/autorizacionDatos";
+import { decidirNecesitaAutorizar, puedeEntrarConGoogle, type LecturaAutorizacion } from "../src/utils/autorizacionDatos";
 
 test("decidirNecesitaAutorizar: con un POST en vuelo, SIEMPRE null (no toca el estado) sin importar la lectura", () => {
   assert.equal(decidirNecesitaAutorizar({ tipo: "ok", autorizado: true }, true), null);
@@ -33,4 +33,24 @@ test("decidirNecesitaAutorizar: reproduce el bug original — GET 'no autorizado
   // llega, decidirNecesitaAutorizar debe descartarla (null), nunca reabrir el modal.
   const lecturaViejaDelGet: LecturaAutorizacion = { tipo: "ok", autorizado: false };
   assert.equal(decidirNecesitaAutorizar(lecturaViejaDelGet, true), null);
+});
+
+// ── puedeEntrarConGoogle (O2, Dictamen Abogado_LAP ronda 5, 2026-10-06): oraculo "login
+// habilitado con una sola casilla" — las DOS casillas (autorizacion de datos T11 + aceptacion de
+// los Terminos) deben estar marcadas para poder entrar con Google. ──────────────────────────────
+
+test("puedeEntrarConGoogle: las DOS casillas marcadas -> true", () => {
+  assert.equal(puedeEntrarConGoogle(true, true), true);
+});
+
+test("puedeEntrarConGoogle: solo autorizacion de datos marcada -> false (NUNCA basta una sola)", () => {
+  assert.equal(puedeEntrarConGoogle(true, false), false);
+});
+
+test("puedeEntrarConGoogle: solo aceptacion de Terminos marcada -> false (NUNCA basta una sola)", () => {
+  assert.equal(puedeEntrarConGoogle(false, true), false);
+});
+
+test("puedeEntrarConGoogle: ninguna marcada -> false", () => {
+  assert.equal(puedeEntrarConGoogle(false, false), false);
 });

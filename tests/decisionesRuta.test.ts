@@ -13,7 +13,7 @@
 //      interno (saneado SI coincide con la huella guardada) se rechazaria con 409 por error.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta, decidirAceptacionUsoRuta } from "../server/decisionesRuta";
+import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta, decidirAceptacionUsoRuta, decidirAccesoSesionPdf } from "../server/decisionesRuta";
 import { huellaPar } from "../server/huellaLote";
 import type { AutorizacionDatos } from "../server/cuentas";
 import { Timestamp } from "firebase-admin/firestore";
@@ -185,6 +185,35 @@ test("decidirAceptacionUsoRuta: pasa el uid tal cual a obtenerAceptacionUso (nun
 // el CONTRATO que server.ts debe respetar; la mutacion real se verifica quitando esa llamada de
 // server.ts y confirmando a mano que un lote sin aceptacion deja de dar 403 (cubierto en el pase
 // manual del oraculo, no aqui, porque server.ts no se importa en estas pruebas de unidad).
+// ── decidirAccesoSesionPdf (Sentinel/security-review sobre ad80fd6, hallazgo previo al diff):
+// ownership de las sesiones de PDF en cache (POST /api/split-pdf + get-page-pdf/analyze-page/
+// send-email). ──────────────────────────────────────────────────────────────────────────────
+
+test("decidirAccesoSesionPdf: sesion inexistente (undefined) -> false, sin importar quien pregunte", () => {
+  assert.equal(decidirAccesoSesionPdf(undefined, "uid-1"), false);
+  assert.equal(decidirAccesoSesionPdf(undefined, null), false);
+});
+
+test("decidirAccesoSesionPdf: sesion ANONIMA (uid null, creada sin sesion de Firebase) -> accesible por cualquiera", () => {
+  assert.equal(decidirAccesoSesionPdf(null, "uid-1"), true);
+  assert.equal(decidirAccesoSesionPdf(null, null), true);
+});
+
+test("decidirAccesoSesionPdf: sesion con dueño -> SOLO ese uid puede leerla", () => {
+  assert.equal(decidirAccesoSesionPdf("uid-dueño", "uid-dueño"), true);
+});
+
+test("decidirAccesoSesionPdf: sesion con dueño -> otro uid distinto da false (404)", () => {
+  assert.equal(decidirAccesoSesionPdf("uid-dueño", "uid-ajeno"), false);
+});
+
+test("decidirAccesoSesionPdf: sesion con dueño -> un solicitante SIN sesion (null) da false (404), nunca se cuela", () => {
+  assert.equal(decidirAccesoSesionPdf("uid-dueño", null), false);
+});
+
+// Mutacion del oraculo: si la comparacion se hiciera con `!=` laxo o se olvidara el caso `null`
+// (anonima), un uid ajeno se colaria. Verificado a mano: cambiar `cachedUid === requesterUid` por
+// `true` en server/decisionesRuta.ts hace caer la prueba "otro uid distinto da false" de arriba.
 
 test("decidirAceptacionUsoRuta: el resultado 'ok:false' NUNCA debe confundirse con el de autorizacion (motivo distinto)", async () => {
   const resultadoAutorizacion = await decidirAutorizacionLoteRuta("uid-1", VERSION_VIGENTE, { obtenerAutorizacionDatos: async () => null });

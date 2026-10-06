@@ -22,6 +22,7 @@ import {
 import { LogoMark, AnimatedGlyph } from "./BrandLogo";
 import { translations, TranslationDict } from "../utils/translations";
 import { getIdToken } from "../firebaseAuth";
+import { puedeEntrarConGoogle } from "../utils/autorizacionDatos";
 import {
   puedePagar,
   interpretarRespuestaCobro,
@@ -90,7 +91,17 @@ export default function LandingPage({
 
   // O2: "Entrar con Google" (y cualquier boton que empiece el login) exige las DOS casillas
   // marcadas — autorizacion de datos (T11) Y aceptacion de los Terminos y Condiciones.
-  const puedeEntrar = aceptaAutorizacionDatos && aceptaTerminosUso;
+  const puedeEntrar = puedeEntrarConGoogle(aceptaAutorizacionDatos, aceptaTerminosUso);
+  // Verify v2 (ad80fd6, hallazgo Medio): si alguien sin sesion de Firebase intenta pagar el
+  // Paquete sin haber marcado las dos casillas (`handlePagarPaquete` mas abajo), en vez de
+  // mandarlo al login a ciegas, se cierra el panel y se resalta brevemente el bloque de casillas
+  // de la portada (y se hace scroll hasta el).
+  const [resaltarCasillas, setResaltarCasillas] = useState(false);
+  const resaltarYScrollearCasillas = () => {
+    setResaltarCasillas(true);
+    document.getElementById("landing-checkboxes-aceptacion")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => setResaltarCasillas(false), 2500);
+  };
 
   // ── Checkout del Paquete (M30, cobro real con planes, corrige vuelta 24) ────────────────────
   // El panel vive aqui (no en App.tsx): comprar el Paquete solo exige el ID token de Firebase
@@ -164,6 +175,16 @@ export default function LandingPage({
       const idToken = await getIdToken();
       if (!idToken) {
         setPagando(false);
+        // Verify v2 (ad80fd6, hallazgo Medio): sin sesion Y sin las dos casillas de la portada
+        // marcadas (autorizacion de datos + aceptacion de Terminos, O2), `onStart` terminaria en
+        // un login bloqueado de todas formas (el boton de login esta deshabilitado sin ellas) —
+        // en vez de abrir un popup de Google que no puede completarse, se cierra el panel y se
+        // lleva al usuario a marcarlas primero.
+        if (!puedeEntrar) {
+          setPanelAbierto(false);
+          resaltarYScrollearCasillas();
+          return;
+        }
         onStart();
         return;
       }
@@ -382,7 +403,7 @@ export default function LandingPage({
               transition={{ duration: 0.6, delay: 0.25 }}
               className={`flex items-start gap-2.5 text-left text-xs leading-relaxed cursor-pointer px-4 py-3 rounded-xl border transition-colors ${
                 theme === "dark" ? "bg-[#11131A]/70 border-[#222530] text-gray-300" : "bg-white/70 border-gray-200 text-gray-600"
-              }`}
+              } ${resaltarCasillas ? "ring-2 ring-amber-400" : ""}`}
             >
               <input
                 type="checkbox"
@@ -405,7 +426,7 @@ export default function LandingPage({
               transition={{ duration: 0.6, delay: 0.3 }}
               className={`flex items-start gap-2.5 text-left text-xs leading-relaxed cursor-pointer px-4 py-3 rounded-xl border transition-colors ${
                 theme === "dark" ? "bg-[#11131A]/70 border-[#222530] text-gray-300" : "bg-white/70 border-gray-200 text-gray-600"
-              }`}
+              } ${resaltarCasillas ? "ring-2 ring-amber-400" : ""}`}
             >
               <input
                 type="checkbox"
@@ -579,7 +600,7 @@ export default function LandingPage({
                 handleContactarPro, boton de correo igual que siempre). */}
             <div className="p-8 rounded-3xl border-2 border-indigo-600 bg-gradient-to-b from-[#1C1F30] to-[#0F1119] text-white relative flex flex-col justify-between shadow-2xl shadow-indigo-600/10">
               <div className="absolute -top-4 right-6 bg-gradient-to-r from-blue-500 to-indigo-600 text-[10px] font-extrabold uppercase py-1 px-3 rounded-full tracking-wider shadow">
-                Próximamente
+                {t.proximamenteBadge}
               </div>
               <div className="space-y-6">
                 <div>
@@ -752,7 +773,9 @@ export default function LandingPage({
           © 2026 <strong>{t.appName}</strong>. {t.footerRights}
         </p>
         <p className="text-slate-500 text-[10px] mt-1">
-          {t.footerText}
+          {/* Verify v2 (ad80fd6, hallazgo Bajo): nunca hardcodear el nombre legal del proveedor
+              en un archivo versionado — mismo criterio que shared/textosCasillas.ts. */}
+          {t.footerText.replace("{proveedor}", import.meta.env.VITE_PROVEEDOR_NOMBRE || "[dato pendiente]")}
         </p>
         <div className="mt-2 flex justify-center gap-4">
           <button

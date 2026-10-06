@@ -82,8 +82,10 @@ export default function LegalPage({
             generar cualquier etiqueta): es nuestro propio contenido (src/legal/*.md), nunca texto
             de un usuario. */}
         <div
-          className={`space-y-4 leading-relaxed text-sm [&_h1]:text-2xl [&_h1]:font-extrabold [&_h1]:mb-2 [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-6 [&_h3]:text-lg [&_h3]:font-bold [&_h3]:mt-4 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:space-y-1 [&_hr]:my-6 [&_hr]:border-dashed ${
-            isDark ? "[&_hr]:border-[#222530] [&_a]:text-indigo-400" : "[&_hr]:border-gray-200 [&_a]:text-indigo-600"
+          className={`space-y-4 leading-relaxed text-sm [&_h1]:text-2xl [&_h1]:font-extrabold [&_h1]:mb-2 [&_h2]:text-xl [&_h2]:font-bold [&_h2]:mt-6 [&_h3]:text-lg [&_h3]:font-bold [&_h3]:mt-4 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:space-y-1 [&_hr]:my-6 [&_hr]:border-dashed [&_table]:w-full [&_table]:border-collapse [&_table]:my-4 [&_td]:p-2.5 [&_td]:align-top [&_th]:p-2.5 [&_th]:text-left [&_th]:font-bold ${
+            isDark
+              ? "[&_hr]:border-[#222530] [&_a]:text-indigo-400 [&_td]:border [&_td]:border-[#222530] [&_th]:border [&_th]:border-[#222530] [&_th]:bg-[#13151F]"
+              : "[&_hr]:border-gray-200 [&_a]:text-indigo-600 [&_td]:border [&_td]:border-gray-200 [&_th]:border [&_th]:border-gray-200 [&_th]:bg-gray-100"
           } [&_a]:underline [&_a]:font-semibold [&_strong]:font-bold`}
           dangerouslySetInnerHTML={{ __html: html }}
         />

@@ -9,6 +9,7 @@ import { PDFDocument } from "pdf-lib";
 import { getAuth } from "firebase-admin/auth";
 import { Timestamp } from "firebase-admin/firestore";
 import { obtenerFirebaseApp } from "./server/firebaseAdmin";
+import { enmascararCorreosEnTexto } from "./shared/correo";
 import {
   obtenerCuenta,
   decidirLote,
@@ -39,7 +40,7 @@ import {
   validarSecretoYPares,
   type ParConfirmacion,
 } from "./server/huellaLote";
-import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta, decidirAceptacionUsoRuta } from "./server/decisionesRuta";
+import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta, decidirAceptacionUsoRuta, decidirAccesoSesionPdf } from "./server/decisionesRuta";
 import { trmHoy, copDesdeUsd } from "./server/trm";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete } from "./server/cobroPaquete";
@@ -101,18 +102,30 @@ app.use((req, res, next) => {
   next();
 });
 
-// Limite de peticiones por IP y minuto, en memoria. No pretende ser un WAF: es el
-// tope que evita que alguien queme la cuota de Gemini o de Mercado Pago en bucle.
+// Limite de peticiones por IP (o por uid, ver abajo) y minuto, en memoria. No pretende ser un
+// WAF: es el tope que evita que alguien queme la cuota de Gemini o de Mercado Pago en bucle.
 // Se limpia solo para no crecer sin fin.
 const VENTANA_MS = 60_000;
 const MAX_POR_VENTANA = Number(process.env.RATE_LIMIT_PER_MIN || 30);
 const visitas = new Map<string, { n: number; desde: number }>();
-app.use("/api", (req, res, next) => {
-  const ip = req.ip || req.socket.remoteAddress || "desconocida";
+// Verify v2 (ad80fd6, hallazgo "rate limit"): `trust proxy` es un numero FIJO de saltos
+// (2: Firebase Hosting -> Cloud Run), pero una peticion que entra DIRECTO por la URL de Cloud Run
+// (*.run.app, salta Hosting — ya documentado mas abajo en `limitarCobroGlobal`) solo tiene el
+// salto real del Google Front End de Cloud Run: con `trust proxy=2` fijo, Express toma como "IP
+// real" una entrada de X-Forwarded-For que en ESE camino el cliente puede escribir el mismo
+// (falsificando cuantas entradas quiera), esquivando el limite con solo rotar esa cabecera. No se
+// puede fijar un numero de saltos correcto para los DOS caminos a la vez sin acceso a la
+// infraestructura real para confirmarlo (guardarraíl: sin `gcloud` de escritura) — la defensa que
+// SI es correcta sin depender de ningun salto: si la peticion trae un ID token de Firebase VALIDO
+// (verificado aqui, con criptografia, nunca con una cabecera que el cliente controla), se usa el
+// uid como clave del limitador en vez de la IP. Un uid no se puede falsificar rotando cabeceras.
+app.use("/api", async (req, res, next) => {
+  const identidad = await verificarIdToken(req);
+  const clave = identidad ? `uid:${identidad.uid}` : `ip:${req.ip || req.socket.remoteAddress || "desconocida"}`;
   const ahora = Date.now();
-  const v = visitas.get(ip);
+  const v = visitas.get(clave);
   if (!v || ahora - v.desde > VENTANA_MS) {
-    visitas.set(ip, { n: 1, desde: ahora });
+    visitas.set(clave, { n: 1, desde: ahora });
   } else if (++v.n > MAX_POR_VENTANA) {
     res.setHeader("Retry-After", Math.ceil((VENTANA_MS - (ahora - v.desde)) / 1000));
     return res.status(429).json({ error: "Demasiadas peticiones. Espera un momento." });
@@ -191,8 +204,20 @@ interface PdfCacheEntry {
   pageCount: number;
   timestamp: number;
   extractedPages: Map<number, string>;
+  /** Sentinel/security-review (ad80fd6, hallazgo previo al diff): dueño de la sesion — el uid que
+   * la creo via POST /api/split-pdf, o `null` si se creo sin sesion de Firebase (Modo Invitado,
+   * que SI sube PDFs reales aunque simule la hoja de calculo y el escaneo con IA). `null` preserva
+   * el comportamiento de siempre para sesiones anonimas (accesibles por quien tenga el id);
+   * con un `uid` real, SOLO ese uid puede volver a leer la sesion. */
+  uid: string | null;
 }
 const pdfCache = new Map<string, PdfCacheEntry>();
+
+/** Sentinel/security-review (ad80fd6): mismo error para "la sesion no existe" y "la sesion es de
+ * otro uid" — nunca revela cual de los dos casos es (evita que alguien use la respuesta para
+ * confirmar que un sessionId ajeno existe de verdad). Las rutas que llaman a `getPageBase64`
+ * atrapan esta clase especificamente para responder 404 (nunca 500). */
+class SesionPdfInaccesible extends Error {}
 
 // Clean up expired sessions (older than 2 hours) to avoid memory leaks
 setInterval(() => {
@@ -205,10 +230,14 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000); // every 10 minutes
 
-async function getPageBase64(sessionId: string, pageIndex: number): Promise<string> {
+async function getPageBase64(sessionId: string, pageIndex: number, requesterUid: string | null): Promise<string> {
   const cached = pdfCache.get(sessionId);
-  if (!cached) {
-    throw new Error("La sesión del PDF ha expirado o no existe en el servidor. Por favor, selecciona y carga de nuevo tu archivo PDF.");
+  // Sentinel/security-review (ad80fd6): decision extraida (`decidirAccesoSesionPdf`,
+  // server/decisionesRuta.ts, PURA) — sin entrada -> no existe/expiro; con entrada pero de OTRO
+  // uid -> inaccesible. Los dos casos dan el MISMO error (nunca se distingue cual es, ver
+  // `SesionPdfInaccesible`).
+  if (!decidirAccesoSesionPdf(cached ? cached.uid : undefined, requesterUid)) {
+    throw new SesionPdfInaccesible("La sesión del PDF ha expirado o no existe en el servidor. Por favor, selecciona y carga de nuevo tu archivo PDF.");
   }
 
   // Check if already extracted
@@ -233,6 +262,31 @@ async function getPageBase64(sessionId: string, pageIndex: number): Promise<stri
   return base64Str;
 }
 
+// ── Tope POR USUARIO de /api/analyze-page (Sentinel/security-review sobre ad80fd6, hallazgo
+// previo al diff) ────────────────────────────────────────────────────────────────────────────
+// Antes la ruta corria con `adjuntarAuthSiExiste` (login opcional): sin sesion, el unico freno
+// era el limitador global por IP (30/min, mas arriba) — insuficiente para una clave de Gemini de
+// pago (basta con rotar de IP). Ahora exige `exigirAuth` y, ademas, un tope propio por uid, mismo
+// patron que `limitarCobroPorUid` mas abajo (`evaluarLimite`, server/limitador.ts). El limite es
+// mas alto que el de cobros porque un lote real analiza una pagina POR CERTIFICADO.
+const VENTANA_ANALISIS_UID_MS = 60_000;
+const MAX_ANALISIS_POR_UID_VENTANA = Number(process.env.RATE_LIMIT_ANALYZE_UID_PER_MIN || 60);
+const estadosAnalisisPorUid = new Map<string, EstadoVentana>();
+const limitarAnalisisPorUid: express.RequestHandler = (req, res, next) => {
+  const uid = req.uid!; // exigirAuth ya corrio antes en la cadena de middlewares: siempre hay uid.
+  const ahora = Date.now();
+  const r = evaluarLimite(estadosAnalisisPorUid.get(uid) ?? null, ahora, VENTANA_ANALISIS_UID_MS, MAX_ANALISIS_POR_UID_VENTANA);
+  estadosAnalisisPorUid.set(uid, r.estado);
+  if (estadosAnalisisPorUid.size > 5000) {
+    for (const [k, val] of estadosAnalisisPorUid) if (ahora - val.desde > VENTANA_ANALISIS_UID_MS) estadosAnalisisPorUid.delete(k);
+  }
+  if (!r.permitido) {
+    res.setHeader("Retry-After", r.retryAfterSegundos!);
+    return res.status(429).json({ error: "Demasiados análisis de IA en este momento. Intenta de nuevo en un minuto." });
+  }
+  next();
+};
+
 // Endpoint to split multi-page PDF (Metadata only / Register Session)
 app.post("/api/split-pdf", adjuntarAuthSiExiste, async (req, res) => {
   try {
@@ -246,15 +300,20 @@ app.post("/api/split-pdf", adjuntarAuthSiExiste, async (req, res) => {
     const pdfDoc = await PDFDocument.load(pdfBuffer);
     const pageCount = pdfDoc.getPageCount();
 
-    // Create unique session ID
-    const sessionId = "pdf_" + Math.random().toString(36).substring(2, 15) + "_" + Date.now().toString(36);
+    // Sentinel/security-review (ad80fd6, hallazgo previo al diff): `Math.random()` NO es
+    // criptograficamente seguro — un sessionId generado asi se puede predecir/fuerza-bruta con
+    // suficientes intentos. `crypto.randomUUID()` (ya importado arriba para otros ids del
+    // servidor) es impredecible.
+    const sessionId = "pdf_" + randomUUID();
 
-    // Cache the root PDF buffer
+    // Cache the root PDF buffer. `uid` (adjuntarAuthSiExiste: puede ser undefined si no hay
+    // sesion de Firebase, p. ej. Modo Invitado) queda como dueño de la sesion.
     pdfCache.set(sessionId, {
       buffer: pdfBuffer,
       pageCount,
       timestamp: Date.now(),
-      extractedPages: new Map()
+      extractedPages: new Map(),
+      uid: req.uid ?? null,
     });
 
     console.log(`[PDF Caching] Registered session ${sessionId} with ${pageCount} pages, size: ${(pdfBuffer.length / (1024 * 1024)).toFixed(2)} MB`);
@@ -280,9 +339,12 @@ app.post("/api/get-page-pdf", adjuntarAuthSiExiste, async (req, res) => {
       return res.status(400).json({ error: "Faltan parámetros sessionId o pageIndex" });
     }
 
-    const base64 = await getPageBase64(sessionId, Number(pageIndex));
+    const base64 = await getPageBase64(sessionId, Number(pageIndex), req.uid ?? null);
     res.json({ base64 });
   } catch (error: any) {
+    if (error instanceof SesionPdfInaccesible) {
+      return res.status(404).json({ error: error.message });
+    }
     console.error("Error extracting page PDF:", error);
     res.status(500).json({ error: error.message || "Failed to split page" });
   }
@@ -388,7 +450,7 @@ app.post("/api/canva/export-design", adjuntarAuthSiExiste, async (req, res) => {
 });
 
 // Endpoint to analyze a single PDF page with Gemini to extract the person's name
-app.post("/api/analyze-page", adjuntarAuthSiExiste, async (req, res) => {
+app.post("/api/analyze-page", exigirAuth, limitarAnalisisPorUid, async (req, res) => {
   try {
     const { pdfPageBase64, sessionId, pageIndex, recipientNames } = req.body;
     let activePageBase64 = pdfPageBase64;
@@ -396,7 +458,7 @@ app.post("/api/analyze-page", adjuntarAuthSiExiste, async (req, res) => {
     // Direct support for high-performance server-side extraction
     if (!activePageBase64 && sessionId && pageIndex !== undefined) {
       try {
-        activePageBase64 = await getPageBase64(sessionId, Number(pageIndex));
+        activePageBase64 = await getPageBase64(sessionId, Number(pageIndex), req.uid ?? null);
       } catch (err: any) {
         return res.status(404).json({ error: `No se pudo obtener la página ${pageIndex}: ${err.message}` });
       }
@@ -566,7 +628,7 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
     let activePdfBase64 = pdfBase64;
     if (!activePdfBase64 && sessionId && pageIndex !== undefined) {
       try {
-        activePdfBase64 = await getPageBase64(sessionId, Number(pageIndex));
+        activePdfBase64 = await getPageBase64(sessionId, Number(pageIndex), req.uid ?? null);
       } catch (err: any) {
         await liberarReserva(loteReservado, req.uid!);
         loteReservado = null;
@@ -700,7 +762,14 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
 
     res.json({ success: true, enviado: true, contabilizado: true, messageId: data.id });
   } catch (error: any) {
-    console.error("Error sending email:", error);
+    // Sentinel/security-review (ad80fd6, hallazgo Bajo): `friendlyError` (arriba) puede incluir
+    // el correo del destinatario en claro (util para el USUARIO, que ya lo escribio en su propia
+    // hoja) — pero `console.error` llega a Cloud Logging (30 dias, declarado en la Politica de
+    // Privacidad como la EXCEPCION, no la norma): se enmascara aqui, solo para el log.
+    console.error(
+      "Error sending email:",
+      error instanceof Error ? enmascararCorreosEnTexto(error.message) : error
+    );
     if (gmailEnvio) {
       // Gmail ya envio el correo de verdad (bajo): algo lanzo DESPUES (p. ej. gmailResponse.json())
       // sin llegar a confirmarse/descontarse. Nunca liberar la reserva (el correo si salio, el
@@ -823,6 +892,28 @@ app.post("/api/mercadopago/create-preference", exigirAuth, limitarCobroPorUid, l
     if (plan !== "paquete") {
       return res.status(400).json({ error: "Plan no valido" });
     }
+
+    // Verify v2 (ad80fd6, hallazgo Medio): `handlePagarPaquete` en LandingPage.tsx reusa el flujo
+    // de "Ingresar con Google" cuando no hay sesion de Firebase, pero eso NO comprueba que las
+    // casillas previas al login (autorizacion de datos T11 + aceptacion de Terminos O2) ya se
+    // hayan marcado — un usuario con sesion de Firebase vieja (de antes de O2) podia llegar aqui
+    // sin ninguna de las dos. Mismo gate EXACTO que /api/lote/iniciar, con los mismos motivos
+    // ("autorizacion"/"terminos") para que el cliente sepa que modal reabrir.
+    const decisionAutorizacionCobro = await decidirAutorizacionLoteRuta(req.uid!, AUTORIZACION_DATOS_VERSION, { obtenerAutorizacionDatos });
+    if (decisionAutorizacionCobro.ok === false) {
+      return res.status(decisionAutorizacionCobro.httpStatus).json({
+        error: decisionAutorizacionCobro.error,
+        motivo: decisionAutorizacionCobro.motivo,
+      });
+    }
+    const decisionTerminosCobro = await decidirAceptacionUsoRuta(req.uid!, TERMINOS_VERSION, { obtenerAceptacionUso });
+    if (decisionTerminosCobro.ok === false) {
+      return res.status(decisionTerminosCobro.httpStatus).json({
+        error: decisionTerminosCobro.error,
+        motivo: decisionTerminosCobro.motivo,
+      });
+    }
+
     const mpAccessToken = process.env.MERCADO_PAGO_ACCESS_TOKEN;
     if (!mpAccessToken) {
       // Antes devolvia success:true "simulado" y la landing mostraba "pago exitoso" sin cobrar.

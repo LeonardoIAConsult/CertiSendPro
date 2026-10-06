@@ -11,6 +11,7 @@
 // firma HMAC, sumar dias habiles) es PURO.
 import { createHmac, randomUUID } from "crypto";
 import { esFestivoColombia } from "./festivosColombia";
+import { enmascararCorreo } from "../shared/correo";
 
 // ── Firma HMAC del relay ─────────────────────────────────────────────────────────────────────
 // El cuerpo se firma sobre una cadena canonica simple (nunca sobre `JSON.stringify`, cuyo orden de
@@ -138,7 +139,7 @@ export async function enviarCorreo(datos: DatosCorreo, deps: EnviarCorreoDeps = 
   const relayUrl = deps.relayUrl ?? process.env.AVISOS_RELAY_URL;
   const relaySecret = deps.relaySecret ?? process.env.AVISOS_RELAY_SECRET;
   if (!relayUrl || !relaySecret) {
-    log(`[AVISOS] AVISOS_RELAY_URL/AVISOS_RELAY_SECRET no configurados; correo NO enviado a ${datos.para}.`);
+    log(`[AVISOS] AVISOS_RELAY_URL/AVISOS_RELAY_SECRET no configurados; correo NO enviado a ${enmascararCorreo(datos.para)}.`);
     return false;
   }
 
@@ -163,14 +164,30 @@ export async function enviarCorreo(datos: DatosCorreo, deps: EnviarCorreoDeps = 
       signal: controller.signal,
     });
     if (!respuesta.ok) {
-      log(`[AVISOS] el relay respondio ${respuesta.status}; correo NO enviado a ${datos.para}.`);
+      log(`[AVISOS] el relay respondio ${respuesta.status}; correo NO enviado a ${enmascararCorreo(datos.para)}.`);
+      return false;
+    }
+    // Sentinel/security-review (ad80fd6, hallazgo Medio): Apps Script SIEMPRE responde HTTP 200
+    // para un doPost (incluso sus propios errores logicos vienen envueltos en `json_({ok:false,
+    // error:...})`, ver docs/relay/avisos-relay.gs) — `respuesta.ok` por si solo NUNCA detecta un
+    // fallo del relay (secreto invalido, lock ocupado, destinatario inesperado, excepcion
+    // interna). Hay que parsear el cuerpo y exigir `ok===true` de verdad.
+    let cuerpo: { ok?: boolean; yaEnviado?: boolean; error?: string } = {};
+    try {
+      cuerpo = JSON.parse(await respuesta.text());
+    } catch {
+      log(`[AVISOS] el relay respondio 200 con un cuerpo no-JSON; correo NO enviado a ${enmascararCorreo(datos.para)}.`);
+      return false;
+    }
+    if (cuerpo.ok !== true) {
+      log(`[AVISOS] el relay respondio ok:false (${cuerpo.error || "sin detalle"}); correo NO enviado a ${enmascararCorreo(datos.para)}.`);
       return false;
     }
     return true;
   } catch (error: any) {
     // Timeout (AbortError) o red caida: nunca el detalle completo del error (podria incluir la
     // URL con query strings u otros datos), solo que fallo y a quien iba dirigido.
-    log(`[AVISOS] fallo al llamar al relay (${error?.name || "error"}); correo NO enviado a ${datos.para}.`);
+    log(`[AVISOS] fallo al llamar al relay (${error?.name || "error"}); correo NO enviado a ${enmascararCorreo(datos.para)}.`);
     return false;
   } finally {
     clearTimeout(timeoutId);
