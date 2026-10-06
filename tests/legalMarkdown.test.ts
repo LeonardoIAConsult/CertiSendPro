@@ -93,6 +93,18 @@ test("markdownAHtml: un esquema de enlace no permitido (javascript:) no se convi
   assert.doesNotMatch(resultado, /<a /);
 });
 
+test("markdownAHtml: una comilla en la URL del enlace no puede inyectar un atributo nuevo", () => {
+  const resultado = markdownAHtml('[clic](https://a.com/"onmouseover="x)');
+  assert.doesNotMatch(resultado, /onmouseover="x/);
+  assert.match(resultado, /href="https:\/\/a\.com\/&quot;onmouseover=&quot;x"/);
+});
+
+test("markdownAHtml: una comilla simple en el texto del enlace tambien queda escapada", () => {
+  const resultado = markdownAHtml("[clic'onmouseover='x](https://a.com)");
+  assert.doesNotMatch(resultado, /'onmouseover='x/);
+  assert.match(resultado, /&#39;onmouseover=&#39;x/);
+});
+
 test("markdownAHtml: combinado — titulo, parrafo, lista y separador, como un documento legal real", () => {
   const md = [
     "# Politica de Privacidad",

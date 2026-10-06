@@ -64,6 +64,7 @@ export interface TranslationDict {
   // envio" fijo, H5); planPayGoPriceCargando es el texto mientras ese precio no ha llegado.
   planPayGoName: string;
   planPayGoPriceCargando: string;
+  planPayGoPriceError: string;
   planPayGoFeature1: string;
   planPayGoFeature2: string;
   planPayGoFeature3: string;
@@ -190,10 +191,11 @@ export const translations: Record<Lang, TranslationDict> = {
 
     planPayGoName: "Paquete",
     planPayGoPriceCargando: "Calculando el precio de hoy…",
+    planPayGoPriceError: "Escríbenos para el precio de hoy",
     planPayGoFeature1: "150 envíos con éxito para lotes de más de 15",
     planPayGoFeature2: "Los lotes de 15 o menos siguen siendo gratis y no gastan el Paquete",
     planPayGoFeature3: "Válidos 1 mes o hasta gastarlos; no se acumulan",
-    planPayGoFeature4: "Pago único o renovación mensual opcional",
+    planPayGoFeature4: "Pago único",
     planPayGoFeature5: "Los envíos que fallan no se descuentan",
 
     faqTitle: "Preguntas Frecuentes",
@@ -297,10 +299,11 @@ export const translations: Record<Lang, TranslationDict> = {
 
     planPayGoName: "Bundle",
     planPayGoPriceCargando: "Calculating today's price…",
+    planPayGoPriceError: "Write to us for today's price",
     planPayGoFeature1: "150 successful sends for batches over 15",
     planPayGoFeature2: "Batches of 15 or fewer stay free and never spend the Bundle",
     planPayGoFeature3: "Valid for 1 month or until used up; unused sends do not roll over",
-    planPayGoFeature4: "One-time payment or optional monthly renewal",
+    planPayGoFeature4: "One-time payment",
     planPayGoFeature5: "Failed sends are never deducted",
 
     faqTitle: "Frequently Asked Questions",

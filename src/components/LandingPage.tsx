@@ -74,11 +74,21 @@ export default function LandingPage({
   // variable de SERVIDOR: sin este campo, el panel no tendria forma de saber si el boton va a
   // terminar en un 503.
   const [precios, setPrecios] = useState<PreciosDelDia | null>(null);
+  // Si /api/precios nunca responde (red caida, 500, etc.), `precios` se queda en null para
+  // siempre y sin esta bandera la landing mostraria "Calculando el precio de hoy…" de forma
+  // indefinida. `preciosFallo` distingue "todavia cargando" de "no va a llegar" para mostrar
+  // planPayGoPriceError en su lugar (el boton ya cae solo al flujo de mailto porque
+  // `precios?.pagosActivos` es falso con `precios` en null).
+  const [preciosFallo, setPreciosFallo] = useState(false);
   useEffect(() => {
     let cancelado = false;
     fetch("/api/precios")
       .then(async (res) => {
-        if (!res.ok || cancelado) return;
+        if (cancelado) return;
+        if (!res.ok) {
+          setPreciosFallo(true);
+          return;
+        }
         const data = await res.json();
         if (cancelado) return;
         setPrecios({
@@ -92,6 +102,7 @@ export default function LandingPage({
       .catch(() => {
         /* Sin precios, el boton del Paquete se queda en el flujo de mailto (ver `pagosActivos`
          * por defecto: `precios` null se trata como pagos apagados mas abajo). */
+        if (!cancelado) setPreciosFallo(true);
       });
     return () => {
       cancelado = true;
@@ -530,7 +541,9 @@ export default function LandingPage({
                       </p>
                     </>
                   ) : (
-                    <p className="text-lg font-bold mt-2 text-slate-500">{t.planPayGoPriceCargando}</p>
+                    <p className="text-lg font-bold mt-2 text-slate-500">
+                      {preciosFallo ? t.planPayGoPriceError : t.planPayGoPriceCargando}
+                    </p>
                   )}
                 </div>
                 <div className="space-y-3 pt-6 border-t border-dashed border-slate-500/20">

@@ -40,7 +40,12 @@ export function reemplazarPlaceholdersProveedor(markdown: string, valores: Valor
 }
 
 function escaparHtml(texto: string): string {
-  return texto.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return texto
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /** Reglas de linea (negrita, enlaces) aplicadas DESPUES de escapar — por eso el texto dentro de
