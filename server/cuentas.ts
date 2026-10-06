@@ -142,14 +142,117 @@ export async function obtenerPreferencia(id: string): Promise<PreferenciaGuardad
   return snap.exists ? (snap.data() as PreferenciaGuardada) : null;
 }
 
+// ── Aceptacion de terminos y retracto (Tarea 14, cobro real con planes, 2026-10-05) ─────────────
+// Textos citados LITERAL de `docs/legal/textos-checkout.md` v1.2 (T4 y T5), con los marcadores
+// que el servidor ya conoce en el momento del cobro ({{version_terminos}}, {{monto_cop}})
+// reemplazados. Hoy `create-preference` solo ofrece el Paquete como PAGO UNICO (Tarea 7 —
+// "renovar cada mes" — no existe todavia), asi que el marcador `{{y_si_renueva}}` de T4 se omite
+// a proposito: ese marcador solo aplica a modalidades renovables (ver textos-checkout.md, T4).
+// Cuando llegue la Tarea 7, quien construya el texto de una renovable debe completar ese
+// marcador en vez de omitirlo.
+
+export const TERMINOS_VERSION = "1.2";
+
+/** Texto EXACTO de la casilla T4 (`textos-checkout.md` v1.2) para un pago UNICO: sin la clausula
+ * de renovacion. `montoCop` se formatea con puntos de miles (regla R7 del mismo documento). */
+export function textoCasillaTerminos(montoCop: number): string {
+  return (
+    `He leído y acepto los Términos y Condiciones de Venta y Suscripción (versión ${TERMINOS_VERSION}) ` +
+    `y la Política de Privacidad. Entiendo que pagaré $${montoCop.toLocaleString("es-CO")} COP hoy.`
+  );
+}
+
+/** Texto EXACTO de la casilla T5 (`textos-checkout.md` v1.2): declaracion de inicio inmediato y
+ * excepcion del derecho de retracto. No depende del plan ni del monto, siempre es el mismo. */
+export const TEXTO_CASILLA_RETRACTO =
+  "Quiero que el servicio empiece de inmediato al confirmarse mi pago. Sé que, por eso, no procede " +
+  "el derecho de retracto de 5 días hábiles (Ley 1480 de 2011, artículo 47, numeral 1). Puedo " +
+  "cancelar las renovaciones cuando quiera, conservo los reembolsos y la reversión del pago que la " +
+  "ley me reconoce y, si es un Paquete y no hago ningún envío con él, puedo pedir su devolución " +
+  "completa dentro de los 5 días hábiles siguientes al pago.";
+
+export interface AceptacionGuardada {
+  uid: string;
+  versionTerminos: string;
+  plan: Plan;
+  cop: number;
+  trm: number;
+  /** Id de `preferencias/{id}` a la que queda enlazada esta aceptacion (hoy, el mismo id). */
+  preferenciaId: string;
+  textoCasilla: string;
+  textoRetracto: string;
+  /** Fecha DEL SERVIDOR (nunca una fecha que mande el navegador). */
+  fecha: Timestamp;
+}
+
+/** Guarda `aceptaciones/{id}` ANTES de llamar a Mercado Pago (quien la llama decide el orden;
+ * esta funcion solo escribe). Deny-all en firestore.rules: solo el servidor la toca. A proposito
+ * NO guarda IP: no hace falta para probar la aceptacion y es un dato personal que no se pide. */
+export async function guardarAceptacion(
+  id: string,
+  datos: Omit<AceptacionGuardada, "fecha">
+): Promise<void> {
+  await db()
+    .collection("aceptaciones")
+    .doc(String(id))
+    .set({ ...datos, fecha: Timestamp.now() });
+}
+
 export const ENVIOS_PAQUETE = 150;
 
-/** Misma fecha, 1 mes despues (aritmetica de calendario, no "+30 dias"): el Paquete vence el
- * mismo dia del mes siguiente al pago, igual que lo describe el spec ("1 mes desde el pago"). */
+/** Componentes de fecha/hora en el calendario de BOGOTA (UTC-5 fijo, Colombia no tiene horario
+ * de verano) para un instante `fecha`, via Intl — nunca via los getters UTC/locales de Date, que
+ * dependen de la zona del proceso. `fecha` puede representar, en Bogota, un dia distinto de su
+ * dia en UTC (p. ej. 31-ene 21:30 Bogota es ya 01-feb en UTC): por eso `sumarUnMes` (abajo) tiene
+ * que leer el calendario de Bogota, no el de UTC, para saber de que dia parte. */
+function componentesBogota(fecha: Date): {
+  anio: number; mes: number; dia: number; horas: number; minutos: number; segundos: number; ms: number;
+} {
+  const partes = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Bogota",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(fecha);
+  const numero = (tipo: string) => Number(partes.find((p) => p.type === tipo)?.value);
+  return {
+    anio: numero("year"),
+    mes: numero("month"), // 1-12
+    dia: numero("day"),
+    horas: numero("hour"),
+    minutos: numero("minute"),
+    segundos: numero("second"),
+    ms: fecha.getUTCMilliseconds(), // los milisegundos no cambian con el huso horario.
+  };
+}
+
+/** Ultimo dia del mes `mes1a12` (1-12) de `anio`, en el calendario gregoriano. */
+function ultimoDiaDelMes(anio: number, mes1a12: number): number {
+  // Date.UTC(anio, mes1a12, 0) es "el dia 0" del mes SIGUIENTE a mes1a12 (indice 0 = enero):
+  // eso es, por definicion, el ultimo dia de mes1a12.
+  return new Date(Date.UTC(anio, mes1a12, 0)).getUTCDate();
+}
+
+/** Misma fecha, 1 mes despues, en el calendario de BOGOTA (no "+30 dias", ni la aritmetica de
+ * `Date.setUTCMonth`, que desborda al mes siguiente cuando el dia de origen no existe en el mes
+ * destino: 31-ene + 1 mes con `setUTCMonth` da 03-mar, no 28-feb). El Paquete vence el mismo dia
+ * del mes siguiente al pago (spec: "1 mes desde el pago"); si ese dia no existe en el mes
+ * siguiente (p. ej. 31-ene -> febrero), se queda en el ULTIMO dia de ese mes (28 o 29 febrero),
+ * sea cual sea la hora de Bogota del pago original. */
 export function sumarUnMes(fecha: Date): Date {
-  const resultado = new Date(fecha.getTime());
-  resultado.setUTCMonth(resultado.getUTCMonth() + 1);
-  return resultado;
+  const c = componentesBogota(fecha);
+  let anio = c.anio;
+  let mes = c.mes + 1; // 1-12, puede pasar de 12
+  if (mes > 12) {
+    mes -= 12;
+    anio += 1;
+  }
+  const dia = Math.min(c.dia, ultimoDiaDelMes(anio, mes));
+
+  // Se reconstruye el instante UTC real que corresponde a esa fecha/hora EN BOGOTA: se arma como
+  // si los componentes fueran UTC (Date.UTC) y se suman las 5 horas que Bogota esta detras de UTC.
+  const comoSiFueraUTC = Date.UTC(anio, mes - 1, dia, c.horas, c.minutos, c.segundos, c.ms);
+  return new Date(comoSiFueraUTC + 5 * 3600_000);
 }
 
 /**

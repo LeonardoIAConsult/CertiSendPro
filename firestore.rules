@@ -29,5 +29,12 @@ service cloud.firestore {
     match /preferencias/{id} {
       allow read, write: if false;
     }
+
+    // aceptaciones/{id}: prueba de que el usuario marco las casillas de Terminos y de retracto
+    // antes de pagar (Tarea 14, 2026-10-05). Enlazada a preferencias/{id} por el mismo id; solo
+    // el servidor la escribe, con la fecha del propio servidor.
+    match /aceptaciones/{id} {
+      allow read, write: if false;
+    }
   }
 }

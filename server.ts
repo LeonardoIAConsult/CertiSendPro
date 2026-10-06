@@ -18,9 +18,12 @@ import {
   guardarPreferencia,
   obtenerPreferencia,
   activarPaqueteSiNoProcesado,
+  guardarAceptacion,
 } from "./server/cuentas";
 import { trmHoy, copDesdeUsd } from "./server/trm";
-import { procesarWebhookMP } from "./server/webhook";
+import { procesarWebhookMP, extraerAvisoWebhookMP } from "./server/webhook";
+import { crearCobroPaquete } from "./server/cobroPaquete";
+import { evaluarLimite, type EstadoVentana } from "./server/limitador";
 
 const app = express();
 // Cloud Run inyecta PORT; en local sigue siendo 3000.
@@ -691,7 +694,6 @@ const PLANES_USD = {
   paquete: { usd: 15, titulo: "CertiSend — Paquete de 150 envíos" },
   pro: { usd: 29, titulo: "CertiSend Pro Monthly" },
 } as const;
-type PlanCobro = keyof typeof PLANES_USD;
 // TRM del dia: validacion, timeout y cacheo robustos viven en server/trm.ts (Tarea 4, 2026-10-05)
 // — igual que cuentas.ts, separado de este archivo para poder probarse con node:test sin red.
 
@@ -703,14 +705,40 @@ type PlanCobro = keyof typeof PLANES_USD;
 // dominio de Hosting cambiara, Leonardo debe fijar PUBLIC_BASE_URL en el entorno de Cloud Run.
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://certisendpro.online";
 
-app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
+// ── Tope global anti-inundacion de create-preference (Tarea 12, 2026-10-05) ────────────────────
+// Limite GLOBAL en memoria, independiente de la IP (el limitador de arriba) y del uid: una
+// peticion que rota X-Forwarded-For o que usa muchas cuentas distintas sigue topando aqui. Solo
+// es un tope global de verdad si Cloud Run corre con max-instances=1 (ver server/limitador.ts).
+// La URL directa *.run.app (M11) se salta Firebase Hosting, pero NO este middleware: vive en el
+// propio Express, nunca en Hosting.
+const VENTANA_COBRO_MS = 60_000;
+const MAX_COBROS_POR_VENTANA = Number(process.env.RATE_LIMIT_COBROS_PER_MIN || 20);
+let estadoCobroGlobal: EstadoVentana | null = null;
+const limitarCobroGlobal: express.RequestHandler = (_req, res, next) => {
+  const r = evaluarLimite(estadoCobroGlobal, Date.now(), VENTANA_COBRO_MS, MAX_COBROS_POR_VENTANA);
+  estadoCobroGlobal = r.estado;
+  if (!r.permitido) {
+    res.setHeader("Retry-After", r.retryAfterSegundos!);
+    return res.status(429).json({ error: "Demasiadas solicitudes de cobro en este momento. Intenta de nuevo en un minuto." });
+  }
+  next();
+};
+
+app.post("/api/mercadopago/create-preference", limitarCobroGlobal, exigirAuth, async (req, res) => {
   // APAGADO hasta que Leonardo defina la entrega (05-oct): la landing manda a contacto. Encender
   // con PAGOS_ACTIVOS=1 en Cloud Run cuando exista que activar tras el pago (ver memoria).
   if (process.env.PAGOS_ACTIVOS !== "1") {
     return res.status(503).json({ error: "Pagos no disponibles por ahora. Escribenos a contacto@leonardoantolinez.com." });
   }
   try {
-    const { plan } = req.body as { plan?: string }; // `amount`/`currency`/`planName` del cliente se ignoran a proposito
+    // `amount`/`currency`/`planName` del cliente se ignoran a proposito. `aceptaTerminos` y
+    // `aceptaRetracto` son las DOS casillas sin marcar del checkout (Tarea 14): las valida
+    // `crearCobroPaquete`, mas abajo, para que la prueba "sin casilla no crea nada" sea real.
+    const { plan, aceptaTerminos, aceptaRetracto } = req.body as {
+      plan?: string;
+      aceptaTerminos?: unknown;
+      aceptaRetracto?: unknown;
+    };
     if (plan === "pro") {
       // Pro es suscripcion (Tarea 8); todavia no existe que activar cuando MP confirme el cobro.
       return res.status(501).json({ error: "Pro llega pronto. Escribenos a contacto@leonardoantolinez.com." });
@@ -718,73 +746,63 @@ app.post("/api/mercadopago/create-preference", exigirAuth, async (req, res) => {
     if (plan !== "paquete") {
       return res.status(400).json({ error: "Plan no valido" });
     }
-    const planCobro: PlanCobro = "paquete";
     const mpAccessToken = process.env.MERCADO_PAGO_ACCESS_TOKEN;
-
     if (!mpAccessToken) {
       // Antes devolvia success:true "simulado" y la landing mostraba "pago exitoso" sin cobrar.
       console.warn("[MERCADO PAGO] MERCADO_PAGO_ACCESS_TOKEN no configurado.");
       return res.status(503).json({ error: "Pagos no disponibles en este momento." });
     }
-    const trm = await trmHoy();
-    if (!trm) return res.status(503).json({ error: "No podemos calcular el precio de hoy; intenta más tarde." });
 
-    const { usd, titulo } = PLANES_USD[planCobro];
-    const cop = copDesdeUsd(usd, trm.valor); // misma formula que /api/precios (D3): no se duplica.
+    const { usd, titulo } = PLANES_USD.paquete;
     const base = process.env.APP_URL || "http://localhost:3000";
     const ahora = Date.now();
 
-    // Id aleatorio de esta preferencia (no el id que MP asigna despues a la preferencia o al pago):
-    // es la clave de `preferencias/{id}` y el ultimo campo del external_reference, para que el
-    // webhook pueda volver a leer EXACTAMENTE lo que se ofrecio aqui y comparar contra lo que MP
-    // dice que se cobro — nunca confiar solo en el cop que viaja en el propio external_reference.
-    const referenciaId = randomUUID();
-    const externalReference = `CERTISEND|${req.uid}|${planCobro}|${cop}|${referenciaId}`;
-    await guardarPreferencia(referenciaId, {
+    const resultado = await crearCobroPaquete({
       uid: req.uid!,
-      plan: planCobro,
-      cop,
-      trm: trm.valor,
-      fechaTrm: trm.fechaDesde,
-    });
-
-    // La ruta correcta es /checkout/preferences; /v1/preferences no existe ("resource not found"),
-    // asi que el cobro de CertiSend nunca funciono hasta este cambio.
-    const response = await fetch("https://api.mercadopago.com/checkout/preferences", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${mpAccessToken}`,
-        "Content-Type": "application/json"
+      aceptaTerminos,
+      aceptaRetracto,
+      obtenerTrm: trmHoy,
+      copDesdeUsd,
+      usdPaquete: usd,
+      // Id aleatorio de esta preferencia/aceptacion (no el id que MP asigna despues al pago): es
+      // la clave de `preferencias/{id}` y `aceptaciones/{id}`, y el ultimo campo del
+      // external_reference, para que el webhook pueda volver a leer EXACTAMENTE lo que se
+      // ofrecio aqui y comparar contra lo que MP dice que se cobro.
+      generarId: randomUUID,
+      guardarPreferencia,
+      guardarAceptacion,
+      log: console.error,
+      crearPreferenciaMP: async ({ cop, externalReference }) => {
+        // La ruta correcta es /checkout/preferences; /v1/preferences no existe ("resource not
+        // found"), asi que el cobro de CertiSend nunca funciono hasta ese cambio.
+        const response = await fetch("https://api.mercadopago.com/checkout/preferences", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${mpAccessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            items: [{ title: titulo, quantity: 1, unit_price: cop, currency_id: "COP" }],
+            external_reference: externalReference,
+            notification_url: `${PUBLIC_BASE_URL}/api/mp/webhook?src=certisend`,
+            back_urls: {
+              success: `${base}/?pago=ok`,
+              failure: `${base}/?pago=error`,
+              pending: `${base}/?pago=pendiente`,
+            },
+            auto_return: "approved",
+            // Vence en 2 h: un cobro guardado no se paga despues a una TRM vieja.
+            expires: true,
+            expiration_date_from: new Date(ahora).toISOString(),
+            expiration_date_to: new Date(ahora + 2 * 3600_000).toISOString(),
+            statement_descriptor: "CERTISEND PRO",
+          }),
+        });
+        return { ok: response.ok, status: response.status, json: () => response.json() };
       },
-      body: JSON.stringify({
-        items: [{ title: titulo, quantity: 1, unit_price: cop, currency_id: "COP" }],
-        external_reference: externalReference,
-        notification_url: `${PUBLIC_BASE_URL}/api/mp/webhook?src=certisend`,
-        back_urls: {
-          success: `${base}/?pago=ok`,
-          failure: `${base}/?pago=error`,
-          pending: `${base}/?pago=pendiente`
-        },
-        auto_return: "approved",
-        // Vence en 2 h: un cobro guardado no se paga despues a una TRM vieja.
-        expires: true,
-        expiration_date_from: new Date(ahora).toISOString(),
-        expiration_date_to: new Date(ahora + 2 * 3600_000).toISOString(),
-        statement_descriptor: "CERTISEND PRO"
-      })
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Error de la API de Mercado Pago: ${errText}`);
-    }
-
-    const data = await response.json();
-    res.json({
-      success: true,
-      initPoint: data.init_point,
-      cop, usd, trm: trm.valor, fechaTrm: trm.fechaDesde
-    });
+    res.status(resultado.httpStatus).json(resultado.body);
   } catch (error: any) {
     // El detalle (respuesta de MP) va al log del servidor, no al navegador.
     console.error("Error al crear preferencia de Mercado Pago:", error);
@@ -826,12 +844,8 @@ app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
     // Mercado Pago manda el tipo/id por query (`type`/`topic` + `data.id`/`id`, formato nuevo o
     // IPN viejo) o, a veces, tambien en el body. Se acepta cualquiera de las dos fuentes, pero
     // solo para encontrar el id: lo que decide todo lo demas es la respuesta de la API (abajo).
-    const tipo = String(
-      req.query.type || req.query.topic || req.body?.type || req.body?.topic || ""
-    );
-    const paymentId = String(
-      req.query["data.id"] || req.query.id || req.body?.data?.id || req.body?.id || ""
-    );
+    // Extraccion en funcion PURA (server/webhook.ts) para poder probarla con node:test.
+    const { tipo, paymentId } = extraerAvisoWebhookMP({ query: req.query, body: req.body });
 
     const mpAccessToken = process.env.MERCADO_PAGO_ACCESS_TOKEN;
     if (!mpAccessToken) {

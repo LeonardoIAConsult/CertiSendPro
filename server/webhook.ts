@@ -46,6 +46,29 @@ export interface ProcesarWebhookMPOpts {
   log(linea: string): void;
 }
 
+/** Forma minima de lo que la ruta HTTP saca de la peticion entrante (query y body de Express). */
+export interface AvisoWebhookCrudo {
+  query: Record<string, any>;
+  body: any;
+}
+
+/**
+ * Extrae `{tipo, paymentId}` del aviso de Mercado Pago (Tarea 6, extraida a funcion PURA tras la
+ * vuelta 22 para poder probarla con node:test sin Express). Acepta el formato nuevo
+ * (`type`+`data.id`, por query o en el body v2) y el IPN viejo (`topic`+`id`). Prioridad, igual
+ * que el codigo original de server.ts: `query["data.id"]` > `query.id` > `body.data.id` >
+ * `body.id` — por eso un cuerpo v2 con un `id` de notificacion DISTINTO de `data.id` siempre usa
+ * `data.id` (se mira primero). Esta funcion solo decide DE DONDE sacar el id; nunca decide si el
+ * pago es real — eso lo hace `procesarWebhookMP` volviendo a consultar la API de Mercado Pago.
+ */
+export function extraerAvisoWebhookMP(crudo: AvisoWebhookCrudo): { tipo: string; paymentId: string } {
+  const query = crudo.query || {};
+  const body = crudo.body || {};
+  const tipo = String(query.type || query.topic || body?.type || body?.topic || "");
+  const paymentId = String(query["data.id"] || query.id || body?.data?.id || body?.id || "");
+  return { tipo, paymentId };
+}
+
 /** Separa `CERTISEND|<uid>|<plan>|<cop>|<idAleatorio>`. `null` si no tiene el prefijo o la forma
  * esperada (pago de Faro u otro producto que comparte la misma cuenta de Mercado Pago). */
 function parsearExternalReference(
@@ -61,13 +84,14 @@ function parsearExternalReference(
 }
 
 /**
- * Procesa un aviso de webhook ya reducido a `{tipo, paymentId}` (la ruta HTTP en server.ts es
- * responsable de extraer esos dos datos de la query/body segun el formato que use Mercado Pago).
+ * Procesa un aviso de webhook ya reducido a `{tipo, paymentId}` (la ruta HTTP en server.ts saca
+ * esos dos datos de la query/body con `extraerAvisoWebhookMP`, arriba).
  *
- * Activa el Paquete SOLO si se cumplen las cuatro condiciones del spec (Tarea 6):
- * status=approved, currency_id=COP, transaction_amount === cop del external_reference, y ese cop
- * coincide con el que de verdad se guardo en `preferencias/{id}` al crear el cobro. Cualquier otra
- * cosa se ignora respondiendo 200 (nunca activa, nunca hace que Mercado Pago reintente).
+ * Activa el Paquete SOLO si se cumplen las condiciones del spec (Tarea 6, mas `status_detail` de
+ * la vuelta 22): status=approved, status_detail distinto de "partially_refunded", currency_id=COP,
+ * transaction_amount === cop del external_reference, y ese cop coincide con el que de verdad se
+ * guardo en `preferencias/{id}` al crear el cobro. Cualquier otra cosa se ignora respondiendo 200
+ * (nunca activa, nunca hace que Mercado Pago reintente).
  */
 export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<ResultadoWebhookMP> {
   const { tipo, paymentId } = opts;
@@ -116,12 +140,20 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
     return { httpStatus: 200, razon: `plan "${referencia.plan}" no se activa aqui (Tarea 8 pendiente)` };
   }
 
-  const cumpleLasCuatroCondiciones =
+  // `status_detail` distingue un "approved" de verdad de uno al que ya se le devolvio parte del
+  // dinero (vuelta 22): Mercado Pago deja `status=approved` tras un reembolso PARCIAL, asi que
+  // sin este chequeo un pago parcialmente reembolsado activaria el Paquete completo igual.
+  const statusDetail = String(pago?.status_detail || "");
+  const cumpleLasCondiciones =
     status === "approved" &&
+    statusDetail !== "partially_refunded" &&
     String(pago?.currency_id || "") === "COP" &&
     Number(pago?.transaction_amount) === referencia.cop;
-  if (!cumpleLasCuatroCondiciones) {
-    return { httpStatus: 200, razon: `no cumple las condiciones de activacion (status=${status})` };
+  if (!cumpleLasCondiciones) {
+    return {
+      httpStatus: 200,
+      razon: `no cumple las condiciones de activacion (status=${status}, status_detail=${statusDetail || "ninguno"})`,
+    };
   }
 
   const preferencia = await opts.obtenerPreferencia(referencia.referenciaId);

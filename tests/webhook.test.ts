@@ -24,6 +24,7 @@ import { FirestoreFalso } from "./_fakeFirestore";
 /** Respuesta OK de GET /v1/payments/{id} con los campos que lee el webhook. */
 function pagoOk(datos: Partial<{
   status: string;
+  status_detail: string;
   currency_id: string;
   transaction_amount: number;
   external_reference: string;
@@ -218,6 +219,44 @@ for (const status of ["pending", "rejected", "in_process", "cancelled"]) {
     assert.equal(db.leer("cuentas/uid-1"), undefined);
   });
 }
+
+// ── status_detail="partially_refunded" (vuelta 22): approved con reembolso parcial -> no activa ──
+// Mercado Pago deja `status=approved` tras devolver PARTE del dinero (status_detail distingue el
+// caso). Sin este chequeo, un pago parcialmente reembolsado activaria el Paquete completo igual.
+
+test('webhook: status="approved" pero status_detail="partially_refunded" no activa', async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const activarPaquete = activarPaqueteConFake(db);
+
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      obtenerPago: async () => pagoOk({ status: "approved", status_detail: "partially_refunded" }),
+      obtenerPreferencia,
+      activarPaquete,
+    })
+  );
+
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(db.leer("cuentas/uid-1"), undefined, "un reembolso parcial nunca debe activar el Paquete");
+});
+
+test('webhook: status="approved" con status_detail distinto de "partially_refunded" SI activa (no se rompe el caso normal)', async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const activarPaquete = activarPaqueteConFake(db);
+
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      obtenerPago: async () => pagoOk({ status: "approved", status_detail: "accredited" }),
+      obtenerPreferencia,
+      activarPaquete,
+    })
+  );
+
+  assert.equal(resultado.razon, "activado");
+  assert.ok(db.leer("cuentas/uid-1"));
+});
 
 // ── Cuerpo falsificado (dice approved) mientras MP dice rejected -> no activa ────────────────
 // El webhook NUNCA lee status del body/query de la peticion entrante: siempre vuelve a consultar
