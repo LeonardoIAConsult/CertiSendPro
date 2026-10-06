@@ -18,8 +18,11 @@ import {
   obtenerAutorizacionDatos,
   activarPaqueteSiNoProcesadoTx,
   revertirPagoSiNoRevertidoTx,
+  decidirAutorizacionLote,
+  decidirRegistroAutorizacion,
   _usarFirestoreParaPruebas,
   type Cuenta,
+  type AutorizacionDatos,
   type AutorizacionGuardada,
 } from "../server/cuentas";
 import { FirestoreFalso } from "./_fakeFirestore";
@@ -136,4 +139,63 @@ test("GRAVE 1 (mutacion de control): si la autorizacion viviera en cuentas/{uid}
   const cuenta = db.leer("cuentas/uid-1") as any;
   assert.equal(cuenta.plan, "paquete");
   assert.equal(cuenta.autorizacionDatos, undefined, "tx.set sin merge SI borra un campo ajeno del documento — por eso GRAVE 1 lo saca de aqui");
+});
+
+// ── decidirAutorizacionLote (correccion vuelta 33, 2026-10-06): decision de /api/lote/iniciar
+// sobre la autorizacion de datos, extraida como funcion PURA. ──────────────────────────────────
+
+function autorizacion(version: string): AutorizacionDatos {
+  return { version, fecha: Timestamp.now(), idioma: "es", texto: "Autorizo." };
+}
+
+test("decidirAutorizacionLote: sin autorizacion (null) -> 403 con motivo 'autorizacion'", () => {
+  const r = decidirAutorizacionLote(null, "2.3");
+  assert.equal(r.ok, false);
+  assert.equal((r as any).httpStatus, 403);
+  assert.equal((r as any).motivo, "autorizacion");
+});
+
+test("decidirAutorizacionLote: version guardada DISTINTA de la vigente -> 403 (se volvio a pedir)", () => {
+  const r = decidirAutorizacionLote(autorizacion("2.2"), "2.3");
+  assert.equal(r.ok, false);
+  assert.equal((r as any).httpStatus, 403);
+});
+
+test("decidirAutorizacionLote: version guardada IGUAL a la vigente -> ok", () => {
+  assert.deepEqual(decidirAutorizacionLote(autorizacion("2.3"), "2.3"), { ok: true });
+});
+
+// ── decidirRegistroAutorizacion (Medio 2, correccion vuelta 33, 2026-10-06): decision de
+// POST /api/autorizacion-datos sobre PROVEEDOR_NOMBRE. ──────────────────────────────────────────
+
+test("decidirRegistroAutorizacion: PROVEEDOR_NOMBRE vacio -> 503, nunca se registra", () => {
+  const r = decidirRegistroAutorizacion("Ana S.A.S.", "");
+  assert.equal(r.ok, false);
+  assert.equal((r as any).httpStatus, 503);
+});
+
+test("decidirRegistroAutorizacion: PROVEEDOR_NOMBRE todavia es el marcador '[PENDIENTE]' -> 503", () => {
+  const r = decidirRegistroAutorizacion("[PENDIENTE]", "[PENDIENTE]");
+  assert.equal(r.ok, false);
+  assert.equal((r as any).httpStatus, 503);
+});
+
+test("decidirRegistroAutorizacion: el cliente no manda nombreProveedorMostrado -> 409 (no coincide con nada)", () => {
+  const r = decidirRegistroAutorizacion(undefined, "Leonardo Antolinez");
+  assert.equal(r.ok, false);
+  assert.equal((r as any).httpStatus, 409);
+});
+
+test("decidirRegistroAutorizacion: el nombre mostrado por el cliente NO coincide con PROVEEDOR_NOMBRE -> 409", () => {
+  const r = decidirRegistroAutorizacion("Otro Nombre", "Leonardo Antolinez");
+  assert.equal(r.ok, false);
+  assert.equal((r as any).httpStatus, 409);
+});
+
+test("decidirRegistroAutorizacion: el nombre mostrado coincide EXACTO -> ok", () => {
+  assert.deepEqual(decidirRegistroAutorizacion("Leonardo Antolinez", "Leonardo Antolinez"), { ok: true });
+});
+
+test("decidirRegistroAutorizacion: espacios de mas alrededor del nombre no rompen la coincidencia", () => {
+  assert.deepEqual(decidirRegistroAutorizacion("  Leonardo Antolinez  ", "Leonardo Antolinez"), { ok: true });
 });

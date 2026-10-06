@@ -323,6 +323,20 @@ test("G3: elegibleParaReintentoAcuse rechaza un pago revertido aunque correoComp
   assert.equal(elegibleParaReintentoAcuse({ correoComprador: null, revertido: true }, new Date()), false);
 });
 
+// ── Medio 4 (correccion vuelta 31, 2026-10-06): un pago "requiere_reembolso" (pago doble, NUNCA
+// activo nada) tampoco debe reintentar el acuse de compra — no hay nada que confirmarle al
+// comprador porque su compra nunca se activo. Control positivo: el mismo dato SIN el flag SI es
+// elegible, para probar que es ese flag especifico el que excluye (no otra condicion del objeto).
+
+test("Medio 4: elegibleParaReintentoAcuse rechaza un pago con requiereReembolso=true", () => {
+  assert.equal(elegibleParaReintentoAcuse({ correoComprador: null, requiereReembolso: true }, new Date()), false);
+});
+
+test("Medio 4 (control positivo): el mismo pago SIN requiereReembolso (false/ausente) SI es elegible", () => {
+  assert.equal(elegibleParaReintentoAcuse({ correoComprador: null, requiereReembolso: false }, new Date()), true);
+  assert.equal(elegibleParaReintentoAcuse({ correoComprador: null }, new Date()), true);
+});
+
 test("G3: seleccionarPagosParaBarrido excluye un pago revertido con correoComprador null (no se elige)", () => {
   const ahora = new Date();
   const revertido = candidato("pago-revertido", { correoComprador: null, revertido: true });

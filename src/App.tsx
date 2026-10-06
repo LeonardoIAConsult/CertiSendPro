@@ -46,6 +46,8 @@ import {
   paginaConFilaAsignada,
 } from "./utils/matching";
 import { textoAutorizacionDatos as textoAutorizacionDatosCompartido } from "../shared/textosCasillas";
+import { sanitizarCorreo } from "../shared/correo";
+import { decidirNecesitaAutorizar, type LecturaAutorizacion } from "./utils/autorizacionDatos";
 import JSZip from "jszip";
 import LandingPage from "./components/LandingPage";
 import LegalPage from "./components/LegalPage";
@@ -307,10 +309,18 @@ export default function App() {
   const [necesitaAutorizarDatos, setNecesitaAutorizarDatos] = useState(false);
   const [aceptaAutorizacionDatos, setAceptaAutorizacionDatos] = useState(false);
   const [autorizandoDatos, setAutorizandoDatos] = useState(false);
+  // MENORES (correccion vuelta 33, 2026-10-06): "carrera GET/POST de autorizacion al iniciar
+  // sesion" — el GET de abajo y el POST de `handleLogin` (mas abajo en este archivo) podian
+  // correr casi al mismo tiempo; si el GET resolvia DESPUES de que el POST ya hubiera puesto
+  // `necesitaAutorizarDatos=false`, la volvia a poner en `true` y el modal se reabria justo tras
+  // aceptar. Mientras cualquiera de los dos POST (este modal o el de `handleLogin`) esta en
+  // vuelo, el GET descarta su propio resultado (`decidirNecesitaAutorizar`, src/utils/autorizacionDatos.ts).
+  const autorizacionEnVueloRef = useRef(false);
 
   useEffect(() => {
     if (needsAuth || !user || user.isGuest) return;
     (async () => {
+      let lectura: LecturaAutorizacion;
       try {
         const authHeader = await construirAuthHeader();
         if (!authHeader.Authorization) return;
@@ -318,26 +328,32 @@ export default function App() {
         if (!res.ok) {
           // MENORES (correccion vuelta 31, 2026-10-06): si el GET falla (red, servidor caido),
           // nunca se asume "ya autorizo" — se trata como NO autorizado y se muestra el modal.
-          setNecesitaAutorizarDatos(true);
-          return;
+          lectura = { tipo: "error" };
+        } else {
+          const data = await res.json();
+          lectura = { tipo: "ok", autorizado: data.autorizado === true };
         }
-        const data = await res.json();
-        setNecesitaAutorizarDatos(data.autorizado !== true);
       } catch (err) {
         console.error("No se pudo consultar la autorización de datos:", err);
-        setNecesitaAutorizarDatos(true); // MENORES: fallo de red -> tratado como NO autorizado.
+        lectura = { tipo: "error" }; // MENORES: fallo de red -> tratado como NO autorizado.
       }
+      const decision = decidirNecesitaAutorizar(lectura, autorizacionEnVueloRef.current);
+      if (decision !== null) setNecesitaAutorizarDatos(decision);
     })();
   }, [needsAuth, user]);
 
   const handleAutorizarDatos = async () => {
     if (!aceptaAutorizacionDatos) return;
     setAutorizandoDatos(true);
+    autorizacionEnVueloRef.current = true;
     try {
       const res = await fetch("/api/autorizacion-datos", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(await construirAuthHeader()) },
-        body: JSON.stringify({ idioma: language }),
+        // Medio 2 (correccion vuelta 33): el servidor rechaza con 409 si este nombre no coincide
+        // EXACTO con su propio PROVEEDOR_NOMBRE — es el mismo valor que ya se interpolo en el
+        // texto T11 que el usuario vio y acepto (ver textoAutorizacionDatos mas abajo).
+        body: JSON.stringify({ idioma: language, nombreProveedorMostrado: import.meta.env.VITE_PROVEEDOR_NOMBRE }),
       });
       if (!res.ok) {
         triggerBanner("error", "No se pudo guardar tu autorización. Intenta de nuevo.");
@@ -349,6 +365,7 @@ export default function App() {
       triggerBanner("error", "No se pudo guardar tu autorización. Intenta de nuevo.");
     } finally {
       setAutorizandoDatos(false);
+      autorizacionEnVueloRef.current = false;
     }
   };
 
@@ -459,11 +476,15 @@ export default function App() {
         // existiendo solo para usuarios YA logueados antes de esta tarea, sin autorizacion
         // vigente — ver el `useEffect` de `necesitaAutorizarDatos` mas abajo).
         if (aceptaAutorizacionDatos) {
+          // MENORES (correccion vuelta 33): marca el POST "en vuelo" ANTES del fetch — el
+          // `useEffect` de `necesitaAutorizarDatos` (que este mismo `setUser`/`setNeedsAuth` de
+          // arriba va a disparar) descarta su propio resultado mientras este flag este en true.
+          autorizacionEnVueloRef.current = true;
           try {
             const res = await fetch("/api/autorizacion-datos", {
               method: "POST",
               headers: { "Content-Type": "application/json", ...(await construirAuthHeader()) },
-              body: JSON.stringify({ idioma: language }),
+              body: JSON.stringify({ idioma: language, nombreProveedorMostrado: import.meta.env.VITE_PROVEEDOR_NOMBRE }),
             });
             if (res.ok) {
               setNecesitaAutorizarDatos(false);
@@ -474,6 +495,8 @@ export default function App() {
             }
           } catch (errAuth) {
             console.error("No se pudo registrar la autorización de datos tras el login:", errAuth);
+          } finally {
+            autorizacionEnVueloRef.current = false;
           }
         }
       }
@@ -1364,9 +1387,13 @@ export default function App() {
     // (pagina->fila->correo de CADA pagina con destinatario) para que el servidor guarde la
     // huella HMAC de confirmacion del lote (server/huellaLote.ts), sin mandar nunca el correo en
     // claro mas alla de esta peticion — el servidor firma y nunca lo guarda sin hashear.
+    // GRAVE 3 (correccion vuelta 33, 2026-10-06): se sanitiza el correo AQUI tambien (mismo
+    // `sanitizarCorreo` compartido que usa el servidor en `normalizarCorreo`/`cleanTo`) — asi la
+    // huella que el servidor calcula al confirmar el lote ya coincide con el valor que de verdad
+    // se va a comparar en `/api/send-email`, sin depender solo de que el servidor normalice igual.
     const pares = pages
       .filter((p) => p.matchedRecipient !== null)
-      .map((p) => ({ pagina: p.pageIndex, fila: p.matchedRecipient!.originalRowIndex, correo: p.matchedRecipient!.email }));
+      .map((p) => ({ pagina: p.pageIndex, fila: p.matchedRecipient!.originalRowIndex, correo: sanitizarCorreo(p.matchedRecipient!.email) }));
 
     let loteId: string;
     try {

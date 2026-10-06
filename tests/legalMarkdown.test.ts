@@ -149,3 +149,85 @@ test("markdownAHtml: un comentario HTML en medio del documento tampoco se muestr
   assert.match(html, /<p>Antes\.<\/p>/);
   assert.match(html, /<p>Después\.<\/p>/);
 });
+
+// ── Medio 1 (correccion vuelta 33, 2026-10-06): tablas GFM y codigo en linea ─────────────────────
+
+test("markdownAHtml: codigo en linea con backticks", () => {
+  assert.equal(
+    markdownAHtml("Corre `npm run build:server` antes de desplegar."),
+    "<p>Corre <code>npm run build:server</code> antes de desplegar.</p>"
+  );
+});
+
+test("markdownAHtml: codigo en linea escapa < > & (nunca HTML crudo dentro de <code>)", () => {
+  const html = markdownAHtml("Usa `<script>&alert()</script>`.");
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /<code>&lt;script&gt;&amp;alert\(\)&lt;\/script&gt;<\/code>/);
+});
+
+test("markdownAHtml: dentro de codigo en linea, ** y [..](..) NO se interpretan (se tratan como texto literal)", () => {
+  const html = markdownAHtml("`**no es negrita** [no es link](http://x.com)`");
+  assert.doesNotMatch(html, /<strong>/);
+  assert.doesNotMatch(html, /<a /);
+  assert.match(html, /<code>\*\*no es negrita\*\* \[no es link\]\(http:\/\/x\.com\)<\/code>/);
+});
+
+test("markdownAHtml: negrita y enlaces SIGUEN funcionando fuera de un segmento de codigo", () => {
+  const html = markdownAHtml("Ver `server.ts` y **esto es importante**, o visita [el sitio](https://x.com).");
+  assert.match(html, /<code>server\.ts<\/code>/);
+  assert.match(html, /<strong>esto es importante<\/strong>/);
+  assert.match(html, /<a href="https:\/\/x\.com"/);
+});
+
+test("markdownAHtml: tabla GFM basica (encabezado + separador + una fila)", () => {
+  const md = ["| Dato | Valor |", "|---|---|", "| Nombre | Ana |"].join("\n");
+  assert.equal(
+    markdownAHtml(md),
+    "<table><thead><tr><th>Dato</th><th>Valor</th></tr></thead><tbody><tr><td>Nombre</td><td>Ana</td></tr></tbody></table>"
+  );
+});
+
+test("markdownAHtml: tabla GFM con varias filas y separador con alineacion (:---:/:--/--:)", () => {
+  const md = ["| A | B |", "|:---:|---:|", "| 1 | 2 |", "| 3 | 4 |"].join("\n");
+  const html = markdownAHtml(md);
+  assert.match(html, /^<table>/);
+  assert.match(html, /<thead><tr><th>A<\/th><th>B<\/th><\/tr><\/thead>/);
+  assert.match(html, /<tr><td>1<\/td><td>2<\/td><\/tr><tr><td>3<\/td><td>4<\/td><\/tr>/);
+});
+
+test("markdownAHtml: celdas de tabla soportan negrita, enlaces y codigo igual que un parrafo", () => {
+  const md = ["| Campo | Valor |", "|---|---|", "| **Correo** | [contacto](mailto:a@b.com) |"].join("\n");
+  const html = markdownAHtml(md);
+  assert.match(html, /<td><strong>Correo<\/strong><\/td>/);
+  assert.match(html, /<a href="mailto:a@b\.com"/);
+});
+
+test("markdownAHtml: una tabla va seguida de un parrafo normal sin mezclarse", () => {
+  const md = ["| A | B |", "|---|---|", "| 1 | 2 |", "", "Texto despues de la tabla."].join("\n");
+  const html = markdownAHtml(md);
+  assert.match(html, /<\/table>\n<p>Texto despues de la tabla\.<\/p>$/);
+});
+
+test("markdownAHtml: una fila con pipes sin la fila separadora NO se interpreta como tabla (queda como parrafo)", () => {
+  const html = markdownAHtml("| no | es tabla |");
+  assert.doesNotMatch(html, /<table>/);
+  assert.match(html, /<p>/);
+});
+
+test("markdownAHtml: documento legal real con tabla — reproduce la seccion 1 de terminos.md", () => {
+  const md = [
+    "## 1. Quién te presta el servicio",
+    "",
+    "| Dato | Valor |",
+    "|---|---|",
+    "| Nombre | Leonardo Antolinez (persona natural) |",
+    "| Correo electrónico | contacto@leonardoantolinez.com |",
+    "",
+    "Esta identificación es la misma que aparece en la Política de Privacidad.",
+  ].join("\n");
+  const html = markdownAHtml(md);
+  assert.match(html, /^<h2>1\. Quién te presta el servicio<\/h2>/);
+  assert.match(html, /<table><thead><tr><th>Dato<\/th><th>Valor<\/th><\/tr><\/thead>/);
+  assert.match(html, /<td>contacto@leonardoantolinez\.com<\/td>/);
+  assert.match(html, /<p>Esta identificación es la misma que aparece en la Política de Privacidad\.<\/p>$/);
+});

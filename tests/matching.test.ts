@@ -114,6 +114,27 @@ test("assignRecipientsOneToOne: nombre UNKNOWN -> null, nunca intenta emparejar"
   assert.equal(matches.get(0), null);
 });
 
+test("assignRecipientsOneToOne: empate EXACTO de score -> gana el originalRowIndex menor (desempate deterministico)", () => {
+  // "Juan A" y "Juan B" contra "Juan X": tras filtrar palabras de una sola letra, el unico token
+  // fuerte compartido es "juan" en ambos casos -> subsetScore=1.0 para los dos candidatos, empate
+  // exacto. El sort de candidatos desempata por `originalRowIndex` ascendente.
+  const recipients = [recipient("Juan A", "a@x.com", 5), recipient("Juan B", "b@x.com", 2)];
+  const { matches } = assignRecipientsOneToOne([{ pageIndex: 1, extractedName: "Juan X" }], recipients);
+  assert.ok(matches.get(1) !== null, "debe haber un candidato asignado (score sobre el umbral)");
+  assert.equal(matches.get(1)?.recipient.originalRowIndex, 2, "con empate exacto, debe ganar el menor originalRowIndex (2, no 5)");
+});
+
+test("assignRecipientsOneToOne: el homonimo deja la pagina RESUELTA — no cae despues a un candidato mas debil", () => {
+  const recipients = [
+    recipient("Juan Perez", "juan1@x.com", 0),
+    recipient("Juan Perez", "juan2@x.com", 1),
+    recipient("Juan Pere", "juanpere@x.com", 9), // candidato valido pero mas debil; NUNCA debe usarse
+  ];
+  const { matches, needsReview } = assignRecipientsOneToOne([{ pageIndex: 7, extractedName: "Juan Perez" }], recipients);
+  assert.equal(needsReview.has(7), true);
+  assert.equal(matches.get(7), null, "la pagina queda resuelta en needsReview, nunca cae al candidato mas debil 'Juan Pere'");
+});
+
 test("assignRecipientsOneToOne: si el mejor candidato de una pagina ya fue tomado, intenta con el siguiente mejor disponible", () => {
   // Dos paginas con nombres MUY parecidos a "Juan Perez" (candidato top de ambas), pero solo una
   // fila con ese nombre exacto; la otra pagina debe caer en su segundo mejor candidato real.

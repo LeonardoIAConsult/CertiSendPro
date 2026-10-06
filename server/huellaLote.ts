@@ -8,6 +8,7 @@
 // tocar ese archivo (otro agente trabaja ahi en paralelo, vuelta 30) — se replica aqui el mismo
 // algoritmo (HMAC-SHA256, utf8).
 import { createHmac } from "crypto";
+import { sanitizarCorreo } from "../shared/correo";
 
 export interface ParConfirmacion {
   pagina: number;
@@ -15,10 +16,15 @@ export interface ParConfirmacion {
   correo: string;
 }
 
-/** Normaliza un correo (lowercase + trim) para que la misma persona con mayusculas/espacios
- * distintos produzca siempre la misma huella. */
+/** GRAVE 3 (correccion vuelta 33, 2026-10-06): delega en el sanitizador UNICO compartido
+ * (`shared/correo.ts`) para que la huella calculada aqui (al confirmar el lote en
+ * `/api/lote/iniciar`) use EXACTAMENTE la misma normalizacion que `cleanTo` en `server.ts` (al
+ * enviar de verdad en `/api/send-email`) — antes esta funcion solo hacia `.trim().toLowerCase()`,
+ * sin quitar caracteres invisibles ni espacios internos, y esa diferencia producia un 409
+ * permanente con correos que los traian. Se mantiene el nombre/firma para no tocar a sus
+ * llamadores (`cadenaCanonicaPar` en este archivo). */
 export function normalizarCorreo(correo: string): string {
-  return correo.trim().toLowerCase();
+  return sanitizarCorreo(correo);
 }
 
 /** Cadena canonica de un par antes de firmar: `pagina|fila|correoNormalizado`. */
@@ -110,4 +116,28 @@ export function validarSecretoYPares(
 export function parConfirmado(par: ParConfirmacion, huellasGuardadas: string[] | null, secreto: string): boolean {
   if (!huellasGuardadas) return false;
   return huellasGuardadas.includes(huellaPar(par, secreto));
+}
+
+/** Decision COMPLETA de `/api/send-email` sobre la huella (correccion vuelta 33, 2026-10-06):
+ * antes vivia repartida en dos `if` sueltos dentro de la ruta de `server.ts` (503 sin secreto,
+ * 409 sin coincidencia) — se extrae aqui como funcion PURA con dependencias inyectadas
+ * (`secreto`/`huellasGuardadas`, nunca lee `process.env` ni Firestore) para poder probar el
+ * contrato exacto (que status/mensaje corresponde a cada caso) sin montar Express, y para que
+ * `server.ts` quede como un unico punto de llamada en vez de reimplementar la logica. */
+export function decidirEnvioConHuella(
+  par: ParConfirmacion,
+  huellasGuardadas: string[] | null,
+  secreto: string | undefined
+): { ok: true } | { ok: false; httpStatus: 503 | 409; error: string } {
+  if (!secreto || !secreto.trim()) {
+    return { ok: false, httpStatus: 503, error: "Configuración incompleta. Intenta más tarde." };
+  }
+  if (!parConfirmado(par, huellasGuardadas, secreto)) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      error: "Este envío no coincide con la confirmación del lote. Vuelve a iniciar el envío masivo.",
+    };
+  }
+  return { ok: true };
 }

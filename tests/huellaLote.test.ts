@@ -12,6 +12,7 @@ import {
   huellaConfigurada,
   validarSecretoYPares,
   parConfirmado,
+  decidirEnvioConHuella,
   type ParConfirmacion,
 } from "../server/huellaLote";
 
@@ -183,4 +184,78 @@ test("parConfirmado: mismo par pero con OTRO secreto -> false", () => {
   const par: ParConfirmacion = { pagina: 1, fila: 2, correo: "ana@correo.com" };
   const huellas = huellasLote([par], SECRETO);
   assert.equal(parConfirmado(par, huellas, "otro-secreto"), false);
+});
+
+// ── GRAVE 3 (correccion vuelta 33, 2026-10-06): normalizarCorreo delega en el sanitizador UNICO
+// compartido (shared/correo.ts) — correos con caracteres invisibles o espacios internos deben
+// normalizar IGUAL que un correo ya limpio, para que la huella calculada en /api/lote/iniciar
+// coincida con la que /api/send-email recalcula sobre el mismo correo ya saneado por `cleanTo`. ──
+
+test("normalizarCorreo: caracter de ancho cero (\\u200B) se quita, igual que un correo limpio", () => {
+  assert.equal(normalizarCorreo("ana​@x.com"), "ana@x.com");
+});
+
+test("normalizarCorreo: espacio INTERNO se quita (no solo los extremos)", () => {
+  assert.equal(normalizarCorreo("ana @x.com"), "ana@x.com");
+});
+
+test("normalizarCorreo: marca de direccion LRM (\\u200E) al final se quita", () => {
+  assert.equal(normalizarCorreo("ana@x.com‎"), "ana@x.com");
+});
+
+test("normalizarCorreo: mayusculas + espacio al final -> igual que el correo limpio", () => {
+  assert.equal(normalizarCorreo("Ana@X.com "), "ana@x.com");
+});
+
+test("normalizarCorreo: las 4 variantes de GRAVE 3 normalizan TODAS al mismo valor (coinciden entre si)", () => {
+  const variantes = ["ana​@x.com", "ana @x.com", "ana@x.com‎", "Ana@X.com "];
+  const normalizados = variantes.map(normalizarCorreo);
+  assert.deepEqual(new Set(normalizados), new Set(["ana@x.com"]));
+});
+
+test("GRAVE 3: una huella calculada con un correo SUCIO coincide con la verificacion sobre el correo LIMPIO equivalente", () => {
+  // Simula el bug exacto: /api/lote/iniciar recibe el correo tal como viene de la hoja (sucio);
+  // /api/send-email recalcula con el correo ya saneado por cleanTo (limpio). Con el sanitizador
+  // compartido, la huella debe coincidir en ambos sentidos.
+  const parSucio: ParConfirmacion = { pagina: 1, fila: 2, correo: "Ana @X.com‎" };
+  const huellas = huellasLote([parSucio], SECRETO);
+  const parLimpio: ParConfirmacion = { pagina: 1, fila: 2, correo: "ana@x.com" };
+  assert.equal(parConfirmado(parLimpio, huellas, SECRETO), true);
+});
+
+// ── decidirEnvioConHuella (correccion vuelta 33, 2026-10-06): decision COMPLETA de /api/send-email
+// sobre la huella, extraida de server.ts como funcion PURA (dos `if` sueltos antes). ──────────────
+
+const PAR_PRUEBA: ParConfirmacion = { pagina: 1, fila: 2, correo: "ana@correo.com" };
+
+test("decidirEnvioConHuella: sin secreto -> 503, nunca llega a comparar la huella", () => {
+  const r = decidirEnvioConHuella(PAR_PRUEBA, null, undefined);
+  assert.deepEqual(r, { ok: false, httpStatus: 503, error: "Configuración incompleta. Intenta más tarde." });
+});
+
+test("decidirEnvioConHuella: secreto vacio/solo espacios -> 503", () => {
+  const r = decidirEnvioConHuella(PAR_PRUEBA, null, "   ");
+  assert.equal(r.ok, false);
+  assert.equal((r as any).httpStatus, 503);
+});
+
+test("decidirEnvioConHuella: con secreto pero la huella no coincide -> 409", () => {
+  const huellas = huellasLote([{ pagina: 9, fila: 9, correo: "otro@x.com" }], SECRETO);
+  const r = decidirEnvioConHuella(PAR_PRUEBA, huellas, SECRETO);
+  assert.deepEqual(r, {
+    ok: false,
+    httpStatus: 409,
+    error: "Este envío no coincide con la confirmación del lote. Vuelve a iniciar el envío masivo.",
+  });
+});
+
+test("decidirEnvioConHuella: con secreto y huella que SI coincide -> ok", () => {
+  const huellas = huellasLote([PAR_PRUEBA], SECRETO);
+  assert.deepEqual(decidirEnvioConHuella(PAR_PRUEBA, huellas, SECRETO), { ok: true });
+});
+
+test("decidirEnvioConHuella: mutacion de control — sin huellas guardadas (null) -> 409, nunca 'todo vale'", () => {
+  const r = decidirEnvioConHuella(PAR_PRUEBA, null, SECRETO);
+  assert.equal(r.ok, false);
+  assert.equal((r as any).httpStatus, 409);
 });

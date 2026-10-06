@@ -1162,6 +1162,59 @@ export async function obtenerAutorizacionDatos(uid: string): Promise<Autorizacio
   return { version: datos.version, fecha: datos.fecha, idioma: datos.idioma, texto: datos.texto };
 }
 
+/** Decision de `POST /api/lote/iniciar` sobre la autorizacion de datos (correccion vuelta 33,
+ * 2026-10-06): antes vivia como un `if` suelto dentro de la ruta de `server.ts`. Se extrae aqui
+ * como funcion PURA (sin Firestore, recibe la autorizacion YA leida) para poder probar el
+ * contrato exacto (403 + `motivo:"autorizacion"` cuando falta o la version no es la vigente) y
+ * para que `server.ts` tenga un unico punto de llamada en vez de reimplementar la comparacion. */
+export function decidirAutorizacionLote(
+  autorizacion: AutorizacionDatos | null,
+  versionVigente: string
+): { ok: true } | { ok: false; httpStatus: 403; error: string; motivo: "autorizacion" } {
+  if (!autorizacion || autorizacion.version !== versionVigente) {
+    return {
+      ok: false,
+      httpStatus: 403,
+      error: "Debes autorizar el tratamiento de tus datos personales antes de enviar.",
+      motivo: "autorizacion",
+    };
+  }
+  return { ok: true };
+}
+
+const MARCADOR_PROVEEDOR_PENDIENTE = "[PENDIENTE]";
+
+/** Medio 2 (correccion vuelta 33, 2026-10-06): decision de `POST /api/autorizacion-datos` sobre
+ * el nombre del proveedor. Dos defensas en una: (1) sin `PROVEEDOR_NOMBRE` real configurado en el
+ * servidor (vacio o todavia `"[PENDIENTE]"`), nunca se guarda una autorizacion cuyo texto cite un
+ * marcador interno — 503, falla cerrado, igual criterio que `huellaConfigurada`/GRAVE 2. (2) el
+ * nombre que el CLIENTE mostro (`VITE_PROVEEDOR_NOMBRE`, interpolado en el texto T11 que el
+ * usuario de verdad vio y acepto) debe coincidir EXACTO con el que el servidor va a escribir en
+ * el registro (`PROVEEDOR_NOMBRE`, variable de entorno de Cloud Run) — si no coincide (build
+ * viejo en cache del navegador, o las dos variables de entorno desincronizadas entre el bundle
+ * del cliente y el runtime del servidor), lo que el usuario aceptó no es exactamente lo que el
+ * servidor registraría: 409, nunca se guarda silenciosamente un texto distinto del aceptado.
+ * PURA: no lee `process.env` ni el body de la peticion, solo compara los dos valores que le
+ * pasan. */
+export function decidirRegistroAutorizacion(
+  nombreMostrado: unknown,
+  proveedorNombre: string
+): { ok: true } | { ok: false; httpStatus: 503 | 409; error: string } {
+  const nombreServidor = proveedorNombre.trim();
+  if (!nombreServidor || nombreServidor === MARCADOR_PROVEEDOR_PENDIENTE) {
+    return { ok: false, httpStatus: 503, error: "Configuración incompleta. Intenta más tarde." };
+  }
+  const nombreCliente = typeof nombreMostrado === "string" ? nombreMostrado.trim() : "";
+  if (nombreCliente !== nombreServidor) {
+    return {
+      ok: false,
+      httpStatus: 409,
+      error: "El texto que aceptaste no coincide con el vigente. Recarga la página e inténtalo de nuevo.",
+    };
+  }
+  return { ok: true };
+}
+
 // ── Registro de confirmacion HMAC de un lote (Tarea 15, requisito A.3) ──────────────────────────
 // docs/legal/terminos-y-condiciones.md §13.3(c) y §12.4 exigen una huella HMAC-SHA256 por cada
 // par pagina-fila-correo confirmado en un lote, SIN guardar la lista ni los correos en claro.

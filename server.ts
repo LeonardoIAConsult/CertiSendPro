@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { randomUUID } from "crypto";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
@@ -26,14 +27,17 @@ import {
   obtenerHuellasLote,
   normalizarIdioma,
   textoAutorizacionDatos,
+  decidirAutorizacionLote,
+  decidirRegistroAutorizacion,
 } from "./server/cuentas";
 import {
   huellasLote,
   huellaConfigurada,
   validarSecretoYPares,
-  parConfirmado,
+  decidirEnvioConHuella,
   type ParConfirmacion,
 } from "./server/huellaLote";
+import { sanitizarCorreo } from "./shared/correo";
 import { trmHoy, copDesdeUsd } from "./server/trm";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete } from "./server/cobroPaquete";
@@ -572,11 +576,12 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       return res.status(400).json({ error: "Faltan parámetros obligatorios del correo o el archivo PDF" });
     }
 
-    // Sanitize email address: strip zero-width characters, invisible whitespace, carriage returns, etc.
-    const cleanTo = String(to || "")
-      .replace(/[\u200B-\u200D\uFEFF\u200E\u200F\u202A-\u202E]/g, "") // Strip invisible Unicode characters
-      .replace(/\s+/g, "") // Remove all whitespace characters (spaces, tabs, newlines)
-      .trim();
+    // GRAVE 3 (correccion vuelta 33, 2026-10-06): sanitizador UNICO compartido con
+    // `normalizarCorreo` (server/huellaLote.ts) y con el cliente al construir `pares`. Antes
+    // este `cleanTo` quitaba caracteres invisibles y espacios internos, pero `normalizarCorreo`
+    // solo hacia `.trim().toLowerCase()`; un correo con un caracter de ancho cero o un espacio
+    // interno producia una huella distinta en cada lado y el envio quedaba en 409 permanente.
+    const cleanTo = sanitizarCorreo(String(to || ""));
 
     // Check if the email address is structurally valid to avoid raw Gmail "Invalid To header" errors.
     // If the user mapped columns incorrectly, this will fail-fast with an informative error.
@@ -602,17 +607,18 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       return res.status(400).json({ error: "Faltan los datos de verificación (pageIndex/fila) del certificado." });
     }
     const secretoHuella = process.env.HUELLA_LOTE_SECRET;
-    if (!secretoHuella) {
-      console.error("[SEND-EMAIL] HUELLA_LOTE_SECRET no configurado; no se envia nada (falla cerrado).");
-      await liberarReserva(loteReservado, req.uid!);
-      loteReservado = null;
-      return res.status(503).json({ error: "Configuración incompleta. Intenta más tarde." });
-    }
     const huellas = await obtenerHuellasLote(loteReservado);
-    if (!parConfirmado({ pagina: pageIndexNum, fila: filaNum, correo: cleanTo }, huellas, secretoHuella)) {
+    // Medio 3/correccion vuelta 33: decision extraida a `decidirEnvioConHuella` (server/huellaLote.ts,
+    // PURA) — unico punto que decide 503 (sin secreto) vs 409 (huella que no coincide), probado por
+    // su cuenta en tests/huellaLote.test.ts.
+    const decisionHuella = decidirEnvioConHuella({ pagina: pageIndexNum, fila: filaNum, correo: cleanTo }, huellas, secretoHuella);
+    if (decisionHuella.ok === false) {
+      if (decisionHuella.httpStatus === 503) {
+        console.error("[SEND-EMAIL] HUELLA_LOTE_SECRET no configurado; no se envia nada (falla cerrado).");
+      }
       await liberarReserva(loteReservado, req.uid!);
       loteReservado = null;
-      return res.status(409).json({ error: "Este envío no coincide con la confirmación del lote. Vuelve a iniciar el envío masivo." });
+      return res.status(decisionHuella.httpStatus).json({ error: decisionHuella.error });
     }
 
     const cleanSubject = String(subject || "")
@@ -1167,6 +1173,14 @@ app.get("/api/autorizacion-datos", exigirAuth, async (req, res) => {
 
 app.post("/api/autorizacion-datos", exigirAuth, async (req, res) => {
   try {
+    // Medio 2 (correccion vuelta 33, 2026-10-06): `decidirRegistroAutorizacion` (server/cuentas.ts,
+    // PURA) exige un PROVEEDOR_NOMBRE real (503 si falta o sigue en "[PENDIENTE]") y que el nombre
+    // que el CLIENTE mostro en el texto T11 coincida EXACTO con el del servidor (409 si no) — antes
+    // se guardaba la autorizacion sin comprobar ninguna de las dos cosas.
+    const decision = decidirRegistroAutorizacion(req.body?.nombreProveedorMostrado, PROVEEDOR_NOMBRE);
+    if (decision.ok === false) {
+      return res.status(decision.httpStatus).json({ error: decision.error });
+    }
     const idioma = normalizarIdioma(req.body?.idioma);
     const texto = textoAutorizacionDatos(idioma, PROVEEDOR_NOMBRE);
     await guardarAutorizacionDatos(req.uid!, AUTORIZACION_DATOS_VERSION, idioma, texto);
@@ -1216,12 +1230,14 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
 
     // B.3 (requisito Ley 1581): sin autorizacion de datos guardada PARA LA VERSION VIGENTE, no se
     // inicia ningun lote. GRAVE 3(d): el `motivo: "autorizacion"` es lo que el cliente usa para
-    // reabrir el modal de autorizacion (en vez de solo mostrar el texto de error).
+    // reabrir el modal de autorizacion (en vez de solo mostrar el texto de error). Decision
+    // extraida a `decidirAutorizacionLote` (server/cuentas.ts, PURA, correccion vuelta 33).
     const autorizacion = await obtenerAutorizacionDatos(req.uid!);
-    if (!autorizacion || autorizacion.version !== AUTORIZACION_DATOS_VERSION) {
-      return res.status(403).json({
-        error: "Debes autorizar el tratamiento de tus datos personales antes de enviar.",
-        motivo: "autorizacion",
+    const decisionAutorizacion = decidirAutorizacionLote(autorizacion, AUTORIZACION_DATOS_VERSION);
+    if (decisionAutorizacion.ok === false) {
+      return res.status(decisionAutorizacion.httpStatus).json({
+        error: decisionAutorizacion.error,
+        motivo: decisionAutorizacion.motivo,
       });
     }
 
@@ -1272,11 +1288,27 @@ const startServer = async () => {
     });
     app.use(vite.middlewares);
   } else {
+    // GRAVE 2 (correccion vuelta 33, 2026-10-06): en Cloud Run (imagen construida con
+    // "npm run build:server", ver Dockerfile) dist/ solo contiene server.cjs — el frontend lo
+    // sirve Firebase Hosting por su cuenta (firebase.json: "**" -> /index.html, "/api/**" -> este
+    // servicio). Si dist/index.html no existe, nunca se intenta `express.static`/`sendFile`
+    // (que lanzarian ENOENT en cada peticion): se responde 404 explicito. Esto solo afecta
+    // peticiones que llegaran DIRECTO a la URL de Cloud Run fuera de /api/** (nunca pasa a traves
+    // de Hosting, que ya resuelve "**" por su cuenta); en un `npm start` local con
+    // NODE_ENV=production y un `npm run build` completo (frontend incluido), dist/index.html SI
+    // existe y el comportamiento es igual que antes.
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+    const frontendDisponible = fs.existsSync(path.join(distPath, "index.html"));
+    if (frontendDisponible) {
+      app.use(express.static(distPath));
+      app.get("*", (req, res) => {
+        res.sendFile(path.join(distPath, "index.html"));
+      });
+    } else {
+      app.get("*", (req, res) => {
+        res.status(404).json({ error: "No encontrado. El frontend se sirve desde Firebase Hosting." });
+      });
+    }
   }
 
   app.listen(PORT, "0.0.0.0", () => {
