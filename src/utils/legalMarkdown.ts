@@ -67,7 +67,14 @@ function convertirLinea(texto: string): string {
  * linea `**negrita**` y `[texto](url)`. Sin tablas, sin codigo, sin HTML crudo — no los pide la
  * orden y los documentos legales no los necesitan. */
 export function markdownAHtml(markdown: string): string {
-  const lineas = markdown.replace(/\r\n/g, "\n").split("\n");
+  // GRAVE 3(a) (correccion vuelta 31, 2026-10-06): los `.plantilla.md` reales (copiados a
+  // src/legal/terminos.md y privacidad.md) empiezan con un comentario HTML de uso interno
+  // (`<!-- PLANTILLA PUBLICABLE generada desde... -->`, nota de mantenimiento para quien edita el
+  // documento, nunca para el usuario final). Sin quitarlo, era la PRIMERA linea visible de la
+  // pagina de Terminos/Privacidad publicada — se quita ANTES de partir en lineas, igual que
+  // cualquier markdown real descarta los comentarios HTML.
+  const sinComentarios = markdown.replace(/<!--[\s\S]*?-->/g, "");
+  const lineas = sinComentarios.replace(/\r\n/g, "\n").split("\n");
   const bloques: string[] = [];
 
   let parrafoActual: string[] = [];

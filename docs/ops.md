@@ -136,7 +136,56 @@ versión del SDK instalado; si falla, crear la política equivalente desde la co
 Monitoring → Alertas → Crear política → condición "Métrica de log" → la métrica
 `certisend_acuse_atrasado` creada arriba → umbral "más de 0 en 15 minutos").
 
-## 6. Qué NO hace este barrido
+## 6. Huella HMAC de lotes (`HUELLA_LOTE_SECRET`)
+
+Corrección GRAVE 2 (vuelta 31, 2026-10-06). `POST /api/lote/iniciar` firma, con esta clave, la
+huella HMAC-SHA256 de cada par página-fila-correo que el usuario confirmó en la pantalla de
+revisión (Tarea 15, requisito A.3); `POST /api/send-email` recalcula esa misma huella antes de
+enviar y rechaza con `409` cualquier envío que no coincida con lo que de verdad se autorizó.
+
+**Sin esta variable, el servidor NUNCA autoriza un lote** (falla cerrado: `503` en las dos rutas,
+`GET /api/health` reporta `huella: false` sin revelar nada más) — nunca se vuelve a crear un lote
+"sin huella" como pasaba antes de esta corrección.
+
+Generar el secreto (una sola vez, nunca un valor corto ni memorable):
+
+```bash
+openssl rand -hex 32
+```
+
+Guardarlo en Secret Manager y conectarlo a Cloud Run (**ninguno de estos comandos se ejecutó al
+escribir esta orden** — mismo guardarraíl que el resto de este documento):
+
+```bash
+echo -n "EL_VALOR_GENERADO_ARRIBA" | gcloud secrets create huella-lote-secret \
+  --project=TU_PROYECTO \
+  --data-file=- \
+  --replication-policy="automatic"
+
+gcloud run services update certisendpro \
+  --project=TU_PROYECTO \
+  --region=TU_REGION \
+  --update-secrets=HUELLA_LOTE_SECRET=huella-lote-secret:latest
+```
+
+Verificar que quedó encendido, sin revelar el valor:
+
+```bash
+curl -s https://TU_SERVICIO.run.app/api/health
+# {"ok":true,"huella":true}
+```
+
+Rotar el secreto (crear una nueva versión, sin publicarla hasta estar listo):
+
+```bash
+echo -n "EL_VALOR_NUEVO" | gcloud secrets versions add huella-lote-secret --project=TU_PROYECTO --data-file=-
+```
+
+**Importante:** rotar este secreto invalida las huellas de cualquier lote YA creado y todavía no
+confirmado por completo (el lote expira solo a las 2 horas, ver `server/cuentas.ts`) — rotar
+coordinado con un momento de bajo tráfico, nunca a mitad de una campaña de envío masivo.
+
+## 7. Qué NO hace este barrido
 
 - No reemplaza el aviso de 20h a Leonardo (`server/notificaciones.ts`,
   `construirAvisoAcuse20hLeonardo`) — ese sigue siendo el canal principal mientras el pago esté

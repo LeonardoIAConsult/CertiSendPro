@@ -125,3 +125,27 @@ test("markdownAHtml: combinado — titulo, parrafo, lista y separador, como un d
   assert.match(html, /<hr \/>/);
   assert.match(html, /Proveedor: \{\{PROVEEDOR_NOMBRE\}\}/);
 });
+
+// ── GRAVE 3(a) (correccion vuelta 31, 2026-10-06): comentarios HTML nunca se muestran ───────────
+
+test("markdownAHtml: un comentario HTML al inicio (nota de mantenimiento de la plantilla) NUNCA se muestra", () => {
+  const md = [
+    "<!-- PLANTILLA PUBLICABLE generada desde terminos-y-condiciones.md v1.3 (2026-10-05). -->",
+    "",
+    "# Términos y Condiciones",
+    "",
+    "Texto real del documento.",
+  ].join("\n");
+  const html = markdownAHtml(md);
+  assert.doesNotMatch(html, /PLANTILLA PUBLICABLE/);
+  assert.match(html, /^<h1>Términos y Condiciones<\/h1>/);
+  assert.match(html, /<p>Texto real del documento\.<\/p>/);
+});
+
+test("markdownAHtml: un comentario HTML en medio del documento tampoco se muestra", () => {
+  const md = ["Antes.", "", "<!-- nota interna -->", "", "Después."].join("\n");
+  const html = markdownAHtml(md);
+  assert.doesNotMatch(html, /nota interna/);
+  assert.match(html, /<p>Antes\.<\/p>/);
+  assert.match(html, /<p>Después\.<\/p>/);
+});

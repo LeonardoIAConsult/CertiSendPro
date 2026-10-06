@@ -21,6 +21,7 @@ import {
   construirAvisoVentaLeonardo,
   construirAvisoReembolsoLeonardo,
   construirAvisoBloqueoProveedorLeonardo,
+  construirAvisoPagoDobleLeonardo,
   tienePlaceholderPendiente,
   type DatosCorreo,
   type DatosConfirmacionCompra,
@@ -259,6 +260,39 @@ export async function avisarReembolsoPaquete(
   } catch (error: any) {
     // El aviso a Leonardo es best-effort: la reversion (lo que de verdad importa) YA tuvo exito.
     console.error(`[NOTIFICACIONES] fallo al avisar el reembolso a Leonardo (la reversión SÍ quedó). paymentId=${datos.paymentId}:`, error?.message || error);
+  }
+}
+
+export interface AvisarPagoDobleDeps {
+  enviarCorreo(datos: DatosCorreo): Promise<boolean>;
+}
+
+const depsAvisarPagoDobleReales: AvisarPagoDobleDeps = { enviarCorreo: enviarCorreoReal };
+
+/**
+ * Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): avisa a Leonardo
+ * (log con marcador fijo `ALERTA_REEMBOLSO_REQUERIDO` + correo) cuando el webhook detecto un pago
+ * aprobado que NO se activo para no pisar un Paquete vigente de otro pago (ver
+ * `server/cuentas.ts` `activarPaqueteSiNoProcesadoTx`, resultado "requiere_reembolso"). Se llama
+ * EXACTAMENTE una vez por `paymentId`: ese resultado solo ocurre la PRIMERA vez que se ve ese id
+ * (una entrega repetida del mismo aviso de Mercado Pago encuentra `pagosProcesados/{id}` ya
+ * existente y `activarPaqueteSiNoProcesadoTx` devuelve "repetido" antes de llegar aqui). Nunca
+ * lanza: el log (que SI debe quedar, para la alerta de Cloud Logging) va primero y por separado
+ * del correo, que es best-effort.
+ */
+export async function avisarPagoDobleRequiereReembolso(
+  datos: { uid: string; paymentId: string; cop: number },
+  deps: AvisarPagoDobleDeps = depsAvisarPagoDobleReales
+): Promise<void> {
+  console.error("ALERTA_REEMBOLSO_REQUERIDO", { paymentId: datos.paymentId, uid: datos.uid, cop: datos.cop });
+  try {
+    const { asunto, texto } = construirAvisoPagoDobleLeonardo(datos);
+    await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto });
+  } catch (error: any) {
+    console.error(
+      `[NOTIFICACIONES] fallo al avisar el pago doble a Leonardo (el log ALERTA_REEMBOLSO_REQUERIDO ya quedo). paymentId=${datos.paymentId}:`,
+      error?.message || error
+    );
   }
 }
 

@@ -69,10 +69,13 @@ test("revertirPagoSiNoRevertidoTx: una segunda reversion del MISMO pago no hace 
 
 test("revertirPagoSiNoRevertidoTx: reembolso de un pago que YA NO es el activo no toca la cuenta", async () => {
   const db = new FirestoreFalso();
-  // Compra vieja (pago-1), luego una compra NUEVA (pago-2) que reemplaza el ultimoPago activo —
-  // mismo patron de "no se acumulan los sobrantes" de la Tarea 6: activar de nuevo REEMPLAZA la
-  // cuenta entera (tx.set), asi que pago-1 deja de ser el `ultimoPago`.
+  // Compra vieja (pago-1) que se AGOTA (saldo 0) antes de la compra NUEVA (pago-2): Medio 4
+  // (activarPaqueteSiNoProcesadoTx, correccion vuelta 31) solo bloquea un pago nuevo cuando el
+  // Paquete anterior SIGUE vigente con saldo > 0 — agotado, pago-2 legitimamente reemplaza el
+  // `ultimoPago` activo (mismo patron de "no se acumulan los sobrantes" de la Tarea 6: activar de
+  // nuevo REEMPLAZA la cuenta entera via tx.set).
   await activar(db, "uid-1", "pago-1");
+  db.seed("cuentas/uid-1", { ...(db.leer("cuentas/uid-1") as Cuenta), enviosRestantes: 0 });
   await activar(db, "uid-1", "pago-2");
 
   const antes = db.leer("cuentas/uid-1") as Cuenta;
@@ -86,6 +89,53 @@ test("revertirPagoSiNoRevertidoTx: reembolso de un pago que YA NO es el activo n
 
   const pago1 = db.leer("pagosProcesados/pago-1");
   assert.equal(pago1?.revertido, true, "el evento queda marcado igual, para no repetir el aviso a Leonardo");
+});
+
+// ── Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06) ───────────────────
+// activarPaqueteSiNoProcesadoTx NUNCA pisa un Paquete vigente con saldo activado por OTRO pago.
+
+test("activarPaqueteSiNoProcesadoTx (Medio 4): segundo pago con Paquete vigente+saldo de OTRO pago -> requiere_reembolso, cuenta intacta", async () => {
+  const db = new FirestoreFalso();
+  const r1 = await activar(db, "uid-1", "pago-1");
+  assert.equal(r1, "activado");
+  const antes = db.leer("cuentas/uid-1") as Cuenta;
+
+  const r2 = await activar(db, "uid-1", "pago-2");
+  assert.equal(r2, "requiere_reembolso");
+
+  const despues = db.leer("cuentas/uid-1") as Cuenta;
+  assert.deepEqual(despues, antes, "la cuenta no debe cambiar ni un campo");
+
+  const pago2 = db.leer("pagosProcesados/pago-2");
+  assert.equal(pago2?.requiereReembolso, true);
+  assert.equal(pago2?.vence, null);
+});
+
+test("activarPaqueteSiNoProcesadoTx (Medio 4): Paquete AGOTADO (saldo 0) de otro pago -> el nuevo SI activa (no hay nada vigente que proteger)", async () => {
+  const db = new FirestoreFalso();
+  await activar(db, "uid-1", "pago-1");
+  db.seed("cuentas/uid-1", { ...(db.leer("cuentas/uid-1") as Cuenta), enviosRestantes: 0 });
+
+  const r2 = await activar(db, "uid-1", "pago-2");
+  assert.equal(r2, "activado");
+  const cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.ultimoPago!.id, "pago-2");
+  assert.equal(cuenta.enviosRestantes, 150);
+});
+
+test("activarPaqueteSiNoProcesadoTx (Medio 4): Paquete VENCIDO de otro pago -> el nuevo SI activa (no hay nada vigente que proteger)", async () => {
+  const db = new FirestoreFalso();
+  await activar(db, "uid-1", "pago-1");
+  const { Timestamp: TS } = await import("firebase-admin/firestore");
+  db.seed("cuentas/uid-1", {
+    ...(db.leer("cuentas/uid-1") as Cuenta),
+    vence: TS.fromDate(new Date("2000-01-01T00:00:00.000Z")),
+  });
+
+  const r2 = await activar(db, "uid-1", "pago-2");
+  assert.equal(r2, "activado");
+  const cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.ultimoPago!.id, "pago-2");
 });
 
 // ── Pago que nunca activo nada aqui (id inventado / nunca approved) -> ignorado ────────────────

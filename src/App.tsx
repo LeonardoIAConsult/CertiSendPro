@@ -40,8 +40,12 @@ import {
   fetchSpreadsheetTabs,
   fetchSpreadsheetRecipients
 } from "./utils/googleSheets";
-import { findBestRecipient, assignRecipientsOneToOne } from "./utils/matching";
-import { reemplazarPlaceholdersProveedor } from "./utils/legalMarkdown";
+import {
+  findBestRecipient,
+  sincronizarEmparejamiento as sincronizarEmparejamientoPuro,
+  paginaConFilaAsignada,
+} from "./utils/matching";
+import { textoAutorizacionDatos as textoAutorizacionDatosCompartido } from "../shared/textosCasillas";
 import JSZip from "jszip";
 import LandingPage from "./components/LandingPage";
 import LegalPage from "./components/LegalPage";
@@ -311,11 +315,17 @@ export default function App() {
         const authHeader = await construirAuthHeader();
         if (!authHeader.Authorization) return;
         const res = await fetch("/api/autorizacion-datos", { headers: authHeader });
-        if (!res.ok) return;
+        if (!res.ok) {
+          // MENORES (correccion vuelta 31, 2026-10-06): si el GET falla (red, servidor caido),
+          // nunca se asume "ya autorizo" — se trata como NO autorizado y se muestra el modal.
+          setNecesitaAutorizarDatos(true);
+          return;
+        }
         const data = await res.json();
         setNecesitaAutorizarDatos(data.autorizado !== true);
       } catch (err) {
         console.error("No se pudo consultar la autorización de datos:", err);
+        setNecesitaAutorizarDatos(true); // MENORES: fallo de red -> tratado como NO autorizado.
       }
     })();
   }, [needsAuth, user]);
@@ -327,6 +337,7 @@ export default function App() {
       const res = await fetch("/api/autorizacion-datos", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(await construirAuthHeader()) },
+        body: JSON.stringify({ idioma: language }),
       });
       if (!res.ok) {
         triggerBanner("error", "No se pudo guardar tu autorización. Intenta de nuevo.");
@@ -440,6 +451,31 @@ export default function App() {
         setIsGmailActive(true);
         addLog(`Acceso permitido por descriptor: ${result.user.email}`, "success");
         triggerBanner("success", `¡Sesión iniciada con éxito como ${result.user.displayName}!`);
+
+        // GRAVE 3(c) (correccion vuelta 31, 2026-10-06): la casilla de autorizacion de datos
+        // (T11) vive ANTES del boton "Entrar con Google" en la landing (LandingPage.tsx) — el
+        // boton queda deshabilitado hasta marcarla, asi que llegar aqui YA implica que se acepto.
+        // Se registra de inmediato (sin esperar un segundo clic en el modal posterior, que sigue
+        // existiendo solo para usuarios YA logueados antes de esta tarea, sin autorizacion
+        // vigente — ver el `useEffect` de `necesitaAutorizarDatos` mas abajo).
+        if (aceptaAutorizacionDatos) {
+          try {
+            const res = await fetch("/api/autorizacion-datos", {
+              method: "POST",
+              headers: { "Content-Type": "application/json", ...(await construirAuthHeader()) },
+              body: JSON.stringify({ idioma: language }),
+            });
+            if (res.ok) {
+              setNecesitaAutorizarDatos(false);
+              setAceptaAutorizacionDatos(false);
+              addLog("Autorización de tratamiento de datos registrada.", "success");
+            } else {
+              console.error("No se pudo registrar la autorización de datos tras el login (status no OK).");
+            }
+          } catch (errAuth) {
+            console.error("No se pudo registrar la autorización de datos tras el login:", errAuth);
+          }
+        }
       }
     } catch (err: any) {
       const isPopupClosed = 
@@ -844,54 +880,37 @@ export default function App() {
   // Punto UNICO que decide el `matchedRecipient` final de un grupo de paginas: antes, cada sitio
   // de esta app llamaba a `findBestRecipient` pagina por pagina de forma INDEPENDIENTE, asi que
   // nunca se garantizaba asignacion uno-a-uno (un destinatario podia terminar emparejado con DOS
-  // paginas) y nunca se detectaban homonimos (dos filas con el mismo nombre en la hoja). Esta
-  // funcion usa `assignRecipientsOneToOne` sobre TODAS las paginas con nombre extraido a la vez:
-  // si el mejor candidato de una pagina es un homonimo, esa pagina NUNCA se asigna a ciegas (queda
-  // sin `matchedRecipient`, a la espera de `handleManualPairing`). `findBestRecipient` sigue
-  // usandose tal cual para la vista "en vivo" de los bucles de escaneo (feedback de progreso
-  // mientras la IA todavia esta corriendo); esta funcion es la que FIJA el resultado final.
+  // paginas) y nunca se detectaban homonimos (dos filas con el mismo nombre en la hoja).
+  // `findBestRecipient` sigue usandose tal cual para la vista "en vivo" de los bucles de escaneo
+  // (feedback de progreso mientras la IA todavia esta corriendo); esta funcion es la que FIJA el
+  // resultado final.
+  //
+  // Medio 2 (correccion vuelta 31, 2026-10-06): la logica PURA (sin `addLog`, sin React) se
+  // extrajo a `src/utils/matching.ts` (`sincronizarEmparejamiento`), probada con node:test (rama
+  // de homonimos, desempate, e invariante "dos paginas nunca quedan con la misma fila"). Este
+  // envoltorio solo traduce los `eventos` que la funcion pura devuelve a `addLog`, para no
+  // duplicar la logica de asignacion aqui.
   const sincronizarEmparejamiento = (
     paginas: CertificatePage[],
     destinatarios: Recipient[]
   ): { pages: CertificatePage[]; matchedCount: number; needsReviewCount: number } => {
-    const porEmparejar = paginas
-      .filter((p) => p.extractedName && p.extractedName !== "UNKNOWN")
-      .map((p) => ({ pageIndex: p.pageIndex, extractedName: p.extractedName }));
-    const { matches, needsReview } = assignRecipientsOneToOne(porEmparejar, destinatarios);
-
-    let matchedCount = 0;
-    let needsReviewCount = 0;
-    const pagesResultado = paginas.map((p) => {
-      if (!p.extractedName || p.extractedName === "UNKNOWN") return p;
-
-      if (needsReview.has(p.pageIndex)) {
-        needsReviewCount++;
+    const resultado = sincronizarEmparejamientoPuro(paginas, destinatarios);
+    for (const evento of resultado.eventos) {
+      if (evento.tipo === "homonimo") {
         addLog(
-          `[Revisión manual] Página ${p.pageIndex}: "${p.extractedName}" coincide con más de un destinatario con el mismo nombre en la hoja (homónimos); asígnalo manualmente.`,
+          `[Revisión manual] Página ${evento.pageIndex}: "${evento.extractedName}" coincide con más de un destinatario con el mismo nombre en la hoja (homónimos); asígnalo manualmente.`,
           "warning"
         );
-        return { ...p, matchedRecipient: null, status: "success" as const, errorMessage: null };
-      }
-
-      const resultadoPagina = matches.get(p.pageIndex) ?? null;
-      if (resultadoPagina) {
-        matchedCount++;
+      } else if (evento.tipo === "coincidencia") {
         addLog(
-          `[Coincidencia] Página ${p.pageIndex}: "${p.extractedName}" -> ${resultadoPagina.recipient.name} (${Math.round(resultadoPagina.score * 100)}% similitud)`,
+          `[Coincidencia] Página ${evento.pageIndex}: "${evento.extractedName}" -> ${evento.recipientName} (${Math.round(evento.score * 100)}% similitud)`,
           "success"
         );
       } else {
-        addLog(`[Sin coincidencia] Página ${p.pageIndex}: "${p.extractedName}" no tiene un destinatario compatible en la hoja.`, "warning");
+        addLog(`[Sin coincidencia] Página ${evento.pageIndex}: "${evento.extractedName}" no tiene un destinatario compatible en la hoja.`, "warning");
       }
-      return {
-        ...p,
-        matchedRecipient: resultadoPagina ? resultadoPagina.recipient : null,
-        status: "success" as const,
-        errorMessage: null,
-      };
-    });
-
-    return { pages: pagesResultado, matchedCount, needsReviewCount };
+    }
+    return { pages: resultado.pages, matchedCount: resultado.matchedCount, needsReviewCount: resultado.needsReviewCount };
   };
 
   // Trigger Gemini AI scanning on each split page to extract recipient name
@@ -1137,7 +1156,24 @@ export default function App() {
   // por nombre — con homonimos, `recipients.find(r => r.name === recipientName)` siempre
   // devolvia la PRIMERA fila con ese nombre, nunca la que el usuario elegia realmente en el
   // selector (ver las opciones del <select>, que ahora mandan el `originalRowIndex` como valor).
+  // Medio 2 (correccion vuelta 31, 2026-10-06): el emparejamiento MANUAL avisa e impide asignar
+  // una fila que ya esta asignada a OTRA pagina — antes podia dejar dos paginas con el mismo
+  // destinatario (exactamente el bug que `assignRecipientsOneToOne`/`sincronizarEmparejamiento`
+  // ya evitan en el emparejamiento automatico, ver src/utils/matching.ts). `paginaConFilaAsignada`
+  // (PURA, con pruebas en tests/matching.test.ts) decide si hay conflicto.
   const handleManualPairing = (pageIndex: number, recipientRowIndex: string) => {
+    if (recipientRowIndex !== "__none__") {
+      const rowIndex = Number(recipientRowIndex);
+      const otraPagina = paginaConFilaAsignada(pages, pageIndex, rowIndex);
+      if (otraPagina) {
+        const matched = recipients.find((r) => r.originalRowIndex === rowIndex) || null;
+        const mensaje = `No se puede asignar: "${matched?.name ?? "este destinatario"}" ya está asignado a la página ${otraPagina.pageIndex}. Desasócialo primero.`;
+        addLog(`[HOLA ${pageIndex}] ${mensaje}`, "error");
+        triggerBanner("error", mensaje);
+        return;
+      }
+    }
+
     const updated = pages.map((p) => {
       if (p.pageIndex === pageIndex) {
         if (recipientRowIndex === "__none__") {
@@ -1355,6 +1391,12 @@ export default function App() {
           : formatearMotivoRechazoLote(dataLote.motivo, dataLote.enviosRestantes, matchedCount, language);
         addLog(mensaje, "error");
         triggerBanner("error", mensaje);
+        // GRAVE 3(d) (correccion vuelta 31, 2026-10-06): un 403 con `motivo: "autorizacion"`
+        // reabre el modal de autorizacion de datos (en vez de solo mostrar el texto de error) —
+        // cubre tambien al usuario YA logueado antes de esta tarea, sin autorizacion vigente.
+        if (resLote.status === 403 && dataLote.motivo === "autorizacion") {
+          setNecesitaAutorizarDatos(true);
+        }
         setIsDelivering(false);
         return;
       }
@@ -1398,6 +1440,10 @@ export default function App() {
             pdfBase64: page.base64 || undefined,
             sessionId: sessionIdRef.current || sessionId || undefined,
             pageIndex: page.pageIndex,
+            // Medio 3 (correccion vuelta 31, 2026-10-06): la fila del destinatario que el servidor
+            // usa para recalcular la huella HMAC y comprobar que este envio es uno de los que se
+            // confirmaron al iniciar el lote (ver /api/lote/iniciar, server.ts).
+            fila: recipient.originalRowIndex,
             filename: filename,
             loteId,
           }),
@@ -1523,6 +1569,15 @@ export default function App() {
     );
   }
 
+  // Texto T11 canonico (docs/legal/textos-checkout.md v1.3), compartido con el servidor
+  // (`shared/textosCasillas.ts`, correccion GRAVE 3(c)/vuelta 31: antes vivia duplicado aqui con
+  // `reemplazarPlaceholdersProveedor`, y el servidor nunca reconstruia el mismo texto). El nombre
+  // legal del proveedor NUNCA se hardcodea en este archivo versionado: se sustituye con
+  // `VITE_PROVEEDOR_NOMBRE` del build; sin esa variable, queda "[dato pendiente]" (nunca se
+  // inventa). Se calcula ANTES del `if (needsAuth)` de abajo porque GRAVE 3(c) exige mostrar la
+  // casilla de autorizacion EN LA LANDING, antes del boton de login.
+  const textoAutorizacionDatos = textoAutorizacionDatosCompartido(language, import.meta.env.VITE_PROVEEDOR_NOMBRE);
+
   if (needsAuth) {
     return (
       <>
@@ -1536,27 +1591,15 @@ export default function App() {
           onViewPrivacy={handleNavigateToPrivacidad}
           onViewTerminos={handleNavigateToTerminos}
           isLoggingIn={isLoggingIn}
+          textoAutorizacionDatos={textoAutorizacionDatos}
+          aceptaAutorizacionDatos={aceptaAutorizacionDatos}
+          onToggleAceptaAutorizacionDatos={setAceptaAutorizacionDatos}
         />
       </>
     );
   }
 
   const isDark = theme === "dark";
-
-  // Texto T11 canonico (docs/legal/textos-checkout.md v1.3). El nombre legal del proveedor NUNCA
-  // se hardcodea en este archivo versionado (regla del Brain, 2026-10-06): se sustituye con
-  // `VITE_PROVEEDOR_NOMBRE` del build, igual patron que LegalPage.tsx; sin esa variable, queda
-  // "[dato pendiente]" (nunca se inventa).
-  const textoAutorizacionDatos =
-    language === "en"
-      ? reemplazarPlaceholdersProveedor(
-          "I authorize {{PROVEEDOR_NOMBRE}} (CertiSend Pro) to process my personal data for the purposes described in the Privacy Policy, including its transfer to providers outside Colombia (Google, Mercado Pago and, if I use it, Canva).",
-          { nombre: import.meta.env.VITE_PROVEEDOR_NOMBRE }
-        )
-      : reemplazarPlaceholdersProveedor(
-          "Autorizo a {{PROVEEDOR_NOMBRE}} (CertiSend Pro) a tratar mis datos personales para las finalidades de la Política de Privacidad, incluida su transferencia a proveedores fuera de Colombia (Google, Mercado Pago y, si la uso, Canva).",
-          { nombre: import.meta.env.VITE_PROVEEDOR_NOMBRE }
-        );
 
   const bgMain = isDark ? "bg-[#0B0C0E] text-[#D1D5DB]" : "bg-[#F3F4F6] text-[#374151]";
   const bgHeader = isDark ? "bg-[#0F1115] border-[#2D2F36]" : "bg-white border-gray-200 shadow-sm";
@@ -2410,7 +2453,7 @@ export default function App() {
 
                 <button
                   onClick={handleSendEmails}
-                  disabled={isDelivering || pages.filter((p) => p.matchedRecipient !== null).length === 0}
+                  disabled={isDelivering || isProcessingAI || pages.filter((p) => p.matchedRecipient !== null).length === 0}
                   className="w-full bg-gradient-to-r from-blue-600 to-[#8B5CF6] text-white font-extrabold py-2.5 px-3 rounded-lg flex items-center justify-center gap-1.5 transition-all text-xs shadow-lg shadow-blue-900/40 hover:opacity-95 disabled:opacity-40"
                 >
                   <Send className="w-4 h-4 shrink-0" />

@@ -50,6 +50,14 @@ interface LandingPageProps {
   onViewPrivacy: () => void;
   onViewTerminos: () => void;
   isLoggingIn: boolean;
+  /** GRAVE 3(c) (correccion vuelta 31, 2026-10-06): texto T11 (autorizacion de tratamiento de
+   * datos, Ley 1581) y el estado de su casilla, ANTES del boton de login — vive en App.tsx (la
+   * misma casilla sirve despues para el POST inmediato a /api/autorizacion-datos tras un login
+   * exitoso, ver `handleLogin`). Todos los botones que llaman a `onStart` quedan deshabilitados
+   * hasta marcarla. */
+  textoAutorizacionDatos: string;
+  aceptaAutorizacionDatos: boolean;
+  onToggleAceptaAutorizacionDatos: (valor: boolean) => void;
 }
 
 export default function LandingPage({
@@ -60,7 +68,10 @@ export default function LandingPage({
   onStart,
   onViewPrivacy,
   onViewTerminos,
-  isLoggingIn
+  isLoggingIn,
+  textoAutorizacionDatos,
+  aceptaAutorizacionDatos,
+  onToggleAceptaAutorizacionDatos,
 }: LandingPageProps) {
   const t = translations[language];
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
@@ -256,11 +267,13 @@ export default function LandingPage({
               {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
 
-            {/* CTA Login Button */}
+            {/* CTA Login Button — GRAVE 3(c): deshabilitado hasta marcar la casilla de
+                autorizacion de datos (T11), que vive antes del CTA principal del hero, abajo. */}
             <button
               onClick={onStart}
-              disabled={isLoggingIn}
-              className="bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-md shadow-blue-900/10 hover:opacity-95"
+              disabled={isLoggingIn || !aceptaAutorizacionDatos}
+              title={!aceptaAutorizacionDatos ? t.autorizacionDatosRequerida : undefined}
+              className="bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all shadow-md shadow-blue-900/10 hover:opacity-95 disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {isLoggingIn ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -337,6 +350,34 @@ export default function LandingPage({
             {t.heroSub}
           </motion.p>
 
+          {/* GRAVE 3(c) (correccion vuelta 31, 2026-10-06): casilla de autorizacion de
+              tratamiento de datos (T11, Ley 1581) ANTES del boton de login — el boton queda
+              deshabilitado hasta marcarla. Al iniciar sesion, App.tsx registra esta autorizacion
+              de inmediato (POST /api/autorizacion-datos), con el idioma y el texto EXACTO que se
+              ve aqui. */}
+          <motion.label
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.25 }}
+            className={`flex items-start gap-2.5 max-w-xl mx-auto text-left text-xs leading-relaxed cursor-pointer px-4 py-3 rounded-xl border ${
+              theme === "dark" ? "bg-[#11131A]/70 border-[#222530] text-gray-300" : "bg-white/70 border-gray-200 text-gray-600"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={aceptaAutorizacionDatos}
+              onChange={(e) => onToggleAceptaAutorizacionDatos(e.target.checked)}
+              className="mt-0.5 shrink-0"
+            />
+            <span>
+              {textoAutorizacionDatos}{" "}
+              <button type="button" onClick={onViewPrivacy} className="text-indigo-400 underline font-semibold">
+                {language === "en" ? "Privacy Policy" : "Política de Privacidad"}
+              </button>
+              .
+            </span>
+          </motion.label>
+
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -345,7 +386,9 @@ export default function LandingPage({
           >
             <button
               onClick={onStart}
-              className="w-full sm:w-auto px-8 py-4 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] hover:opacity-95 transition-all shadow-xl shadow-indigo-600/20 flex items-center justify-center gap-2 group"
+              disabled={!aceptaAutorizacionDatos || isLoggingIn}
+              title={!aceptaAutorizacionDatos ? t.autorizacionDatosRequerida : undefined}
+              className="w-full sm:w-auto px-8 py-4 rounded-xl text-sm font-bold text-white bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] hover:opacity-95 transition-all shadow-xl shadow-indigo-600/20 flex items-center justify-center gap-2 group disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <span>{t.loginWithGoogle}</span>
               <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
@@ -353,8 +396,8 @@ export default function LandingPage({
             <a
               href="#pricing"
               className={`w-full sm:w-auto px-8 py-4 rounded-xl text-sm font-bold transition-all border flex items-center justify-center gap-2 ${
-                theme === "dark" 
-                  ? "bg-[#161821] hover:bg-[#202330] border-[#222530] text-white" 
+                theme === "dark"
+                  ? "bg-[#161821] hover:bg-[#202330] border-[#222530] text-white"
                   : "bg-white hover:bg-gray-50 border-gray-200 text-gray-700"
               }`}
             >
@@ -472,11 +515,13 @@ export default function LandingPage({
                   </div>
                 </div>
               </div>
-              <button 
+              <button
                 onClick={onStart}
-                className={`w-full mt-8 py-3 rounded-xl font-bold text-xs transition-colors ${
-                  theme === "dark" 
-                    ? "bg-[#222530] hover:bg-[#2F3345] text-white" 
+                disabled={!aceptaAutorizacionDatos || isLoggingIn}
+                title={!aceptaAutorizacionDatos ? t.autorizacionDatosRequerida : undefined}
+                className={`w-full mt-8 py-3 rounded-xl font-bold text-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                  theme === "dark"
+                    ? "bg-[#222530] hover:bg-[#2F3345] text-white"
                     : "bg-gray-100 hover:bg-gray-200 text-gray-800"
                 }`}
               >

@@ -38,6 +38,7 @@ test("extraerAvisoWebhookMP: tipo=merchant_order, llevado a procesarWebhookMP, s
     log: () => {},
     notificarActivacion: async () => {},
     procesarReembolso: async () => {},
+    avisarPagoDoble: async () => {},
   });
   assert.equal(resultado.httpStatus, 200);
   assert.equal(obtenerPagoLlamado, false, "merchant_order nunca debe consultar la API de pagos");

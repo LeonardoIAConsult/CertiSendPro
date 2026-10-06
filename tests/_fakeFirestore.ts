@@ -18,6 +18,14 @@
 
 export interface DocRefFalso {
   path: string;
+  /** GRAVE 1 (correccion vuelta 31, 2026-10-06): lectura/escritura DIRECTA (fuera de una
+   * transaccion) — mismo patron que `guardarAutorizacionDatos`/`obtenerAutorizacionDatos`,
+   * `guardarPreferencia`/`obtenerPreferencia`, etc. de server/cuentas.ts, que nunca abren
+   * `runTransaction`. Opcionales porque las funciones TRANSACCIONALES (la mayoria de este
+   * archivo) solo usan `ref.path` via `tx.get(ref)`/`tx.set(ref, ...)` y nunca llaman a estos. */
+  get?(): Promise<{ exists: boolean; data(): any }>;
+  set?(data: Record<string, any>, opciones?: { merge?: boolean }): Promise<void>;
+  update?(data: Record<string, any>): Promise<void>;
 }
 
 interface DocGuardado {
@@ -83,7 +91,25 @@ export class FirestoreFalso {
   private almacen = new Map<string, DocGuardado>();
 
   doc(path: string): DocRefFalso {
-    return { path };
+    const almacen = this.almacen;
+    return {
+      path,
+      // GRAVE 1: lectura/escritura directa fuera de transaccion (ver la nota del tipo arriba).
+      async get() {
+        const guardado = almacen.get(path);
+        const data = guardado?.data;
+        return { exists: data !== undefined, data: () => data };
+      },
+      async set(data: Record<string, any>, opciones?: { merge?: boolean }) {
+        const actual = almacen.get(path);
+        const base = opciones?.merge ? actual?.data ?? {} : {};
+        almacen.set(path, { version: (actual?.version ?? 0) + 1, data: { ...base, ...data } });
+      },
+      async update(data: Record<string, any>) {
+        const actual = almacen.get(path);
+        almacen.set(path, { version: (actual?.version ?? 0) + 1, data: { ...(actual?.data ?? {}), ...data } });
+      },
+    };
   }
 
   /**

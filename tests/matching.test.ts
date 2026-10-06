@@ -3,8 +3,13 @@
 // (matching.ts solo importa el tipo `Recipient`, sin dependencias de React ni del navegador).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findHomonymRowIndexes, assignRecipientsOneToOne } from "../src/utils/matching";
-import type { Recipient } from "../src/types";
+import {
+  findHomonymRowIndexes,
+  assignRecipientsOneToOne,
+  sincronizarEmparejamiento,
+  paginaConFilaAsignada,
+} from "../src/utils/matching";
+import type { Recipient, CertificatePage } from "../src/types";
 
 function recipient(name: string, email: string, originalRowIndex: number): Recipient {
   return { name, email, originalRowIndex };
@@ -120,4 +125,98 @@ test("assignRecipientsOneToOne: si el mejor candidato de una pagina ya fue tomad
   const { matches } = assignRecipientsOneToOne(pages, recipients);
   assert.equal(matches.get(0)?.recipient.originalRowIndex, 0);
   assert.equal(matches.get(1)?.recipient.originalRowIndex, 1);
+});
+
+// ── sincronizarEmparejamiento (Medio 2, correccion vuelta 31, 2026-10-06) ───────────────────────
+// Extraida de src/App.tsx como funcion PURA (sin `addLog`, sin React): devuelve `eventos` en vez
+// de loguear directamente, para poder probarla con node:test.
+
+function pagina(pageIndex: number, extractedName: string): CertificatePage {
+  return { pageIndex, extractedName, base64: "", matchedRecipient: null, status: "idle", errorMessage: null };
+}
+
+test("sincronizarEmparejamiento: rama de homonimos -> needsReviewCount+evento 'homonimo', matchedRecipient null", () => {
+  const recipients = [
+    recipient("Juan Perez", "juan1@x.com", 0),
+    recipient("Juan Perez", "juan2@x.com", 1),
+  ];
+  const paginas = [pagina(1, "Juan Perez")];
+
+  const resultado = sincronizarEmparejamiento(paginas, recipients);
+
+  assert.equal(resultado.needsReviewCount, 1);
+  assert.equal(resultado.matchedCount, 0);
+  assert.equal(resultado.pages[0].matchedRecipient, null);
+  assert.deepEqual(resultado.eventos, [{ tipo: "homonimo", pageIndex: 1, extractedName: "Juan Perez" }]);
+});
+
+test("sincronizarEmparejamiento: desempate por mayor similitud -> la pagina con mejor score se queda con el destinatario", () => {
+  const recipients = [recipient("Juan Perez", "juan@x.com", 0)];
+  const paginas = [
+    pagina(1, "Juan Perez"), // match exacto
+    pagina(2, "Juana Perez"), // match parcial, menor similitud
+  ];
+
+  const resultado = sincronizarEmparejamiento(paginas, recipients);
+
+  assert.equal(resultado.pages.find((p) => p.pageIndex === 1)?.matchedRecipient?.originalRowIndex, 0);
+  assert.equal(resultado.pages.find((p) => p.pageIndex === 2)?.matchedRecipient, null);
+  const evento2 = resultado.eventos.find((e) => e.pageIndex === 2);
+  assert.equal(evento2?.tipo, "sin_coincidencia");
+});
+
+test("sincronizarEmparejamiento: invariante -- dos paginas NUNCA quedan con la misma fila", () => {
+  const recipients = [recipient("Ana Gomez", "ana@x.com", 7)];
+  const paginas = [pagina(1, "Ana Gomez"), pagina(2, "Ana Gomez")]; // dos paginas, el MISMO nombre leido
+
+  const resultado = sincronizarEmparejamiento(paginas, recipients);
+
+  const filasAsignadas = resultado.pages
+    .filter((p) => p.matchedRecipient !== null)
+    .map((p) => p.matchedRecipient!.originalRowIndex);
+  assert.equal(filasAsignadas.length, new Set(filasAsignadas).size, "ninguna fila se repite entre paginas distintas");
+  assert.equal(resultado.matchedCount, 1, "solo una de las dos paginas queda emparejada");
+});
+
+test("sincronizarEmparejamiento: evento 'coincidencia' trae el nombre del destinatario y el score", () => {
+  const recipients = [recipient("Ana Gomez", "ana@x.com", 3)];
+  const paginas = [pagina(5, "Ana Gomez")];
+
+  const resultado = sincronizarEmparejamiento(paginas, recipients);
+
+  assert.equal(resultado.matchedCount, 1);
+  assert.deepEqual(resultado.eventos, [
+    { tipo: "coincidencia", pageIndex: 5, extractedName: "Ana Gomez", recipientName: "Ana Gomez", score: 1 },
+  ]);
+});
+
+test("sincronizarEmparejamiento: pagina sin nombre extraido (UNKNOWN) -> se deja intacta, sin evento", () => {
+  const recipients = [recipient("Ana Gomez", "ana@x.com", 3)];
+  const paginas = [pagina(1, "UNKNOWN")];
+
+  const resultado = sincronizarEmparejamiento(paginas, recipients);
+
+  assert.equal(resultado.eventos.length, 0);
+  assert.equal(resultado.pages[0].matchedRecipient, null);
+});
+
+// ── paginaConFilaAsignada (Medio 2): guardia del emparejamiento MANUAL ──────────────────────────
+
+test("paginaConFilaAsignada: ninguna otra pagina tiene esa fila -> null", () => {
+  const pages = [{ ...pagina(1, "Ana"), matchedRecipient: recipient("Ana", "a@x.com", 0) }, pagina(2, "Luis")];
+  assert.equal(paginaConFilaAsignada(pages, 2, 9), null);
+});
+
+test("paginaConFilaAsignada: OTRA pagina ya tiene esa fila -> la devuelve", () => {
+  const pages = [
+    { ...pagina(1, "Ana"), matchedRecipient: recipient("Ana", "a@x.com", 5) },
+    pagina(2, "Luis"),
+  ];
+  const otra = paginaConFilaAsignada(pages, 2, 5);
+  assert.equal(otra?.pageIndex, 1);
+});
+
+test("paginaConFilaAsignada: la MISMA pagina ya tiene esa fila -> null (no es un conflicto consigo misma)", () => {
+  const pages = [{ ...pagina(1, "Ana"), matchedRecipient: recipient("Ana", "a@x.com", 5) }];
+  assert.equal(paginaConFilaAsignada(pages, 1, 5), null);
 });

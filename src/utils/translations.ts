@@ -14,6 +14,9 @@ export interface TranslationDict {
   heroTitle: string;
   heroSub: string;
   startFree: string;
+  // GRAVE 3(c) (correccion vuelta 31, 2026-10-06): titulo del boton de login/empezar cuando la
+  // casilla de autorizacion de datos (T11) todavia no esta marcada.
+  autorizacionDatosRequerida: string;
   seeDemo: string;
   featuresTitle: string;
   featuresSub: string;
@@ -212,6 +215,7 @@ export const translations: Record<Lang, TranslationDict> = {
     footerText: "CertiSend Pro es un servicio de Leonardo Antolinez P. para enviar certificados desde tu propio Gmail.",
     footerRights: "Todos los derechos reservados.",
 
+    autorizacionDatosRequerida: "Marca la casilla de autorización de datos para continuar.",
     batchLimitFree: "El plan Gratis permite hasta 15 certificados por lote. Puedes dividirlo o escribirnos.",
     batchLimitSaldo: "Tienes {restantes} envíos y el lote es de {lote}.",
     batchLimitOpciones: "Puedes dividir el lote en partes de 15 o menos, o escribirnos a contacto@leonardoantolinez.com para ver los planes.",
@@ -320,6 +324,7 @@ export const translations: Record<Lang, TranslationDict> = {
     footerText: "CertiSend Pro is a service by Leonardo Antolinez P. to send certificates from your own Gmail.",
     footerRights: "All rights reserved.",
 
+    autorizacionDatosRequerida: "Check the data-authorization box to continue.",
     batchLimitFree: "The Free plan allows up to 15 certificates per batch. You can split it or email us.",
     batchLimitSaldo: "You have {restantes} sends left and this batch has {lote}.",
     batchLimitOpciones: "You can split the batch into parts of 15 or fewer, or email us at contacto@leonardoantolinez.com to see the plans.",

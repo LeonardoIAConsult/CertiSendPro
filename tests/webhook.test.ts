@@ -89,12 +89,14 @@ function logMudo(linea: string) {
   logsCapturados.push(linea);
 }
 
-/** Llamadas a `notificarActivacion`/`procesarReembolso` capturadas por el ultimo `construirOpts`
- * (reseteadas en cada llamada): las pruebas de Tareas 5/9 a nivel de webhook (que inyectan un
- * stub, no la composicion real de server/notificaciones.ts — esa se prueba aparte en
- * tests/notificaciones.test.ts) solo necesitan confirmar CUANTAS veces y con que datos se llamo. */
+/** Llamadas a `notificarActivacion`/`procesarReembolso`/`avisarPagoDoble` capturadas por el
+ * ultimo `construirOpts` (reseteadas en cada llamada): las pruebas de Tareas 5/9/Medio 4 a nivel
+ * de webhook (que inyectan un stub, no la composicion real de server/notificaciones.ts — esa se
+ * prueba aparte en tests/notificaciones.test.ts) solo necesitan confirmar CUANTAS veces y con
+ * que datos se llamo. */
 export const llamadasNotificarActivacion: any[] = [];
 export const llamadasProcesarReembolso: any[] = [];
+export const llamadasAvisarPagoDoble: any[] = [];
 
 function construirOpts(overrides: Partial<{
   tipo: string;
@@ -105,9 +107,10 @@ function construirOpts(overrides: Partial<{
     uid: string,
     paymentId: string,
     datos: { cop: number; trm: number; fecha: Timestamp; referenciaId: string; fechaTrm: string }
-  ) => Promise<"activado" | "repetido">;
+  ) => Promise<"activado" | "repetido" | "requiere_reembolso">;
   notificarActivacion: (datos: any) => Promise<void>;
   procesarReembolso: (datos: any) => Promise<void>;
+  avisarPagoDoble: (datos: any) => Promise<void>;
 }>) {
   return {
     tipo: "payment",
@@ -122,6 +125,9 @@ function construirOpts(overrides: Partial<{
     },
     procesarReembolso: async (datos: any) => {
       llamadasProcesarReembolso.push(datos);
+    },
+    avisarPagoDoble: async (datos: any) => {
+      llamadasAvisarPagoDoble.push(datos);
     },
     ...overrides,
   };
@@ -179,6 +185,87 @@ test("webhook: el mismo pago avisado dos veces activa una sola vez (idempotencia
 
   const cuenta = db.leer("cuentas/uid-1") as Cuenta;
   assert.equal(cuenta.enviosRestantes, 150, "sigue en 150: la segunda llamada no vuelve a activar");
+});
+
+// ── Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06) ───────────────────
+// El comprador genero y pago DOS preferencias (p. ej. abrio el checkout dos veces antes de que
+// la primera se confirmara). pago-1 llega primero y activa normalmente; pago-2 (OTRA preferencia,
+// mismo uid, aprobado por Mercado Pago) NUNCA debe pisar el Paquete vigente de pago-1.
+
+test("webhook (Medio 4): segundo pago aprobado con un Paquete vigente de OTRO pago -> no activa, avisa a Leonardo, 200", async () => {
+  llamadasAvisarPagoDoble.length = 0;
+  llamadasNotificarActivacion.length = 0;
+  const db = new FirestoreFalso();
+  const activarPaquete = activarPaqueteConFake(db);
+
+  // pago-1 activa de verdad (misma funcion de produccion).
+  const obtenerPreferencia1 = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  await procesarWebhookMP(
+    construirOpts({ paymentId: "pago-1", obtenerPago: async () => pagoOk({}), obtenerPreferencia: obtenerPreferencia1, activarPaquete })
+  );
+  const cuentaTrasPago1 = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuentaTrasPago1.ultimoPago!.id, "pago-1");
+  assert.equal(cuentaTrasPago1.enviosRestantes, 150);
+  llamadasNotificarActivacion.length = 0; // limpia el aviso LEGITIMO de pago-1 antes de revisar pago-2.
+
+  // pago-2: OTRA preferencia (ref-2) del MISMO uid, aprobada por Mercado Pago.
+  db.seed("preferencias/ref-2", preferenciaBase({ cop: 49102 }) as any);
+  const resultado2 = await procesarWebhookMP(
+    construirOpts({
+      paymentId: "pago-2",
+      obtenerPago: async () => pagoOk({ external_reference: "CERTISEND|uid-1|paquete|49102|ref-2" }),
+      obtenerPreferencia: async (id) => (db.leer(`preferencias/${id}`) as any) ?? null,
+      activarPaquete,
+    })
+  );
+
+  assert.equal(resultado2.httpStatus, 200);
+  assert.match(resultado2.razon, /pago doble/);
+
+  // La cuenta queda EXACTAMENTE igual que tras pago-1: nada se piso.
+  const cuentaDespues = db.leer("cuentas/uid-1") as Cuenta;
+  assert.deepEqual(cuentaDespues, cuentaTrasPago1, "la cuenta no debe cambiar ni un campo");
+
+  // pago-2 queda registrado (idempotencia futura) pero marcado para reembolso manual.
+  const pago2 = db.leer("pagosProcesados/pago-2");
+  assert.ok(pago2, "pago-2 debe quedar registrado para no reintentarlo");
+  assert.equal(pago2!.requiereReembolso, true);
+  assert.equal(pago2!.vence, null, "nunca se activo nada con este pago");
+
+  // Se avisa a Leonardo exactamente 1 vez con los datos de pago-2 (no de pago-1).
+  assert.equal(llamadasAvisarPagoDoble.length, 1);
+  assert.equal(llamadasAvisarPagoDoble[0].paymentId, "pago-2");
+  assert.equal(llamadasAvisarPagoDoble[0].uid, "uid-1");
+
+  // Nunca se notifica al comprador una compra que no se activo.
+  assert.equal(llamadasNotificarActivacion.length, 0);
+});
+
+test("webhook (Medio 4): una segunda ENTREGA del mismo pago-2 (ya marcado requiere_reembolso) es 'repetido', nunca avisa dos veces", async () => {
+  llamadasAvisarPagoDoble.length = 0;
+  const db = new FirestoreFalso();
+  const activarPaquete = activarPaqueteConFake(db);
+
+  const obtenerPreferencia1 = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  await procesarWebhookMP(
+    construirOpts({ paymentId: "pago-1", obtenerPago: async () => pagoOk({}), obtenerPreferencia: obtenerPreferencia1, activarPaquete })
+  );
+
+  db.seed("preferencias/ref-2", preferenciaBase({ cop: 49102 }) as any);
+  const opts2 = construirOpts({
+    paymentId: "pago-2",
+    obtenerPago: async () => pagoOk({ external_reference: "CERTISEND|uid-1|paquete|49102|ref-2" }),
+    obtenerPreferencia: async (id) => (db.leer(`preferencias/${id}`) as any) ?? null,
+    activarPaquete,
+  });
+
+  const r1 = await procesarWebhookMP(opts2);
+  const r2 = await procesarWebhookMP(opts2);
+
+  assert.match(r1.razon, /pago doble/);
+  assert.equal(r2.razon, "pago ya procesado (idempotencia)");
+  assert.equal(r2.httpStatus, 200);
+  assert.equal(llamadasAvisarPagoDoble.length, 1, "el aviso a Leonardo nunca se repite para el mismo pago-2");
 });
 
 // ── Pago de Faro (misma cuenta de MP) -> ignorado con 200 ───────────────────────────────────────

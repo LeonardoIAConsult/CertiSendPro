@@ -36,5 +36,14 @@ service cloud.firestore {
     match /aceptaciones/{id} {
       allow read, write: if false;
     }
+
+    // autorizaciones/{uid}: autorizacion de tratamiento de datos personales, Ley 1581 (Tarea 15,
+    // requisito B.3; GRAVE 1, correccion vuelta 31, 2026-10-06). Coleccion PROPIA, separada de
+    // cuentas/{uid} a proposito: un `tx.set` que reemplaza la cuenta completa (activacion/
+    // reversion de Paquete) nunca puede volver a borrar esta autorizacion. Solo el servidor la
+    // lee/escribe (GET/POST /api/autorizacion-datos); el navegador nunca accede directo.
+    match /autorizaciones/{uid} {
+      allow read, write: if false;
+    }
   }
 }

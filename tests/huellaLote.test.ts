@@ -3,7 +3,17 @@
 // claro. node:test puro, sin Firestore ni Express — mismo patron que tests/webhook.test.ts.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { normalizarCorreo, cadenaCanonicaPar, huellaPar, huellasLote, type ParConfirmacion } from "../server/huellaLote";
+import {
+  normalizarCorreo,
+  cadenaCanonicaPar,
+  huellaPar,
+  huellasLote,
+  paresInvalidos,
+  huellaConfigurada,
+  validarSecretoYPares,
+  parConfirmado,
+  type ParConfirmacion,
+} from "../server/huellaLote";
 
 const SECRETO = "secreto-de-prueba-no-real";
 
@@ -62,4 +72,115 @@ test("huellasLote: nunca contiene el correo en claro", () => {
   const pares: ParConfirmacion[] = [{ pagina: 1, fila: 1, correo: "secreto@correo.com" }];
   const [huella] = huellasLote(pares, SECRETO);
   assert.doesNotMatch(huella, /secreto@correo\.com/);
+});
+
+// ── Medio 3 (correccion vuelta 31, 2026-10-06): integridad de los pares de un lote ──────────────
+
+test("paresInvalidos: lote vacio -> invalido", () => {
+  assert.ok(paresInvalidos([]));
+});
+
+test("paresInvalidos: pares validos y distintos -> null (sin error)", () => {
+  const pares: ParConfirmacion[] = [
+    { pagina: 1, fila: 10, correo: "a@x.com" },
+    { pagina: 2, fila: 20, correo: "b@x.com" },
+  ];
+  assert.equal(paresInvalidos(pares), null);
+});
+
+test("paresInvalidos: correo vacio -> invalido", () => {
+  const pares: ParConfirmacion[] = [{ pagina: 1, fila: 10, correo: "   " }];
+  assert.ok(paresInvalidos(pares));
+});
+
+test("paresInvalidos: pagina/fila no finitas -> invalido", () => {
+  assert.ok(paresInvalidos([{ pagina: NaN, fila: 1, correo: "a@x.com" }]));
+  assert.ok(paresInvalidos([{ pagina: 1, fila: NaN, correo: "a@x.com" }]));
+});
+
+test("paresInvalidos: dos pares con la MISMA fila -> invalido (dos paginas, un destinatario)", () => {
+  const pares: ParConfirmacion[] = [
+    { pagina: 1, fila: 5, correo: "a@x.com" },
+    { pagina: 2, fila: 5, correo: "b@x.com" },
+  ];
+  assert.ok(paresInvalidos(pares));
+});
+
+test("paresInvalidos: dos pares con la MISMA pagina -> invalido (una pagina, dos destinatarios)", () => {
+  const pares: ParConfirmacion[] = [
+    { pagina: 1, fila: 5, correo: "a@x.com" },
+    { pagina: 1, fila: 6, correo: "b@x.com" },
+  ];
+  assert.ok(paresInvalidos(pares));
+});
+
+// ── GRAVE 2 (correccion vuelta 31, 2026-10-06): huella fail-closed ──────────────────────────────
+
+test("huellaConfigurada: con HUELLA_LOTE_SECRET -> true", () => {
+  assert.equal(huellaConfigurada({ HUELLA_LOTE_SECRET: "algo" }), true);
+});
+
+test("huellaConfigurada: sin HUELLA_LOTE_SECRET -> false", () => {
+  assert.equal(huellaConfigurada({}), false);
+});
+
+test("huellaConfigurada: HUELLA_LOTE_SECRET vacio o solo espacios -> false", () => {
+  assert.equal(huellaConfigurada({ HUELLA_LOTE_SECRET: "" }), false);
+  assert.equal(huellaConfigurada({ HUELLA_LOTE_SECRET: "   " }), false);
+});
+
+test("validarSecretoYPares: sin secreto -> 503, no llega a mirar los pares", () => {
+  const r = validarSecretoYPares(undefined, 2, []);
+  assert.deepEqual(r, { ok: false, httpStatus: 503, error: "Configuración incompleta. Intenta más tarde." });
+});
+
+test("validarSecretoYPares: pares.length distinto de cantidad -> 400", () => {
+  const pares: ParConfirmacion[] = [{ pagina: 1, fila: 1, correo: "a@x.com" }];
+  const r = validarSecretoYPares(SECRETO, 2, pares);
+  assert.equal(r.ok, false);
+  assert.equal((r as any).httpStatus, 400);
+});
+
+test("validarSecretoYPares: pares duplicados -> 400 con el mensaje de paresInvalidos", () => {
+  const pares: ParConfirmacion[] = [
+    { pagina: 1, fila: 5, correo: "a@x.com" },
+    { pagina: 2, fila: 5, correo: "b@x.com" },
+  ];
+  const r = validarSecretoYPares(SECRETO, 2, pares);
+  assert.equal(r.ok, false);
+  assert.equal((r as any).httpStatus, 400);
+});
+
+test("validarSecretoYPares: secreto + pares validos que cubren cantidad -> ok", () => {
+  const pares: ParConfirmacion[] = [
+    { pagina: 1, fila: 1, correo: "a@x.com" },
+    { pagina: 2, fila: 2, correo: "b@x.com" },
+  ];
+  assert.deepEqual(validarSecretoYPares(SECRETO, 2, pares), { ok: true });
+});
+
+// ── Medio 3: un par que no esta en el lote -> rechazado (409 lo decide server.ts con esto) ──────
+
+test("parConfirmado: un par que SI esta entre las huellas guardadas -> true", () => {
+  const par: ParConfirmacion = { pagina: 1, fila: 2, correo: "ana@correo.com" };
+  const huellas = huellasLote([par], SECRETO);
+  assert.equal(parConfirmado(par, huellas, SECRETO), true);
+});
+
+test("parConfirmado: un par que NO esta en el lote -> false (409)", () => {
+  const confirmado: ParConfirmacion = { pagina: 1, fila: 2, correo: "ana@correo.com" };
+  const huellas = huellasLote([confirmado], SECRETO);
+  const otro: ParConfirmacion = { pagina: 9, fila: 9, correo: "otro@correo.com" };
+  assert.equal(parConfirmado(otro, huellas, SECRETO), false);
+});
+
+test("parConfirmado: sin huellas guardadas (null) -> false, nunca 'todo vale'", () => {
+  const par: ParConfirmacion = { pagina: 1, fila: 2, correo: "ana@correo.com" };
+  assert.equal(parConfirmado(par, null, SECRETO), false);
+});
+
+test("parConfirmado: mismo par pero con OTRO secreto -> false", () => {
+  const par: ParConfirmacion = { pagina: 1, fila: 2, correo: "ana@correo.com" };
+  const huellas = huellasLote([par], SECRETO);
+  assert.equal(parConfirmado(par, huellas, "otro-secreto"), false);
 });

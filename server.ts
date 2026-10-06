@@ -23,14 +23,28 @@ import {
   guardarAutorizacionDatos,
   obtenerAutorizacionDatos,
   guardarConfirmacionLote,
+  obtenerHuellasLote,
+  normalizarIdioma,
+  textoAutorizacionDatos,
 } from "./server/cuentas";
-import { huellasLote, type ParConfirmacion } from "./server/huellaLote";
+import {
+  huellasLote,
+  huellaConfigurada,
+  validarSecretoYPares,
+  parConfirmado,
+  type ParConfirmacion,
+} from "./server/huellaLote";
 import { trmHoy, copDesdeUsd } from "./server/trm";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete } from "./server/cobroPaquete";
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
-import { enviarCorreo, construirAvisoFalloWebhookLeonardo } from "./server/avisos";
-import { notificarActivacionPaquete, avisarReembolsoPaquete, CORREO_LEONARDO } from "./server/notificaciones";
+import { enviarCorreo, construirAvisoFalloWebhookLeonardo, PROVEEDOR_NOMBRE } from "./server/avisos";
+import {
+  notificarActivacionPaquete,
+  avisarReembolsoPaquete,
+  avisarPagoDobleRequiereReembolso,
+  CORREO_LEONARDO,
+} from "./server/notificaciones";
 import {
   ejecutarBarridoWebhookConTope,
   ejecutarReintentoCuentaConTope,
@@ -514,7 +528,7 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
   // lanza despues, el catch nunca debe liberar la reserva ni responder 500 (el correo ya salio).
   let gmailEnvio = false;
   try {
-    const { accessToken, to, subject, body, pdfBase64, sessionId, pageIndex, filename, loteId } = req.body;
+    const { accessToken, to, subject, body, pdfBase64, sessionId, pageIndex, fila, filename, loteId } = req.body;
 
     // Lote autorizado por /api/lote/iniciar (Tarea 3, 2026-10-05): sin el, no se envia nada.
     // Esto es lo que impide que el navegador salte el limite del plan llamando esta ruta directo.
@@ -573,6 +587,32 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       return res.status(400).json({
         error: `La dirección de correo "${cleanTo}" no tiene un formato válido (p. ej., usuario@dominio.com). Por favor, en el PASO 1 (Configuración de Columnas), asegúrate de haber mapeado la 'COLUMNA DE CORREO' con la columna de tu Google Sheet que contiene los correos electrónicos reales.`
       });
+    }
+
+    // Medio 3 (correccion vuelta 31, 2026-10-06): la huella prueba lo que de verdad se envia. Se
+    // recalcula el HMAC del par pagina-fila-correo y se exige que coincida con una de las huellas
+    // que /api/lote/iniciar guardo en lotes/{loteId}.confirmacion al confirmar ESTE lote — nunca
+    // basta con que el navegador mande un par cualquiera, tiene que ser uno de los que de verdad
+    // se autorizaron para este lote. GRAVE 2: falla cerrado (503) si falta el secreto.
+    const filaNum = Number(fila);
+    const pageIndexNum = Number(pageIndex);
+    if (!Number.isFinite(filaNum) || !Number.isFinite(pageIndexNum)) {
+      await liberarReserva(loteReservado, req.uid!);
+      loteReservado = null;
+      return res.status(400).json({ error: "Faltan los datos de verificación (pageIndex/fila) del certificado." });
+    }
+    const secretoHuella = process.env.HUELLA_LOTE_SECRET;
+    if (!secretoHuella) {
+      console.error("[SEND-EMAIL] HUELLA_LOTE_SECRET no configurado; no se envia nada (falla cerrado).");
+      await liberarReserva(loteReservado, req.uid!);
+      loteReservado = null;
+      return res.status(503).json({ error: "Configuración incompleta. Intenta más tarde." });
+    }
+    const huellas = await obtenerHuellasLote(loteReservado);
+    if (!parConfirmado({ pagina: pageIndexNum, fila: filaNum, correo: cleanTo }, huellas, secretoHuella)) {
+      await liberarReserva(loteReservado, req.uid!);
+      loteReservado = null;
+      return res.status(409).json({ error: "Este envío no coincide con la confirmación del lote. Vuelve a iniciar el envío masivo." });
     }
 
     const cleanSubject = String(subject || "")
@@ -978,6 +1018,9 @@ app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
       // Tarea 9: reembolso/contracargo -> revierte a Gratis si era el pago activo + avisa a
       // Leonardo (idempotente, nunca lanza).
       procesarReembolso: avisarReembolsoPaquete,
+      // Medio 4 (pago doble con 2 preferencias, 2026-10-06): aviso a Leonardo cuando un pago no
+      // se activa por ya existir un Paquete vigente de OTRO pago (idempotente, nunca lanza).
+      avisarPagoDoble: avisarPagoDobleRequiereReembolso,
     });
 
     await avisarSiFallaRepetido(paymentId, resultado.httpStatus);
@@ -1017,6 +1060,14 @@ app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
 app.post("/api/tareas/barrido-acuses", async (req, res) => {
   const resultado = await manejarBarridoAcusesTarea(req.headers.authorization);
   res.status(resultado.status).json(resultado.body);
+});
+
+// GRAVE 2 (correccion vuelta 31, 2026-10-06): salud publica, sin sesion. Reporta si la huella
+// HMAC de confirmacion de lote (Tarea 15, requisito A.3) esta configurada, SIN revelar el valor
+// del secreto — `/api/lote/iniciar` falla cerrado (503) si falta, ver mas abajo. Hereda el
+// limitador de peticiones por IP ya montado arriba (`app.use("/api", ...)`).
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true, huella: huellaConfigurada() });
 });
 
 // Endpoint publico de precios del dia (D3, decision del Brain 2026-10-05, Tarea 4): la web lo usa
@@ -1093,13 +1144,21 @@ app.get("/api/cuenta", exigirAuth, async (req, res) => {
 });
 
 // Autorizacion de tratamiento de datos personales, Ley 1581 (Tarea 15, requisito B.3,
-// 2026-10-06). Casilla explicita ANTES del primer uso (texto canonico T11 de
-// docs/legal/textos-checkout.md v1.3): GET dice si el usuario YA autorizo (para que la landing
-// decida si mostrar el aviso), POST la guarda. Las dos requieren sesion real.
+// 2026-10-06; GRAVE 1/3 y MENORES, correccion vuelta 31): casilla explicita ANTES del primer uso
+// (texto canonico T11 de docs/legal/textos-checkout.md v1.3), guardada en su PROPIA coleccion
+// (`autorizaciones/{uid}`, ver server/cuentas.ts) para que nunca la borre un `tx.set` de
+// `cuentas/{uid}` (GRAVE 1). GET dice si el usuario YA autorizo la version VIGENTE (para que la
+// landing decida si mostrar el aviso: si la Politica cambia de version, se vuelve a pedir aunque
+// exista una autorizacion vieja); POST la guarda con el idioma y el texto EXACTO que el usuario
+// vio (reconstruido aqui, nunca confiado del navegador). Las dos requieren sesion real.
+//
+// MENORES (2026-10-06): si este GET falla (red, Firestore caido), el cliente debe tratarlo como
+// "no autorizado" y mostrar el modal — nunca asumir que un usuario SIN respuesta ya autorizo.
 app.get("/api/autorizacion-datos", exigirAuth, async (req, res) => {
   try {
     const autorizacion = await obtenerAutorizacionDatos(req.uid!);
-    res.json({ autorizado: autorizacion !== null, version: autorizacion?.version ?? null });
+    const autorizado = autorizacion !== null && autorizacion.version === AUTORIZACION_DATOS_VERSION;
+    res.json({ autorizado, version: autorizacion?.version ?? null });
   } catch (error: any) {
     console.error("Error al consultar la autorizacion de datos:", error);
     res.status(500).json({ error: "No se pudo consultar tu autorizacion en este momento." });
@@ -1108,7 +1167,9 @@ app.get("/api/autorizacion-datos", exigirAuth, async (req, res) => {
 
 app.post("/api/autorizacion-datos", exigirAuth, async (req, res) => {
   try {
-    await guardarAutorizacionDatos(req.uid!, AUTORIZACION_DATOS_VERSION);
+    const idioma = normalizarIdioma(req.body?.idioma);
+    const texto = textoAutorizacionDatos(idioma, PROVEEDOR_NOMBRE);
+    await guardarAutorizacionDatos(req.uid!, AUTORIZACION_DATOS_VERSION, idioma, texto);
     res.json({ ok: true });
   } catch (error: any) {
     console.error("Error al guardar la autorizacion de datos:", error);
@@ -1127,11 +1188,40 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
       return res.status(400).json({ error: "Falta una cantidad valida de certificados a enviar." });
     }
 
-    // B.3 (requisito Ley 1581): sin autorizacion de datos guardada, no se inicia ningun lote.
+    // GRAVE 2 (correccion vuelta 31, 2026-10-06): sin HUELLA_LOTE_SECRET, NINGUN lote se
+    // autoriza (falla cerrado) — antes, sin el secreto el lote se creaba igual pero sin huella,
+    // asi que /api/send-email nunca tenia nada contra que comprobar lo que de verdad se envia
+    // (Medio 3, mas abajo). Esto va ANTES de tocar Firestore: no se crea nada a medias.
+    //
+    // Medio 3 (correccion vuelta 31): `pares` ya NO es opcional — debe cubrir EXACTAMENTE la
+    // `cantidad` del lote, sin pares vacios ni duplicados. `validarSecretoYPares`
+    // (server/huellaLote.ts, PURA) decide las dos cosas de una vez.
+    const secreto = process.env.HUELLA_LOTE_SECRET;
+    const paresCrudos = Array.isArray(req.body?.pares) ? req.body.pares : [];
+    const pares: ParConfirmacion[] = paresCrudos
+      .filter((p: any) => p && Number.isFinite(p.pagina) && Number.isFinite(p.fila) && typeof p.correo === "string")
+      .map((p: any) => ({ pagina: p.pagina, fila: p.fila, correo: p.correo }));
+    if (pares.length !== paresCrudos.length) {
+      return res.status(400).json({ error: "La lista de certificados a confirmar tiene datos incompletos." });
+    }
+    const validacion = validarSecretoYPares(secreto, cantidad, pares);
+    // Nota: `=== false` (no `!validacion.ok`), mismo motivo que `reserva.ok` mas abajo — TS 5.8
+    // no angosta un discriminante booleano con negacion/truthiness, solo con `===`.
+    if (validacion.ok === false) {
+      if (validacion.httpStatus === 503) {
+        console.error("[LOTE] HUELLA_LOTE_SECRET no configurado; no se autoriza ningun lote (falla cerrado).");
+      }
+      return res.status(validacion.httpStatus).json({ error: validacion.error });
+    }
+
+    // B.3 (requisito Ley 1581): sin autorizacion de datos guardada PARA LA VERSION VIGENTE, no se
+    // inicia ningun lote. GRAVE 3(d): el `motivo: "autorizacion"` es lo que el cliente usa para
+    // reabrir el modal de autorizacion (en vez de solo mostrar el texto de error).
     const autorizacion = await obtenerAutorizacionDatos(req.uid!);
-    if (!autorizacion) {
+    if (!autorizacion || autorizacion.version !== AUTORIZACION_DATOS_VERSION) {
       return res.status(403).json({
-        error: "Debes autorizar el tratamiento de tus datos personales antes de enviar. Vuelve a iniciar sesión para aceptar el aviso.",
+        error: "Debes autorizar el tratamiento de tus datos personales antes de enviar.",
+        motivo: "autorizacion",
       });
     }
 
@@ -1154,23 +1244,11 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
     // descuenta saldo (ver decidirLote/reservarEnvioTx/confirmarEnvioExitosoTx).
     const { loteId } = await crearLote(req.uid!, cantidad, decision.planEfectivo);
 
-    // A.3 (requisito §13.3(c)/§12.4 del legal): huella HMAC-SHA256 por cada par pagina-fila-
-    // correo, SIN guardar la lista ni los correos en claro. `pares` es opcional (lotes <=15 o
-    // llamadas viejas sin este campo no rompen el flujo); sin HUELLA_LOTE_SECRET configurado,
-    // se guarda el lote igual pero sin huellas (nunca bloquea el envio).
-    const paresCrudos = Array.isArray(req.body?.pares) ? req.body.pares : [];
-    const pares: ParConfirmacion[] = paresCrudos
-      .filter((p: any) => p && Number.isFinite(p.pagina) && Number.isFinite(p.fila) && typeof p.correo === "string")
-      .map((p: any) => ({ pagina: p.pagina, fila: p.fila, correo: p.correo }));
-    if (pares.length > 0) {
-      const secreto = process.env.HUELLA_LOTE_SECRET;
-      if (!secreto) {
-        console.warn("[LOTE] HUELLA_LOTE_SECRET no configurado; el lote se crea sin huella de confirmacion.");
-      } else {
-        const huellas = huellasLote(pares, secreto);
-        await guardarConfirmacionLote(loteId, pares.length, huellas, Timestamp.now());
-      }
-    }
+    // A.3 (requisito §13.3(c)/§12.4 del legal) + Medio 3: huella HMAC-SHA256 por cada par
+    // pagina-fila-correo, SIN guardar la lista ni los correos en claro. Siempre se guarda (ya no
+    // es condicional: `secreto`/`pares` se validaron arriba, antes de crear el lote).
+    const huellas = huellasLote(pares, secreto!); // validarSecretoYPares ya confirmo que existe.
+    await guardarConfirmacionLote(loteId, pares.length, huellas, Timestamp.now());
 
     res.json({
       permitido: true,

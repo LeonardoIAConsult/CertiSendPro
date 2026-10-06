@@ -73,12 +73,14 @@ export interface ProcesarWebhookMPOpts {
   obtenerPreferencia(id: string): Promise<PreferenciaGuardada | null>;
   /** Activa el Paquete de forma idempotente; ver server/cuentas.ts. `referenciaId`/`fechaTrm`
    * (M37, corrige vuelta 28) se guardan junto con el pago para poder reconstruir el aviso de
-   * compra en un reintento posterior sin volver a consultar Mercado Pago. */
+   * compra en un reintento posterior sin volver a consultar Mercado Pago. "requiere_reembolso"
+   * (Medio 4, correccion vuelta 31): la cuenta ya tenia un Paquete vigente activado por OTRO
+   * pago — este NO se activa ni se pisa nada. */
   activarPaquete(
     uid: string,
     paymentId: string,
     datos: { cop: number; trm: number; fecha: Timestamp; referenciaId: string; fechaTrm: string }
-  ): Promise<"activado" | "repetido">;
+  ): Promise<"activado" | "repetido" | "requiere_reembolso">;
   /** Para construir el Timestamp de la fecha del pago sin importar firebase-admin aqui (se inyecta
    * desde server.ts/los tests, que ya tienen el Timestamp real o uno falso). */
   timestampDesdeFecha(fecha: Date): Timestamp;
@@ -112,6 +114,14 @@ export interface ProcesarWebhookMPOpts {
    * `notificarActivacion`, nunca debe lanzar (tambien envuelta en try/catch abajo).
    */
   procesarReembolso(datos: { uid: string; paymentId: string; status: string }): Promise<void>;
+  /**
+   * Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): se llama cuando
+   * `activarPaquete` devuelve "requiere_reembolso" — avisa a Leonardo (log
+   * `ALERTA_REEMBOLSO_REQUERIDO` + correo, ver server/notificaciones.ts) de que este pago quedo
+   * sin activar porque la cuenta ya tenia un Paquete vigente de otro pago. Nunca debe lanzar (se
+   * llama tambien dentro de un try/catch en `procesarWebhookMP`, defensa en profundidad).
+   */
+  avisarPagoDoble(datos: { uid: string; paymentId: string; cop: number }): Promise<void>;
 }
 
 /** Forma minima de lo que la ruta HTTP saca de la peticion entrante (query y body de Express). */
@@ -286,6 +296,20 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
     referenciaId: referencia.referenciaId,
     fechaTrm: preferencia.fechaTrm,
   });
+
+  // Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): la cuenta ya tenia
+  // un Paquete vigente de OTRO pago — este no se activo, nada que notificarle al comprador. Se
+  // avisa a Leonardo (try/catch defensivo, igual que notificarActivacion/procesarReembolso: nunca
+  // debe convertir un pago ya registrado en un 500) y se responde 200 (Mercado Pago no debe
+  // reintentar algo que ya se registro, aunque no se haya activado).
+  if (resultado === "requiere_reembolso") {
+    try {
+      await opts.avisarPagoDoble({ uid: referencia.uid, paymentId, cop: referencia.cop });
+    } catch (error: any) {
+      opts.log(`[MP WEBHOOK] fallo al avisar el pago doble (no afecta el registro del pago). paymentId=${paymentId}: ${error?.message || error}`);
+    }
+    return { httpStatus: 200, razon: "pago doble: la cuenta ya tenia un Paquete vigente de otro pago (requiere reembolso manual)" };
+  }
 
   // Tarea 5 (2026-10-05): se intenta en los DOS casos ("activado" fresco o "repetido") — la propia
   // funcion inyectada decide si ya se notifico este `paymentId` (idempotencia real en

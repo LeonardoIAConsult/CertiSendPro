@@ -18,9 +18,11 @@ import assert from "node:assert/strict";
 import {
   notificarActivacionPaquete,
   avisarReembolsoPaquete,
+  avisarPagoDobleRequiereReembolso,
   CORREO_LEONARDO,
   type NotificarActivacionDeps,
   type AvisarReembolsoDeps,
+  type AvisarPagoDobleDeps,
 } from "../server/notificaciones";
 import { reclamarEnvioCorreoTx, type DestinatarioCorreo } from "../server/cuentas";
 import { construirCorreoConfirmacionCompra, type DatosCorreo } from "../server/avisos";
@@ -346,5 +348,58 @@ test("avisarReembolsoPaquete (M34): si revertirPago lanza (Firestore sin red), l
   await assert.rejects(
     avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back" }, deps),
     /red caida/
+  );
+});
+
+// ── Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): aviso a Leonardo ──
+
+function depsPagoDobleFalsas(overrides: Partial<AvisarPagoDobleDeps> = {}): {
+  deps: AvisarPagoDobleDeps;
+  correosEnviados: DatosCorreo[];
+} {
+  const correosEnviados: DatosCorreo[] = [];
+  const deps: AvisarPagoDobleDeps = {
+    enviarCorreo: async (datos) => {
+      correosEnviados.push(datos);
+      return true;
+    },
+    ...overrides,
+  };
+  return { deps, correosEnviados };
+}
+
+test("avisarPagoDobleRequiereReembolso: manda exactamente 1 correo a Leonardo con el paymentId/uid/cop", async () => {
+  const { deps, correosEnviados } = depsPagoDobleFalsas();
+  await avisarPagoDobleRequiereReembolso({ uid: "uid-1", paymentId: "pago-2", cop: 49102 }, deps);
+  assert.equal(correosEnviados.length, 1);
+  assert.equal(correosEnviados[0].para, CORREO_LEONARDO);
+  assert.match(correosEnviados[0].texto, /pago-2/);
+  assert.match(correosEnviados[0].texto, /uid-1/);
+});
+
+test("avisarPagoDobleRequiereReembolso: emite el log ALERTA_REEMBOLSO_REQUERIDO", async () => {
+  const { deps } = depsPagoDobleFalsas();
+  const original = console.error;
+  const llamadas: any[] = [];
+  console.error = (...args: any[]) => llamadas.push(args);
+  try {
+    await avisarPagoDobleRequiereReembolso({ uid: "uid-1", paymentId: "pago-2", cop: 49102 }, deps);
+  } finally {
+    console.error = original;
+  }
+  assert.ok(
+    llamadas.some((args) => args[0] === "ALERTA_REEMBOLSO_REQUERIDO"),
+    "debe loguear el marcador fijo ALERTA_REEMBOLSO_REQUERIDO"
+  );
+});
+
+test("avisarPagoDobleRequiereReembolso: si enviarCorreo falla/lanza, la funcion no lanza (el log ya quedo)", async () => {
+  const { deps } = depsPagoDobleFalsas({
+    enviarCorreo: async () => {
+      throw new Error("relay caido");
+    },
+  });
+  await assert.doesNotReject(
+    avisarPagoDobleRequiereReembolso({ uid: "uid-1", paymentId: "pago-2", cop: 49102 }, deps)
   );
 });

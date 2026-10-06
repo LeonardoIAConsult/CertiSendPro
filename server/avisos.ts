@@ -354,6 +354,27 @@ export function construirAvisoBloqueoProveedorLeonardo(datos: { uid: string; pay
   };
 }
 
+/** Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): aviso a Leonardo
+ * cuando el webhook recibe un pago aprobado para un uid que YA tiene un Paquete vigente con
+ * saldo activado por OTRO pago (p. ej. el comprador genero y pago dos preferencias). El pago
+ * NUNCA pisa el Paquete vigente (ver server/cuentas.ts `activarPaqueteSiNoProcesadoTx`) — este
+ * correo es la unica forma de que alguien se entere de que hay un cobro de mas por devolver a
+ * mano (Tarea 9, proceso manual de devolucion desde el panel de Mercado Pago). */
+export function construirAvisoPagoDobleLeonardo(datos: {
+  uid: string;
+  paymentId: string;
+  cop: number;
+}): { asunto: string; texto: string } {
+  return {
+    asunto: `[CertiSend] Pago duplicado — requiere reembolso manual — uid ${datos.uid}`,
+    texto:
+      `El pago ${datos.paymentId} ($${formatearCop(datos.cop)} COP, uid ${datos.uid}) llegó aprobado, ` +
+      `pero esa cuenta YA tenía un Paquete vigente con saldo activado por OTRO pago. No se activó ni se ` +
+      `pisó nada: este cobro quedó marcado requiereReembolso=true en pagosProcesados/${datos.paymentId}. ` +
+      `Revísalo en el panel de Mercado Pago y devuelve el dinero a mano (ver Términos, proceso de devolución).`,
+  };
+}
+
 export function construirAvisoFalloWebhookLeonardo(datos: {
   paymentId: string;
   fallosConsecutivos: number;

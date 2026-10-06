@@ -61,3 +61,32 @@ export const TEXTO_CASILLA_RETRACTO_EN =
 export function textoCasillaRetracto(idioma: Idioma = "es"): string {
   return idioma === "en" ? TEXTO_CASILLA_RETRACTO_EN : TEXTO_CASILLA_RETRACTO;
 }
+
+/**
+ * Texto EXACTO de la autorizacion de tratamiento de datos al iniciar sesion (T11,
+ * `docs/legal/textos-checkout.md` v1.3) — requerida ANTES de usar la cuenta (Ley 1581 de 2012,
+ * requisito B.3). Compartido entre cliente y servidor (mismo motivo que el resto de este
+ * archivo): la landing la muestra ANTES del boton de login, y `POST /api/autorizacion-datos`
+ * reconstruye el MISMO texto en el servidor para guardarlo (nunca confia en un texto que mande
+ * el navegador).
+ *
+ * El nombre legal del proveedor NUNCA se hardcodea en un archivo versionado (regla del Brain):
+ * se recibe como parametro — `process.env.PROVEEDOR_NOMBRE` en el servidor (server/avisos.ts),
+ * `import.meta.env.VITE_PROVEEDOR_NOMBRE` en el cliente — y, si falta o esta vacio, queda
+ * "[dato pendiente]" (nunca se inventa).
+ */
+export function textoAutorizacionDatos(idioma: Idioma, nombreProveedor: string | null | undefined): string {
+  const nombre = nombreProveedor && nombreProveedor.trim() ? nombreProveedor.trim() : "[dato pendiente]";
+  if (idioma === "en") {
+    return (
+      `I authorize ${nombre} (CertiSend Pro) to process my personal data for the purposes described in ` +
+      `the Privacy Policy, including its transfer to providers outside Colombia (Google, Mercado Pago ` +
+      `and, if I use it, Canva).`
+    );
+  }
+  return (
+    `Autorizo a ${nombre} (CertiSend Pro) a tratar mis datos personales para las finalidades de la ` +
+    `Política de Privacidad, incluida su transferencia a proveedores fuera de Colombia (Google, ` +
+    `Mercado Pago y, si la uso, Canva).`
+  );
+}

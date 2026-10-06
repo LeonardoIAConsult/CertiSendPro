@@ -9,6 +9,7 @@ import {
   normalizarIdioma,
   textoCasillaRetracto,
   textoCasillaTerminos,
+  textoAutorizacionDatos,
   TEXTO_CASILLA_RETRACTO,
   TEXTO_CASILLA_RETRACTO_EN,
   type Idioma,
@@ -20,7 +21,7 @@ import {
 // (server/cobroPaquete.ts, server.ts, tests existentes). Antes este archivo y
 // `src/utils/checkout.ts` tenian el MISMO texto copiado a mano en dos sitios; ahora los dos
 // importan de la misma fuente (`tests/textosCasillas.test.ts` prueba que coincidan).
-export { TERMINOS_VERSION, normalizarIdioma, textoCasillaRetracto, textoCasillaTerminos, TEXTO_CASILLA_RETRACTO, TEXTO_CASILLA_RETRACTO_EN };
+export { TERMINOS_VERSION, normalizarIdioma, textoCasillaRetracto, textoCasillaTerminos, textoAutorizacionDatos, TEXTO_CASILLA_RETRACTO, TEXTO_CASILLA_RETRACTO_EN };
 export type { Idioma };
 
 // Base de datos NOMBRADA de Firestore (us-west1), ya existente. NUNCA la "(default)".
@@ -306,7 +307,20 @@ export function sumarUnMes(fecha: Date): Date {
  * (esas llamadas simplemente no habilitan el reintento automatico para ESE pago); en produccion
  * (`activarPaqueteSiNoProcesado`, mas abajo) SIEMPRE se mandan.
  *
- * Devuelve "repetido" sin tocar la cuenta si `paymentId` ya estaba marcado como procesado.
+ * Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): si la cuenta YA
+ * tiene un Paquete VIGENTE con saldo, activado por OTRO `paymentId` (el comprador pago dos veces,
+ * p. ej. generando dos preferencias), este pago NUNCA pisa ese Paquete ni "suma" nada — se marca
+ * `pagosProcesados/{paymentId}.requiereReembolso = true` (sin `vence`: nunca se activo nada) y se
+ * devuelve "requiere_reembolso" para que `server/webhook.ts` avise a Leonardo (log
+ * `ALERTA_REEMBOLSO_REQUERIDO` + correo) y responda 200 — Mercado Pago no debe reintentar un pago
+ * que ya se registro, aunque no se haya activado. La lectura de la cuenta ocurre ANTES de
+ * cualquier escritura (misma regla de "todas las lecturas antes de escrituras" que el resto de
+ * este archivo). `elegibleParaReintentoAcuse` (mas abajo) excluye estos pagos del reintento
+ * automatico del acuse de compra: nunca se activaron, no hay nada que confirmarle al comprador.
+ *
+ * Devuelve "repetido" sin tocar la cuenta si `paymentId` ya estaba marcado como procesado (esto
+ * cubre tambien una segunda entrega del MISMO pago que ya se marco "requiere_reembolso": el
+ * aviso a Leonardo solo se manda la primera vez).
  */
 export async function activarPaqueteSiNoProcesadoTx(
   tx: TransaccionLike,
@@ -321,9 +335,35 @@ export async function activarPaqueteSiNoProcesadoTx(
     referenciaId?: string;
     fechaTrm?: string;
   }
-): Promise<"activado" | "repetido"> {
+): Promise<"activado" | "repetido" | "requiere_reembolso"> {
   const pagoSnap = await tx.get(pagoRef);
   if (pagoSnap.exists) return "repetido";
+
+  const cuentaSnap = await tx.get(cuentaRef); // lectura, no escritura: todavia no se hizo ningun tx.set/tx.update.
+  const cuentaActual = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
+  const vigentePorOtroPago =
+    cuentaActual !== null &&
+    cuentaActual.plan === "paquete" &&
+    cuentaActual.enviosRestantes > 0 &&
+    cuentaActual.vence !== null &&
+    cuentaActual.vence.toMillis() > Date.now() &&
+    cuentaActual.ultimoPago !== null &&
+    cuentaActual.ultimoPago.id !== datos.paymentId;
+
+  if (vigentePorOtroPago) {
+    tx.set(pagoRef, {
+      procesadoEn: Timestamp.now(),
+      uid: datos.uid ?? null,
+      referenciaId: datos.referenciaId ?? null,
+      cop: datos.cop,
+      trm: datos.trm,
+      fechaTrm: datos.fechaTrm ?? null,
+      fecha: datos.fecha,
+      vence: null, // nunca se activo nada con este pago.
+      requiereReembolso: true,
+    });
+    return "requiere_reembolso";
+  }
 
   const vence = Timestamp.fromDate(sumarUnMes(datos.fecha.toDate()));
   tx.set(pagoRef, {
@@ -354,7 +394,7 @@ export async function activarPaqueteSiNoProcesado(
   uid: string,
   paymentId: string,
   datos: { cop: number; trm: number; fecha: Timestamp; referenciaId: string; fechaTrm: string }
-): Promise<"activado" | "repetido"> {
+): Promise<"activado" | "repetido" | "requiere_reembolso"> {
   const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
   const cuentaRef = db().collection("cuentas").doc(uid);
   return db().runTransaction((tx) =>
@@ -599,6 +639,7 @@ export async function registrarIntentoAcuse(
 export function elegibleParaReintentoAcuse(data: Record<string, any>, ahora: Date): boolean {
   if ((data.correoComprador ?? null) === "enviado") return false;
   if (data.revertido === true) return false; // G3
+  if (data.requiereReembolso === true) return false; // Medio 4: nunca se activo nada, nada que confirmarle al comprador.
   if (data.estadoAcuse === "agotado") return false; // M2/M3
   if ((data.avisoBloqueoProveedor ?? null) === "enviado") return false; // M3
   if ((data.avisoAcuse20h ?? null) === "enviado") return false; // M3
@@ -1051,32 +1092,74 @@ export function tienePaqueteVigenteConSaldo(cuenta: Cuenta, ahora: Date): boolea
   return cuenta.plan === "paquete" && vigente && cuenta.enviosRestantes > 0;
 }
 
-// ── Autorizacion de tratamiento de datos, Ley 1581 (Tarea 15, requisito B.3) ────────────────────
+// ── Autorizacion de tratamiento de datos, Ley 1581 (Tarea 15, requisito B.3; GRAVE 1, correccion
+// vuelta 31, 2026-10-06) ─────────────────────────────────────────────────────────────────────────
 // Casilla de autorizacion explicita ANTES del primer uso (texto canonico T11 de
-// docs/legal/textos-checkout.md v1.3, decision del Brain 2026-10-06): se guarda en
-// `cuentas/{uid}.autorizacionDatos`, nunca se infiere ni se asume con el solo login de Google.
+// docs/legal/textos-checkout.md v1.3): nunca se infiere ni se asume con el solo login de Google.
+//
+// GRAVE 1 (NO-GO del REVISOR_EXTERNO_LAP, vuelta 31): esto vivia como un campo
+// `cuentas/{uid}.autorizacionDatos` (merge). `activarPaqueteSiNoProcesadoTx` (abajo) y
+// `revertirPagoSiNoRevertidoTx` hacen `tx.set(cuentaRef, {...})` SIN merge — eso REEMPLAZA el
+// documento completo y borraba la autorizacion de cualquier usuario que activara o revirtiera un
+// Paquete despues de autorizar. Arreglo del Brain: la autorizacion se mueve a su PROPIA coleccion
+// (`autorizaciones/{uid}`, deny-all en firestore.rules, igual patron que `cuentas`/
+// `pagosProcesados`), totalmente desacoplada de `cuentas/{uid}` — ningun `tx.set` de la cuenta
+// puede volver a tocarla, sea completo o con merge.
+//
+// `autorizado` = la version guardada coincide con la version VIGENTE de la Politica de
+// Privacidad (comprobado por quien llama, p. ej. `server.ts` contra `AUTORIZACION_DATOS_VERSION`):
+// si la politica cambia de version, se vuelve a pedir, aunque exista una autorizacion vieja.
 export interface AutorizacionDatos {
   version: string;
   fecha: Timestamp;
+  idioma: Idioma;
+  /** Texto LITERAL que el usuario vio y acepto (T11, en su idioma) — requisito de prueba de
+   * aceptacion (MENORES, 2026-10-06): si alguna vez cambia el texto sin cambiar la version, sigue
+   * quedando registrado que se vio EXACTAMENTE esto. */
+  texto: string;
+}
+
+/** Una entrada vieja de `historial` (misma forma que `AutorizacionDatos`, nombrada aparte para
+ * dejar claro que es un registro PASADO, no el vigente). */
+export type AutorizacionHistorialEntrada = AutorizacionDatos;
+
+export interface AutorizacionGuardada extends AutorizacionDatos {
+  /** Autorizaciones ANTERIORES de este usuario (p. ej. si la Politica cambio de version y se le
+   * volvio a pedir) — nunca se borran, solo se archivan aqui al guardar una nueva. */
+  historial: AutorizacionHistorialEntrada[];
 }
 
 /** Guarda la autorizacion de tratamiento de datos del usuario para la version vigente de la
- * Politica de Privacidad. Llama a `obtenerCuenta` primero para asegurar que `cuentas/{uid}` ya
- * tenga los campos base (plan/saldo/etc.) ANTES de este merge, asi `obtenerCuenta` nunca lee
- * despues un documento a medio llenar. */
-export async function guardarAutorizacionDatos(uid: string, version: string): Promise<void> {
-  await obtenerCuenta(uid);
-  const ref = db().collection("cuentas").doc(uid);
-  await ref.set({ autorizacionDatos: { version, fecha: Timestamp.now() } }, { merge: true });
+ * Politica de Privacidad, con el idioma y el texto EXACTO que vio y acepto. Si ya existia una
+ * autorizacion previa (p. ej. de una version anterior de la Politica), la archiva en `historial`
+ * antes de reemplazarla — nunca se pierde el registro de que se autorizo en su momento. */
+export async function guardarAutorizacionDatos(
+  uid: string,
+  version: string,
+  idioma: Idioma,
+  texto: string
+): Promise<void> {
+  const ref = db().collection("autorizaciones").doc(uid);
+  const snap = await ref.get();
+  const actual = snap.exists ? (snap.data() as AutorizacionGuardada) : null;
+  const historial: AutorizacionHistorialEntrada[] = actual
+    ? [
+        ...(actual.historial ?? []),
+        { version: actual.version, fecha: actual.fecha, idioma: actual.idioma, texto: actual.texto },
+      ]
+    : [];
+  const nueva: AutorizacionGuardada = { version, fecha: Timestamp.now(), idioma, texto, historial };
+  await ref.set(nueva);
 }
 
-/** Devuelve la autorizacion de datos guardada del usuario, o `null` si nunca la dio (cuenta
- * inexistente o sin el campo). */
+/** Devuelve la autorizacion de datos guardada del usuario (version/fecha/idioma/texto VIGENTES,
+ * sin el historial), o `null` si nunca la dio. Quien llama decide si la `version` devuelta
+ * coincide con la vigente (B.3: `autorizado = version === POLITICA_VERSION_VIGENTE`). */
 export async function obtenerAutorizacionDatos(uid: string): Promise<AutorizacionDatos | null> {
-  const snap = await db().collection("cuentas").doc(uid).get();
+  const snap = await db().collection("autorizaciones").doc(uid).get();
   if (!snap.exists) return null;
-  const datos = snap.data() as { autorizacionDatos?: AutorizacionDatos };
-  return datos.autorizacionDatos ?? null;
+  const datos = snap.data() as AutorizacionGuardada;
+  return { version: datos.version, fecha: datos.fecha, idioma: datos.idioma, texto: datos.texto };
 }
 
 // ── Registro de confirmacion HMAC de un lote (Tarea 15, requisito A.3) ──────────────────────────
@@ -1095,4 +1178,20 @@ export async function guardarConfirmacionLote(
     .collection("lotes")
     .doc(loteId)
     .set({ confirmacion: { fecha: ahora, numPares, huellas } }, { merge: true });
+}
+
+/**
+ * Medio 3 (correccion vuelta 31, 2026-10-06): lee `lotes/{loteId}.confirmacion.huellas` — las
+ * huellas que `/api/lote/iniciar` guardo al crear el lote (arriba). `/api/send-email` las usa
+ * para comprobar que el par pagina-fila-correo que esta a punto de enviar es EXACTAMENTE uno de
+ * los que se confirmaron al iniciar el lote (rechaza con 409 si no lo es): la huella prueba lo
+ * que de verdad se envia, no solo lo que se autorizo a enviar en general. `null` si el lote no
+ * existe o no tiene confirmacion guardada (nunca debería pasar desde GRAVE 2: todo lote nuevo
+ * exige HUELLA_LOTE_SECRET configurado y pares completos antes de crearse).
+ */
+export async function obtenerHuellasLote(loteId: string): Promise<string[] | null> {
+  const snap = await db().collection("lotes").doc(loteId).get();
+  if (!snap.exists) return null;
+  const datos = snap.data() as Lote & { confirmacion?: { huellas: string[] } };
+  return datos.confirmacion?.huellas ?? null;
 }

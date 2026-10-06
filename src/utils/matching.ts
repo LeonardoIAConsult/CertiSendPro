@@ -1,4 +1,4 @@
-import { Recipient } from "../types";
+import { Recipient, CertificatePage } from "../types";
 
 // Standard normalization (lowercases, strips accents/diacritics, cleans spacing)
 export function normalizeString(str: string): string {
@@ -184,6 +184,88 @@ export function assignRecipientsOneToOne(
   }
 
   return { matches, needsReview };
+}
+
+// ── Emparejamiento final pagina<->destinatario, extraido como funcion PURA (Medio 2, correccion
+// vuelta 31, 2026-10-06) ─────────────────────────────────────────────────────────────────────────
+// Antes vivia como una funcion local dentro de src/App.tsx, cerrada sobre `addLog` (un efecto
+// secundario de React) — no se podia probar con node:test sin React/DOM. Se extrae aqui, SIN
+// efectos secundarios: en vez de loguear directamente, devuelve `eventos` (lo que antes se
+// logueaba) para que el llamador (App.tsx) decida como mostrarlo. El comportamiento es idéntico al
+// original: usa `assignRecipientsOneToOne` (arriba) sobre TODAS las paginas con nombre extraido a
+// la vez, asi que nunca asigna el mismo destinatario a dos paginas y nunca asigna a ciegas un
+// homonimo.
+
+export type EventoSincronizacion =
+  | { tipo: "homonimo"; pageIndex: number; extractedName: string }
+  | { tipo: "coincidencia"; pageIndex: number; extractedName: string; recipientName: string; score: number }
+  | { tipo: "sin_coincidencia"; pageIndex: number; extractedName: string };
+
+export interface ResultadoSincronizacion {
+  pages: CertificatePage[];
+  matchedCount: number;
+  needsReviewCount: number;
+  eventos: EventoSincronizacion[];
+}
+
+export function sincronizarEmparejamiento(
+  paginas: CertificatePage[],
+  destinatarios: Recipient[]
+): ResultadoSincronizacion {
+  const porEmparejar = paginas
+    .filter((p) => p.extractedName && p.extractedName !== "UNKNOWN")
+    .map((p) => ({ pageIndex: p.pageIndex, extractedName: p.extractedName }));
+  const { matches, needsReview } = assignRecipientsOneToOne(porEmparejar, destinatarios);
+
+  let matchedCount = 0;
+  let needsReviewCount = 0;
+  const eventos: EventoSincronizacion[] = [];
+  const pages = paginas.map((p) => {
+    if (!p.extractedName || p.extractedName === "UNKNOWN") return p;
+
+    if (needsReview.has(p.pageIndex)) {
+      needsReviewCount++;
+      eventos.push({ tipo: "homonimo", pageIndex: p.pageIndex, extractedName: p.extractedName });
+      return { ...p, matchedRecipient: null, status: "success" as const, errorMessage: null };
+    }
+
+    const resultadoPagina = matches.get(p.pageIndex) ?? null;
+    if (resultadoPagina) {
+      matchedCount++;
+      eventos.push({
+        tipo: "coincidencia",
+        pageIndex: p.pageIndex,
+        extractedName: p.extractedName,
+        recipientName: resultadoPagina.recipient.name,
+        score: resultadoPagina.score,
+      });
+    } else {
+      eventos.push({ tipo: "sin_coincidencia", pageIndex: p.pageIndex, extractedName: p.extractedName });
+    }
+    return {
+      ...p,
+      matchedRecipient: resultadoPagina ? resultadoPagina.recipient : null,
+      status: "success" as const,
+      errorMessage: null,
+    };
+  });
+
+  return { pages, matchedCount, needsReviewCount, eventos };
+}
+
+/**
+ * Medio 2 (correccion vuelta 31): true si `rowIndex` ya esta asignado (`matchedRecipient`) a otra
+ * pagina DISTINTA de `pageIndex` dentro de `pages` — usada por el emparejamiento MANUAL
+ * (`handleManualPairing` en App.tsx) para impedir que dos paginas queden con la misma fila de
+ * destinatario. Devuelve esa otra pagina (para poder avisar "ya esta asignada a la pagina N") o
+ * `null` si ninguna la tiene.
+ */
+export function paginaConFilaAsignada(
+  pages: CertificatePage[],
+  pageIndex: number,
+  rowIndex: number
+): CertificatePage | null {
+  return pages.find((p) => p.pageIndex !== pageIndex && p.matchedRecipient?.originalRowIndex === rowIndex) ?? null;
 }
 
 // Find the absolute best recipient match from list
