@@ -54,6 +54,10 @@ function opcionesBase(overrides: Partial<Parameters<typeof crearCobroPaquete>[0]
       copMostrado: COP_POR_DEFECTO,
       idioma: "es",
       modalidad: "unico",
+      // B.2 (Tarea 15, decision del Brain 2026-10-06): por defecto SIN Paquete vigente, para que
+      // las pruebas existentes (que esperan 200/400/503/409 de precio) sigan llegando a esa
+      // rama; las pruebas del 409 de recompra lo pisan con `overrides`.
+      tienePaqueteVigente: async () => false,
       obtenerTrm: async () => ({ valor: 4123, fechaDesde: "2026-10-05" }),
       copDesdeUsd,
       usdPaquete: 15,
@@ -221,4 +225,21 @@ test("Mercado Pago responde error -> 500, pero preferencia y aceptacion ya queda
   assert.deepEqual(orden, ["preferencia", "aceptacion", "mp"]);
   assert.ok(db.leer("preferencias/ref-1"));
   assert.ok(db.leer("aceptaciones/ref-1"));
+});
+
+// ── B.2 (Tarea 15, decision del Brain 2026-10-06): 409 si ya hay un Paquete vigente con saldo ──
+
+test("con Paquete vigente y saldo -> 409, nada se crea (ni preferencia, ni aceptacion, ni llamada a MP)", async () => {
+  const { orden, opts } = opcionesBase({ tienePaqueteVigente: async () => true });
+  const resultado = await crearCobroPaquete(opts);
+
+  assert.equal(resultado.httpStatus, 409);
+  assert.match((resultado.body as { error: string }).error, /Ya tienes un Paquete vigente/);
+  assert.deepEqual(orden, [], "ninguna dependencia debe llamarse");
+});
+
+test("sin Paquete vigente (tienePaqueteVigente=false) -> sigue el flujo normal (200)", async () => {
+  const { opts } = opcionesBase({ tienePaqueteVigente: async () => false });
+  const resultado = await crearCobroPaquete(opts);
+  assert.equal(resultado.httpStatus, 200);
 });

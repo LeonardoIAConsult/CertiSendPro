@@ -911,3 +911,60 @@ export async function liberarReserva(loteId: string, uid: string): Promise<void>
   const cuentaRef = db().collection("cuentas").doc(uid);
   await db().runTransaction((tx) => liberarReservaTx(tx, loteRef, cuentaRef));
 }
+
+// ── 409 de recompra de Paquete (Tarea 15, requisito B.2, decision del Brain 2026-10-06) ────────
+// Decision explicita: NO se permite comprar un Paquete nuevo mientras el actual siga vigente y
+// tenga saldo > 0 (antes, docs/legal/terminos-y-condiciones.md §4.5 y textos-checkout.md T6-bis
+// describian que la compra nueva "reemplaza" al Paquete vigente; esos textos se actualizaron en
+// la misma tarea para dejar de contradecir este bloqueo). Mismo criterio de vigencia que
+// `decidirLote` (arriba): `vence` en el futuro, nunca null.
+export function tienePaqueteVigenteConSaldo(cuenta: Cuenta, ahora: Date): boolean {
+  const vigente = cuenta.vence !== null && cuenta.vence.toMillis() > ahora.getTime();
+  return cuenta.plan === "paquete" && vigente && cuenta.enviosRestantes > 0;
+}
+
+// ── Autorizacion de tratamiento de datos, Ley 1581 (Tarea 15, requisito B.3) ────────────────────
+// Casilla de autorizacion explicita ANTES del primer uso (texto canonico T11 de
+// docs/legal/textos-checkout.md v1.3, decision del Brain 2026-10-06): se guarda en
+// `cuentas/{uid}.autorizacionDatos`, nunca se infiere ni se asume con el solo login de Google.
+export interface AutorizacionDatos {
+  version: string;
+  fecha: Timestamp;
+}
+
+/** Guarda la autorizacion de tratamiento de datos del usuario para la version vigente de la
+ * Politica de Privacidad. Llama a `obtenerCuenta` primero para asegurar que `cuentas/{uid}` ya
+ * tenga los campos base (plan/saldo/etc.) ANTES de este merge, asi `obtenerCuenta` nunca lee
+ * despues un documento a medio llenar. */
+export async function guardarAutorizacionDatos(uid: string, version: string): Promise<void> {
+  await obtenerCuenta(uid);
+  const ref = db().collection("cuentas").doc(uid);
+  await ref.set({ autorizacionDatos: { version, fecha: Timestamp.now() } }, { merge: true });
+}
+
+/** Devuelve la autorizacion de datos guardada del usuario, o `null` si nunca la dio (cuenta
+ * inexistente o sin el campo). */
+export async function obtenerAutorizacionDatos(uid: string): Promise<AutorizacionDatos | null> {
+  const snap = await db().collection("cuentas").doc(uid).get();
+  if (!snap.exists) return null;
+  const datos = snap.data() as { autorizacionDatos?: AutorizacionDatos };
+  return datos.autorizacionDatos ?? null;
+}
+
+// ── Registro de confirmacion HMAC de un lote (Tarea 15, requisito A.3) ──────────────────────────
+// docs/legal/terminos-y-condiciones.md §13.3(c) y §12.4 exigen una huella HMAC-SHA256 por cada
+// par pagina-fila-correo confirmado en un lote, SIN guardar la lista ni los correos en claro.
+// Las huellas mismas se calculan en server/huellaLote.ts (modulo puro, sin Firestore); esta
+// funcion solo las guarda en el MISMO doc `lotes/{loteId}` que ya crea `crearLote` (merge, nunca
+// pisa `enviados`/`reservados`/etc.).
+export async function guardarConfirmacionLote(
+  loteId: string,
+  numPares: number,
+  huellas: string[],
+  ahora: Timestamp
+): Promise<void> {
+  await db()
+    .collection("lotes")
+    .doc(loteId)
+    .set({ confirmacion: { fecha: ahora, numPares, huellas } }, { merge: true });
+}

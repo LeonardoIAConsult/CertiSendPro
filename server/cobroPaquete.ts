@@ -41,6 +41,11 @@ export interface CrearCobroPaqueteOpts {
   /** Modalidad elegida. Hoy esta ruta solo sabe activar "unico" (Tarea 7 agrega "renovable" al
    * webhook); cualquier otro valor se rechaza con 400 antes de tocar Firestore o Mercado Pago. */
   modalidad: unknown;
+  /** Requisito B.2 (Tarea 15, decision del Brain 2026-10-06): true si la cuenta YA tiene un
+   * Paquete vigente con saldo > 0 (ver `tienePaqueteVigenteConSaldo` en server/cuentas.ts).
+   * Inyectado para poder probar esta funcion con node:test sin Firestore, mismo patron que el
+   * resto de dependencias de esta interfaz. */
+  tienePaqueteVigente(): Promise<boolean>;
   obtenerTrm(): Promise<TrmDelDia | null>;
   copDesdeUsd(usd: number, trmValor: number): number;
   usdPaquete: number;
@@ -104,6 +109,16 @@ export async function crearCobroPaquete(opts: CrearCobroPaqueteOpts): Promise<Re
     return { httpStatus: 400, body: { error: "Esa modalidad todavía no está disponible. Elige pago único." } };
   }
   const idioma = normalizarIdioma(opts.idioma);
+
+  // B.2 (Tarea 15, decision del Brain 2026-10-06): no se permite recomprar con un Paquete vigente
+  // que todavia tenga saldo. Va ANTES de calcular TRM/cop para no tocar Firestore (preferencia,
+  // aceptacion) ni Mercado Pago cuando ya esta bloqueado.
+  if (await opts.tienePaqueteVigente()) {
+    return {
+      httpStatus: 409,
+      body: { error: "Ya tienes un Paquete vigente. Agótalo o espera a que venza antes de comprar otro." },
+    };
+  }
 
   const trm = await opts.obtenerTrm();
   if (!trm) {

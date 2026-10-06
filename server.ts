@@ -21,8 +21,13 @@ import {
   guardarAceptacion,
   listarPagosPendientesDeAcuse,
   listarPagosParaBarridoGlobal,
+  tienePaqueteVigenteConSaldo,
+  guardarAutorizacionDatos,
+  obtenerAutorizacionDatos,
+  guardarConfirmacionLote,
   type PagoProcesadoAcuse,
 } from "./server/cuentas";
+import { huellasLote, type ParConfirmacion } from "./server/huellaLote";
 import { trmHoy, copDesdeUsd } from "./server/trm";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete } from "./server/cobroPaquete";
@@ -699,6 +704,11 @@ const PLANES_USD = {
   paquete: { usd: 15, titulo: "CertiSend — Paquete de 150 envíos" },
   pro: { usd: 29, titulo: "CertiSend Pro Monthly" },
 } as const;
+
+// Version vigente de la Politica de Privacidad (docs/legal/privacidad.plantilla.md, "Versión:
+// 2.3") que /api/autorizacion-datos guarda junto a la autorizacion (requisito B.3, Tarea 15,
+// Ley 1581). Subir esta constante cuando cambie la version publicada.
+const AUTORIZACION_DATOS_VERSION = "2.3";
 // TRM del dia: validacion, timeout y cacheo robustos viven en server/trm.ts (Tarea 4, 2026-10-05)
 // — igual que cuentas.ts, separado de este archivo para poder probarse con node:test sin red.
 
@@ -801,6 +811,11 @@ app.post("/api/mercadopago/create-preference", exigirAuth, limitarCobroPorUid, l
       copMostrado,
       idioma,
       modalidad,
+      // B.2 (Tarea 15, decision del Brain 2026-10-06): 409 si ya hay un Paquete vigente con
+      // saldo > 0 — no se permite recomprar. Se relee la cuenta aqui (no la del `obtenerCuenta`
+      // de otros handlers) porque este thunk es la unica forma en que `crearCobroPaquete` puede
+      // comprobarlo sin acoplarse a Firestore directamente.
+      tienePaqueteVigente: async () => tienePaqueteVigenteConSaldo(await obtenerCuenta(req.uid!), new Date()),
       obtenerTrm: trmHoy,
       copDesdeUsd,
       usdPaquete: usd,
@@ -1069,6 +1084,30 @@ app.get("/api/cuenta", exigirAuth, async (req, res) => {
   }
 });
 
+// Autorizacion de tratamiento de datos personales, Ley 1581 (Tarea 15, requisito B.3,
+// 2026-10-06). Casilla explicita ANTES del primer uso (texto canonico T11 de
+// docs/legal/textos-checkout.md v1.3): GET dice si el usuario YA autorizo (para que la landing
+// decida si mostrar el aviso), POST la guarda. Las dos requieren sesion real.
+app.get("/api/autorizacion-datos", exigirAuth, async (req, res) => {
+  try {
+    const autorizacion = await obtenerAutorizacionDatos(req.uid!);
+    res.json({ autorizado: autorizacion !== null, version: autorizacion?.version ?? null });
+  } catch (error: any) {
+    console.error("Error al consultar la autorizacion de datos:", error);
+    res.status(500).json({ error: "No se pudo consultar tu autorizacion en este momento." });
+  }
+});
+
+app.post("/api/autorizacion-datos", exigirAuth, async (req, res) => {
+  try {
+    await guardarAutorizacionDatos(req.uid!, AUTORIZACION_DATOS_VERSION);
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error("Error al guardar la autorizacion de datos:", error);
+    res.status(500).json({ error: "No se pudo guardar tu autorización. Intenta de nuevo." });
+  }
+});
+
 // Endpoint para pedir permiso de envio ANTES de empezar un lote (Tarea 3, 2026-10-05). El
 // navegador manda cuantos certificados quiere enviar; el servidor decide segun el plan real de
 // la cuenta (nunca segun lo que diga el navegador) y, si lo aprueba, crea un lote autorizado que
@@ -1078,6 +1117,14 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
     const cantidad = Number(req.body?.cantidad);
     if (!Number.isFinite(cantidad) || cantidad <= 0) {
       return res.status(400).json({ error: "Falta una cantidad valida de certificados a enviar." });
+    }
+
+    // B.3 (requisito Ley 1581): sin autorizacion de datos guardada, no se inicia ningun lote.
+    const autorizacion = await obtenerAutorizacionDatos(req.uid!);
+    if (!autorizacion) {
+      return res.status(403).json({
+        error: "Debes autorizar el tratamiento de tus datos personales antes de enviar. Vuelve a iniciar sesión para aceptar el aviso.",
+      });
     }
 
     const cuenta = await obtenerCuenta(req.uid!);
@@ -1098,6 +1145,25 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
     // tenga Paquete vigente), no el plan real de la cuenta — eso es lo que decide si se
     // descuenta saldo (ver decidirLote/reservarEnvioTx/confirmarEnvioExitosoTx).
     const { loteId } = await crearLote(req.uid!, cantidad, decision.planEfectivo);
+
+    // A.3 (requisito §13.3(c)/§12.4 del legal): huella HMAC-SHA256 por cada par pagina-fila-
+    // correo, SIN guardar la lista ni los correos en claro. `pares` es opcional (lotes <=15 o
+    // llamadas viejas sin este campo no rompen el flujo); sin HUELLA_LOTE_SECRET configurado,
+    // se guarda el lote igual pero sin huellas (nunca bloquea el envio).
+    const paresCrudos = Array.isArray(req.body?.pares) ? req.body.pares : [];
+    const pares: ParConfirmacion[] = paresCrudos
+      .filter((p: any) => p && Number.isFinite(p.pagina) && Number.isFinite(p.fila) && typeof p.correo === "string")
+      .map((p: any) => ({ pagina: p.pagina, fila: p.fila, correo: p.correo }));
+    if (pares.length > 0) {
+      const secreto = process.env.HUELLA_LOTE_SECRET;
+      if (!secreto) {
+        console.warn("[LOTE] HUELLA_LOTE_SECRET no configurado; el lote se crea sin huella de confirmacion.");
+      } else {
+        const huellas = huellasLote(pares, secreto);
+        await guardarConfirmacionLote(loteId, pares.length, huellas, Timestamp.now());
+      }
+    }
+
     res.json({
       permitido: true,
       loteId,

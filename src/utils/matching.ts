@@ -83,6 +83,109 @@ export function calculateSimilarity(s1: string, s2: string): number {
   return Math.max(subsetWeight, levScore);
 }
 
+// ── Homonimos y asignacion uno-a-uno (Tarea 15, requisito A.1, 2026-10-06) ──────────────────────
+// `findBestRecipient` (abajo) se llamaba independientemente por pagina en varios sitios de
+// App.tsx: nunca hacia asignacion uno-a-uno (un destinatario podia quedar emparejado con DOS
+// paginas) y nunca detectaba homonimos (dos filas con el mismo nombre normalizado) — con dos
+// "Juan Perez" en la hoja, cualquiera de los dos podia terminar con el certificado del otro sin
+// ningun aviso. Las dos funciones de abajo arreglan eso usando `originalRowIndex` (id estable de
+// cada fila) en vez de comparar por nombre.
+
+/** Devuelve el `originalRowIndex` de TODAS las filas cuyo nombre normalizado se repite en la
+ * lista de destinatarios (2 o mas filas con el mismo nombre). Vacio si no hay homonimos. */
+export function findHomonymRowIndexes(recipients: Recipient[]): Set<number> {
+  const filasPorNombre = new Map<string, number[]>();
+  for (const recipient of recipients) {
+    const clave = normalizeString(recipient.name);
+    const filas = filasPorNombre.get(clave) ?? [];
+    filas.push(recipient.originalRowIndex);
+    filasPorNombre.set(clave, filas);
+  }
+
+  const homonimos = new Set<number>();
+  for (const filas of filasPorNombre.values()) {
+    if (filas.length > 1) {
+      for (const fila of filas) homonimos.add(fila);
+    }
+  }
+  return homonimos;
+}
+
+export interface PaginaAEmparejar {
+  pageIndex: number;
+  extractedName: string;
+}
+
+export interface ResultadoAsignacion {
+  /** Destinatario asignado a cada pagina (o `null` si ningun candidato llego al umbral). Las
+   * paginas que SI estan en `needsReview` tambien aparecen aqui con `null` — nunca con un
+   * destinatario a medias. */
+  matches: Map<number, { recipient: Recipient; score: number } | null>;
+  /** Paginas cuyo mejor candidato disponible es un homonimo: nunca se asignan solas, necesitan
+   * revision manual (`handleManualPairing`). */
+  needsReview: Set<number>;
+}
+
+/**
+ * Asigna cada pagina a UN destinatario distinto (uno-a-uno), nunca el mismo destinatario a dos
+ * paginas. Algoritmo goloso: genera todos los candidatos pagina×destinatario con similitud >=
+ * `threshold`, los ordena de mayor a menor similitud (empate: `originalRowIndex` ascendente para
+ * que el resultado sea determinista) y los procesa en ese orden. Para cada candidato, si su
+ * pagina o su destinatario ya se resolvieron, se ignora (la pagina ya sigue intentando con su
+ * siguiente mejor candidato en una vuelta posterior). Si el destinatario del candidato es un
+ * homonimo (ver `findHomonymRowIndexes`), la pagina NUNCA se asigna a ciegas: pasa a
+ * `needsReview` y queda resuelta (no vuelve a intentarse con un candidato peor). En cualquier
+ * otro caso, se asigna y tanto la pagina como el destinatario quedan consumidos.
+ */
+export function assignRecipientsOneToOne(
+  pages: PaginaAEmparejar[],
+  recipients: Recipient[],
+  threshold = 0.45
+): ResultadoAsignacion {
+  const homonimos = findHomonymRowIndexes(recipients);
+  const matches = new Map<number, { recipient: Recipient; score: number } | null>();
+  for (const page of pages) matches.set(page.pageIndex, null);
+
+  interface Candidato {
+    pageIndex: number;
+    recipient: Recipient;
+    score: number;
+  }
+  const candidatos: Candidato[] = [];
+  for (const page of pages) {
+    if (!page.extractedName || page.extractedName === "UNKNOWN") continue;
+    for (const recipient of recipients) {
+      const score = calculateSimilarity(page.extractedName, recipient.name);
+      if (score >= threshold) candidatos.push({ pageIndex: page.pageIndex, recipient, score });
+    }
+  }
+  candidatos.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.recipient.originalRowIndex - b.recipient.originalRowIndex;
+  });
+
+  const needsReview = new Set<number>();
+  const paginasResueltas = new Set<number>();
+  const destinatariosUsados = new Set<number>();
+
+  for (const candidato of candidatos) {
+    if (paginasResueltas.has(candidato.pageIndex)) continue;
+    if (destinatariosUsados.has(candidato.recipient.originalRowIndex)) continue;
+
+    if (homonimos.has(candidato.recipient.originalRowIndex)) {
+      needsReview.add(candidato.pageIndex);
+      paginasResueltas.add(candidato.pageIndex);
+      continue;
+    }
+
+    matches.set(candidato.pageIndex, { recipient: candidato.recipient, score: candidato.score });
+    paginasResueltas.add(candidato.pageIndex);
+    destinatariosUsados.add(candidato.recipient.originalRowIndex);
+  }
+
+  return { matches, needsReview };
+}
+
 // Find the absolute best recipient match from list
 export function findBestRecipient(
   extractedName: string,

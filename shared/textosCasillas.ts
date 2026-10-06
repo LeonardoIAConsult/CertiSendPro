@@ -13,7 +13,7 @@
 // a desviarse, p. ej. si alguien reintroduce una copia local en vez de importar de aqui).
 
 /** Version vigente de los Terminos y Condiciones citada en la casilla T4. */
-export const TERMINOS_VERSION = "1.2";
+export const TERMINOS_VERSION = "1.3";
 
 /** Idioma de la UI en el momento del cobro: el checkout acepta "es" o "en"; cualquier otro valor
  * (ausente, invalido) se trata como "es" — ver `normalizarIdioma`. */
@@ -41,22 +41,21 @@ export function textoCasillaTerminos(montoCop: number, idioma: Idioma = "es"): s
   );
 }
 
-/** Texto EXACTO de la casilla T5 (retracto, `textos-checkout.md` v1.2, ES). No depende del plan
- * ni del monto, siempre es el mismo. */
+/** Texto EXACTO de la casilla T5 (retracto, `textos-checkout.md` v1.3, ES). No depende del plan
+ * ni del monto, siempre es el mismo. v1.3 quito "Puedo cancelar las renovaciones cuando quiera"
+ * porque v1 no tiene nada que renovar (Tarea 7, modalidad "renovable", todavia no implementada). */
 export const TEXTO_CASILLA_RETRACTO =
   "Quiero que el servicio empiece de inmediato al confirmarse mi pago. Sé que, por eso, no procede " +
-  "el derecho de retracto de 5 días hábiles (Ley 1480 de 2011, artículo 47, numeral 1). Puedo " +
-  "cancelar las renovaciones cuando quiera, conservo los reembolsos y la reversión del pago que la " +
-  "ley me reconoce y, si es un Paquete y no hago ningún envío con él, puedo pedir su devolución " +
-  "completa dentro de los 5 días hábiles siguientes al pago.";
+  "el derecho de retracto de 5 días hábiles (Ley 1480 de 2011, artículo 47, numeral 1). Conservo " +
+  "los reembolsos y la reversión del pago que la ley me reconoce y, si no hago ningún envío con " +
+  "este Paquete, puedo pedir su devolución completa dentro de los 5 días hábiles siguientes al pago.";
 
-/** Traduccion fiel de `TEXTO_CASILLA_RETRACTO` (T5 EN, `textos-checkout.md` v1.2). */
+/** Traduccion fiel de `TEXTO_CASILLA_RETRACTO` (T5 EN, `textos-checkout.md` v1.3). */
 export const TEXTO_CASILLA_RETRACTO_EN =
   "I want the service to start immediately once my payment is confirmed. I understand that, for this " +
   "reason, the 5-business-day right of withdrawal does not apply (Colombian Law 1480 of 2011, article " +
-  "47, item 1). I can cancel renewals at any time, I keep the refunds and payment reversal rights the " +
-  "law grants me, and, for a Bundle with no sends used, I can request a full refund within 5 business " +
-  "days after payment.";
+  "47, item 1). I keep the refunds and payment reversal rights the law grants me, and, if I make no " +
+  "sends with this Bundle, I can request a full refund within 5 business days after payment.";
 
 /** Texto EXACTO de la casilla T5 en el idioma pedido. */
 export function textoCasillaRetracto(idioma: Idioma = "es"): string {

@@ -40,7 +40,8 @@ import {
   fetchSpreadsheetTabs,
   fetchSpreadsheetRecipients
 } from "./utils/googleSheets";
-import { findBestRecipient } from "./utils/matching";
+import { findBestRecipient, assignRecipientsOneToOne } from "./utils/matching";
+import { reemplazarPlaceholdersProveedor } from "./utils/legalMarkdown";
 import JSZip from "jszip";
 import LandingPage from "./components/LandingPage";
 import LegalPage from "./components/LegalPage";
@@ -198,6 +199,9 @@ export default function App() {
 
   // Delivery state
   const [isDelivering, setIsDelivering] = useState(false);
+  // A.2 (Tarea 15, 2026-10-06): true mientras la pantalla de confirmacion "pagina -> nombre ->
+  // correo" esta abierta, ANTES de llamar a `ejecutarEnvioMasivoConfirmado`.
+  const [confirmandoEnvio, setConfirmandoEnvio] = useState(false);
 
   // General Notification Banner state
   const [banner, setBanner] = useState<{ type: "success" | "error" | "info"; msg: string } | null>(null);
@@ -289,6 +293,53 @@ export default function App() {
       fetchCuenta();
     }
   }, [needsAuth, user]);
+
+  // ── Autorizacion de tratamiento de datos, Ley 1581 (Tarea 15, requisito B.3, 2026-10-06) ─────
+  // Aviso con casilla ANTES del primer uso (texto canonico T11 de docs/legal/textos-checkout.md
+  // v1.3): se consulta `GET /api/autorizacion-datos` justo despues de iniciar sesion real (no
+  // Invitado, que no tiene sesion de Firebase); si todavia no autorizo, se muestra el aviso
+  // modal de abajo. El servidor vuelve a exigirla en `/api/lote/iniciar` (403 sin ella) por si el
+  // usuario cierra este aviso sin aceptar: esta pantalla es la comodidad, el servidor es la regla.
+  const [necesitaAutorizarDatos, setNecesitaAutorizarDatos] = useState(false);
+  const [aceptaAutorizacionDatos, setAceptaAutorizacionDatos] = useState(false);
+  const [autorizandoDatos, setAutorizandoDatos] = useState(false);
+
+  useEffect(() => {
+    if (needsAuth || !user || user.isGuest) return;
+    (async () => {
+      try {
+        const authHeader = await construirAuthHeader();
+        if (!authHeader.Authorization) return;
+        const res = await fetch("/api/autorizacion-datos", { headers: authHeader });
+        if (!res.ok) return;
+        const data = await res.json();
+        setNecesitaAutorizarDatos(data.autorizado !== true);
+      } catch (err) {
+        console.error("No se pudo consultar la autorización de datos:", err);
+      }
+    })();
+  }, [needsAuth, user]);
+
+  const handleAutorizarDatos = async () => {
+    if (!aceptaAutorizacionDatos) return;
+    setAutorizandoDatos(true);
+    try {
+      const res = await fetch("/api/autorizacion-datos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(await construirAuthHeader()) },
+      });
+      if (!res.ok) {
+        triggerBanner("error", "No se pudo guardar tu autorización. Intenta de nuevo.");
+        return;
+      }
+      setNecesitaAutorizarDatos(false);
+      addLog("Autorización de tratamiento de datos registrada.", "success");
+    } catch (err: any) {
+      triggerBanner("error", "No se pudo guardar tu autorización. Intenta de nuevo.");
+    } finally {
+      setAutorizandoDatos(false);
+    }
+  };
 
   // `?pago=...`/`payment_id`/`status` al volver de Mercado Pago: se leen UNA sola vez al montar
   // (vienen de la URL con la que cargo la pagina, nunca cambian dentro de la misma sesion de la
@@ -609,21 +660,12 @@ export default function App() {
       setHeaders(loadedHeaders);
       setRecipients(loadedRecipients);
 
-      // Automatically match with existing pages if any are loaded/analyzed
+      // Automatically match with existing pages if any are loaded/analyzed (A.1: asignacion
+      // uno-a-uno + deteccion de homonimos sobre TODAS las paginas a la vez, nunca pagina por
+      // pagina de forma independiente).
       setPages((prevPages) => {
         if (prevPages.length === 0) return prevPages;
-        return prevPages.map((p) => {
-          if (p.extractedName && p.extractedName !== "UNKNOWN") {
-            const { best } = findBestRecipient(p.extractedName, loadedRecipients);
-            return {
-              ...p,
-              matchedRecipient: best,
-              status: "success" as const,
-              errorMessage: null,
-            };
-          }
-          return p;
-        });
+        return sincronizarEmparejamiento(prevPages, loadedRecipients).pages;
       });
 
       // Attempt smart guesses for name and email column if they are initially zero/one
@@ -798,6 +840,60 @@ export default function App() {
     }
   };
 
+  // ── Emparejamiento final pagina<->destinatario (Tarea 15, requisito A.1, 2026-10-06) ─────────
+  // Punto UNICO que decide el `matchedRecipient` final de un grupo de paginas: antes, cada sitio
+  // de esta app llamaba a `findBestRecipient` pagina por pagina de forma INDEPENDIENTE, asi que
+  // nunca se garantizaba asignacion uno-a-uno (un destinatario podia terminar emparejado con DOS
+  // paginas) y nunca se detectaban homonimos (dos filas con el mismo nombre en la hoja). Esta
+  // funcion usa `assignRecipientsOneToOne` sobre TODAS las paginas con nombre extraido a la vez:
+  // si el mejor candidato de una pagina es un homonimo, esa pagina NUNCA se asigna a ciegas (queda
+  // sin `matchedRecipient`, a la espera de `handleManualPairing`). `findBestRecipient` sigue
+  // usandose tal cual para la vista "en vivo" de los bucles de escaneo (feedback de progreso
+  // mientras la IA todavia esta corriendo); esta funcion es la que FIJA el resultado final.
+  const sincronizarEmparejamiento = (
+    paginas: CertificatePage[],
+    destinatarios: Recipient[]
+  ): { pages: CertificatePage[]; matchedCount: number; needsReviewCount: number } => {
+    const porEmparejar = paginas
+      .filter((p) => p.extractedName && p.extractedName !== "UNKNOWN")
+      .map((p) => ({ pageIndex: p.pageIndex, extractedName: p.extractedName }));
+    const { matches, needsReview } = assignRecipientsOneToOne(porEmparejar, destinatarios);
+
+    let matchedCount = 0;
+    let needsReviewCount = 0;
+    const pagesResultado = paginas.map((p) => {
+      if (!p.extractedName || p.extractedName === "UNKNOWN") return p;
+
+      if (needsReview.has(p.pageIndex)) {
+        needsReviewCount++;
+        addLog(
+          `[Revisión manual] Página ${p.pageIndex}: "${p.extractedName}" coincide con más de un destinatario con el mismo nombre en la hoja (homónimos); asígnalo manualmente.`,
+          "warning"
+        );
+        return { ...p, matchedRecipient: null, status: "success" as const, errorMessage: null };
+      }
+
+      const resultadoPagina = matches.get(p.pageIndex) ?? null;
+      if (resultadoPagina) {
+        matchedCount++;
+        addLog(
+          `[Coincidencia] Página ${p.pageIndex}: "${p.extractedName}" -> ${resultadoPagina.recipient.name} (${Math.round(resultadoPagina.score * 100)}% similitud)`,
+          "success"
+        );
+      } else {
+        addLog(`[Sin coincidencia] Página ${p.pageIndex}: "${p.extractedName}" no tiene un destinatario compatible en la hoja.`, "warning");
+      }
+      return {
+        ...p,
+        matchedRecipient: resultadoPagina ? resultadoPagina.recipient : null,
+        status: "success" as const,
+        errorMessage: null,
+      };
+    });
+
+    return { pages: pagesResultado, matchedCount, needsReviewCount };
+  };
+
   // Trigger Gemini AI scanning on each split page to extract recipient name
   const handleRunAIScan = async (pagesToUse?: any) => {
     // Ensure activePages uses pagesRef.current rather than stale pages closure,
@@ -817,29 +913,12 @@ export default function App() {
     const totalToScan = pagesToScan.filter((p) => p.needsScan).length;
     if (totalToScan === 0) {
       addLog("Todos los nombres han sido extraídos previamente. Iniciando cruce y emparejamiento inteligente de forma local con la lista del Google Sheet...", "info");
-      
-      let matchedCount = 0;
-      const updatedPages = activePages.map((p) => {
-        if (p.extractedName && p.extractedName !== "UNKNOWN") {
-          const { best, score } = findBestRecipient(p.extractedName, activeRecipients);
-          if (best) {
-            matchedCount++;
-            addLog(`[Emparejado Inteligente] Página ${p.pageIndex}: "${p.extractedName}" -> ${best.name} (${Math.round(score * 100)}% de coincidencia)`, "success");
-          } else {
-            addLog(`[Sin Coincidencia] Página ${p.pageIndex}: "${p.extractedName}" no tiene coincidencia cercana en el Sheet.`, "warning");
-          }
-          return {
-            ...p,
-            matchedRecipient: best,
-            status: "success" as const,
-            errorMessage: null,
-          };
-        }
-        return p;
-      });
+
+      const { pages: updatedPages, matchedCount, needsReviewCount } = sincronizarEmparejamiento(activePages, activeRecipients);
 
       setPages(updatedPages);
-      triggerBanner("success", `¡Cruce de datos completado! Se emparejaron ${matchedCount} de ${activePages.length} certificados.`);
+      const sufijoRevision = needsReviewCount > 0 ? ` (${needsReviewCount} necesitan revisión manual por homónimos)` : "";
+      triggerBanner("success", `¡Cruce de datos completado! Se emparejaron ${matchedCount} de ${activePages.length} certificados.${sufijoRevision}`);
       return;
     }
 
@@ -905,9 +984,19 @@ export default function App() {
         setPages([...currentPages]);
       }
 
+      // A.1: pase final que FIJA el emparejamiento (uno-a-uno + homonimos); el bucle de arriba
+      // solo daba una vista en vivo pagina por pagina mientras "escaneaba".
+      const { pages: finalGuestPages, needsReviewCount: needsReviewGuest } = sincronizarEmparejamiento(currentPages, activeRecipients);
+      setPages(finalGuestPages);
+
       setIsProcessingAI(false);
       addLog("¡Simulación de análisis masivo con Inteligencia Artificial completado!", "success");
-      triggerBanner("success", "¡Análisis simulado con IA finalizado!");
+      triggerBanner(
+        "success",
+        needsReviewGuest > 0
+          ? `¡Análisis simulado con IA finalizado! ${needsReviewGuest} página(s) necesitan revisión manual por homónimos.`
+          : "¡Análisis simulado con IA finalizado!"
+      );
       return;
     }
 
@@ -1030,43 +1119,33 @@ export default function App() {
       setPages([...currentPages]);
     }
 
-    // Final step: run fuzzy matching on all pages to ensure complete alignment with recipients list
+    // Final step (A.1): este es el pase que de verdad FIJA el emparejamiento de esta rama —
+    // uno-a-uno sobre TODAS las paginas a la vez, nunca pagina por pagina de forma independiente,
+    // y sin asignar a ciegas cuando el mejor candidato es un homonimo.
     addLog("Sincronizando de forma masiva los resultados de la IA con la lista de Google Sheet...", "info");
-    let matchedCount = 0;
-    const finalPages = currentPages.map((p) => {
-      if (p.extractedName && p.extractedName !== "UNKNOWN") {
-        const { best, score } = findBestRecipient(p.extractedName, activeRecipients);
-        if (best) {
-          matchedCount++;
-          addLog(`[Coincidencia] Página ${p.pageIndex}: "${p.extractedName}" -> ${best.name} (${Math.round(score * 100)}% similitud)`, "success");
-        } else {
-          addLog(`[Coincidencia] Página ${p.pageIndex}: "Extracción: [${p.extractedName}]" -> No se encontró ningún destinatario compatible en la hoja.`, "warning");
-        }
-        return {
-          ...p,
-          matchedRecipient: best,
-          status: p.status === "analyzing" ? "success" : p.status,
-          errorMessage: null,
-        };
-      }
-      return p;
-    });
+    const { pages: finalPages, matchedCount, needsReviewCount } = sincronizarEmparejamiento(currentPages, activeRecipients);
 
     setPages(finalPages);
     setIsProcessingAI(false);
-    addLog(`Análisis e inteligente emparejado de nombres finalizado. Total emparejados: ${matchedCount} de ${finalPages.length}.`, "success");
-    triggerBanner("success", `¡Filtrado finalizado! Se emparejaron ${matchedCount} certificados.`);
+    const sufijoRevision = needsReviewCount > 0 ? ` ${needsReviewCount} necesitan revisión manual por homónimos.` : "";
+    addLog(`Análisis e inteligente emparejado de nombres finalizado. Total emparejados: ${matchedCount} de ${finalPages.length}.${sufijoRevision}`, "success");
+    triggerBanner("success", `¡Filtrado finalizado! Se emparejaron ${matchedCount} certificados.${sufijoRevision}`);
   };
 
   // Perform a manual pairing update for a specific page
-  const handleManualPairing = (pageIndex: number, recipientName: string) => {
+  // A.1 (Tarea 15, 2026-10-06): se busca por `originalRowIndex` (id estable de la fila), nunca
+  // por nombre — con homonimos, `recipients.find(r => r.name === recipientName)` siempre
+  // devolvia la PRIMERA fila con ese nombre, nunca la que el usuario elegia realmente en el
+  // selector (ver las opciones del <select>, que ahora mandan el `originalRowIndex` como valor).
+  const handleManualPairing = (pageIndex: number, recipientRowIndex: string) => {
     const updated = pages.map((p) => {
       if (p.pageIndex === pageIndex) {
-        if (recipientName === "__none__") {
+        if (recipientRowIndex === "__none__") {
           addLog(`[HOLA ${pageIndex}] Desasociado manualmente del destinatario anterior.`, "info");
           return { ...p, matchedRecipient: null };
         }
-        const matched = recipients.find((r) => r.name === recipientName) || null;
+        const rowIndex = Number(recipientRowIndex);
+        const matched = recipients.find((r) => r.originalRowIndex === rowIndex) || null;
         if (matched) {
           addLog(`[HOLA ${pageIndex}] Asociado manualmente con ${matched.name}.`, "success");
         }
@@ -1191,18 +1270,25 @@ export default function App() {
   };
 
   // Run bulk delivery via Gmail endpoint (Only upon manual confirmation - "User approves")
-  const handleSendEmails = async () => {
+  // A.2 (Tarea 15, 2026-10-06): antes de enviar, el `window.confirm` generico no mostraba A QUIEN
+  // le llegaba cada certificado — solo "¿autorizas el envio de N correos?". `handleSendEmails`
+  // ahora solo ABRE la pantalla de confirmacion (lista pagina->nombre->correo, ver el modal en el
+  // render); el envio real quedo en `ejecutarEnvioMasivoConfirmado`, que el boton de esa pantalla
+  // dispara.
+  const handleSendEmails = () => {
     const matchedCount = pages.filter((p) => p.matchedRecipient !== null).length;
     if (matchedCount === 0) {
       triggerBanner("error", "No hay certificados asociados a correos válidos para enviar.");
       return;
     }
+    setConfirmandoEnvio(true);
+  };
 
-    const confirmed = window.confirm(
-      `¿Estás seguro de que deseas autorizar el envío automatizado de ${matchedCount} correos electrónicos personalizados utilizando tu cuenta de Gmail?`
-    );
-    if (!confirmed) {
-      addLog("Envío masivo abortado por el usuario.", "warning");
+  const ejecutarEnvioMasivoConfirmado = async () => {
+    setConfirmandoEnvio(false);
+    const matchedCount = pages.filter((p) => p.matchedRecipient !== null).length;
+    if (matchedCount === 0) {
+      triggerBanner("error", "No hay certificados asociados a correos válidos para enviar.");
       return;
     }
 
@@ -1237,6 +1323,15 @@ export default function App() {
     // Límites de plan en el servidor (Tarea 3, cobro real con planes, 2026-10-05): antes de
     // enviar un solo correo real, se pide permiso para el tamaño exacto del lote. El servidor
     // decide y cuenta; si no alcanza, no se envía nada todavía.
+    //
+    // A.3 (Tarea 15, requisito §13.3(c)/§12.4 del legal, 2026-10-06): se manda ademas `pares`
+    // (pagina->fila->correo de CADA pagina con destinatario) para que el servidor guarde la
+    // huella HMAC de confirmacion del lote (server/huellaLote.ts), sin mandar nunca el correo en
+    // claro mas alla de esta peticion — el servidor firma y nunca lo guarda sin hashear.
+    const pares = pages
+      .filter((p) => p.matchedRecipient !== null)
+      .map((p) => ({ pagina: p.pageIndex, fila: p.matchedRecipient!.originalRowIndex, correo: p.matchedRecipient!.email }));
+
     let loteId: string;
     try {
       const resLote = await fetch("/api/lote/iniciar", {
@@ -1245,14 +1340,19 @@ export default function App() {
           "Content-Type": "application/json",
           ...(await construirAuthHeader()),
         },
-        body: JSON.stringify({ cantidad: matchedCount }),
+        body: JSON.stringify({ cantidad: matchedCount, pares }),
       });
       const dataLote = await resLote.json().catch(() => ({} as any));
 
       if (!resLote.ok || !dataLote.permitido) {
-        // Lenguaje claro + opciones (dividir el lote o ver planes) en una sola funcion pura
-        // (src/utils/plan.ts), probada con node:test (Tarea 10). Nada se envia en este caso.
-        const mensaje = formatearMotivoRechazoLote(dataLote.motivo, dataLote.enviosRestantes, matchedCount, language);
+        // B.3 (Tarea 15): un rechazo SIN `motivo` (p. ej. 403 por falta de autorizacion de
+        // datos, o cualquier otro error con `dataLote.error`) usaba antes SIEMPRE
+        // `formatearMotivoRechazoLote`, que con `motivo=undefined` caia al texto de "limite
+        // gratis" — incorrecto para ese caso. Si el servidor mando un `error` explicito, se
+        // muestra ESE texto; solo se usa el formateador de motivos de plan cuando no hay uno.
+        const mensaje = dataLote.error
+          ? String(dataLote.error)
+          : formatearMotivoRechazoLote(dataLote.motivo, dataLote.enviosRestantes, matchedCount, language);
         addLog(mensaje, "error");
         triggerBanner("error", mensaje);
         setIsDelivering(false);
@@ -1442,6 +1542,22 @@ export default function App() {
   }
 
   const isDark = theme === "dark";
+
+  // Texto T11 canonico (docs/legal/textos-checkout.md v1.3). El nombre legal del proveedor NUNCA
+  // se hardcodea en este archivo versionado (regla del Brain, 2026-10-06): se sustituye con
+  // `VITE_PROVEEDOR_NOMBRE` del build, igual patron que LegalPage.tsx; sin esa variable, queda
+  // "[dato pendiente]" (nunca se inventa).
+  const textoAutorizacionDatos =
+    language === "en"
+      ? reemplazarPlaceholdersProveedor(
+          "I authorize {{PROVEEDOR_NOMBRE}} (CertiSend Pro) to process my personal data for the purposes described in the Privacy Policy, including its transfer to providers outside Colombia (Google, Mercado Pago and, if I use it, Canva).",
+          { nombre: import.meta.env.VITE_PROVEEDOR_NOMBRE }
+        )
+      : reemplazarPlaceholdersProveedor(
+          "Autorizo a {{PROVEEDOR_NOMBRE}} (CertiSend Pro) a tratar mis datos personales para las finalidades de la Política de Privacidad, incluida su transferencia a proveedores fuera de Colombia (Google, Mercado Pago y, si la uso, Canva).",
+          { nombre: import.meta.env.VITE_PROVEEDOR_NOMBRE }
+        );
+
   const bgMain = isDark ? "bg-[#0B0C0E] text-[#D1D5DB]" : "bg-[#F3F4F6] text-[#374151]";
   const bgHeader = isDark ? "bg-[#0F1115] border-[#2D2F36]" : "bg-white border-gray-200 shadow-sm";
   const bgCard = isDark ? "bg-[#16181D] border-[#2D2F36]" : "bg-white border-gray-200 shadow-sm text-[#374151]";
@@ -1473,6 +1589,137 @@ export default function App() {
               <AlertCircle className="w-5 h-5 text-rose-400 shrink-0" />
             )}
             <span className="text-xs font-semibold">{banner.msg}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Pantalla de confirmación "página -> nombre -> correo" ANTES de enviar (Tarea 15,
+          requisito A.2, 2026-10-06): antes, el único paso era un `window.confirm` generico sin
+          mostrar a quién le llegaba cada certificado. Solo el botón "Confirmar y enviar" de aquí
+          dispara `ejecutarEnvioMasivoConfirmado`. */}
+      <AnimatePresence>
+        {confirmandoEnvio && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className={`w-full max-w-lg rounded-2xl border p-6 max-h-[85vh] flex flex-col ${
+                isDark ? "bg-[#13151F] border-[#222530] text-white" : "bg-white border-gray-200 text-gray-900"
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <Mail className="w-5 h-5 text-indigo-500 shrink-0" />
+                <h2 className="text-sm font-extrabold">Confirma el envío antes de continuar</h2>
+              </div>
+              <p className="text-xs text-slate-500 mb-4">
+                Revisa que cada certificado vaya al correo correcto (Términos y Condiciones, sección 13.3). Esta lista
+                es definitiva: al confirmar se envían{" "}
+                <strong>{pages.filter((p) => p.matchedRecipient !== null).length}</strong> correos reales desde tu
+                cuenta de Gmail.
+              </p>
+              <div className="overflow-y-auto flex-1 border border-dashed border-slate-500/30 rounded-lg mb-4">
+                <table className="w-full text-left text-[11px]">
+                  <thead className="sticky top-0 bg-[#16181D] text-[9px] uppercase text-slate-400">
+                    <tr>
+                      <th className="p-2 pl-3">Página</th>
+                      <th className="p-2">Destinatario</th>
+                      <th className="p-2 pr-3">Correo</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pages
+                      .filter((p) => p.matchedRecipient !== null)
+                      .map((p) => (
+                        <tr key={p.pageIndex} className="border-t border-[#2D2F36]/40">
+                          <td className="p-2 pl-3 font-mono">{p.pageIndex}</td>
+                          <td className="p-2">{p.matchedRecipient!.name}</td>
+                          <td className="p-2 pr-3 truncate">{p.matchedRecipient!.email}</td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="flex gap-3 justify-end shrink-0">
+                <button
+                  onClick={() => {
+                    addLog("Envío masivo abortado por el usuario.", "warning");
+                    setConfirmandoEnvio(false);
+                  }}
+                  className="px-4 py-2 rounded-lg text-xs font-bold border border-[#2D2F36] hover:bg-white/5 transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={ejecutarEnvioMasivoConfirmado}
+                  className="px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white flex items-center gap-1.5 hover:opacity-95 transition-opacity"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  Confirmar y enviar
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Aviso de autorización de datos ANTES del primer uso (Tarea 15, requisito B.3, Ley 1581,
+          2026-10-06): casilla sin marcar + botón "Continuar", texto canónico T11. El servidor
+          (POST /api/lote/iniciar) vuelve a exigirla aunque este aviso se cierre sin aceptar. */}
+      <AnimatePresence>
+        {necesitaAutorizarDatos && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className={`w-full max-w-md rounded-2xl border p-6 ${
+                isDark ? "bg-[#13151F] border-[#222530] text-white" : "bg-white border-gray-200 text-gray-900"
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-3">
+                <Shield className="w-5 h-5 text-indigo-500 shrink-0" />
+                <h2 className="text-sm font-extrabold">
+                  {language === "en" ? "Authorize your data before continuing" : "Autoriza tus datos antes de continuar"}
+                </h2>
+              </div>
+              <label className="flex items-start gap-2.5 text-xs leading-relaxed cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={aceptaAutorizacionDatos}
+                  onChange={(e) => setAceptaAutorizacionDatos(e.target.checked)}
+                  className="mt-0.5 shrink-0"
+                />
+                <span>
+                  {textoAutorizacionDatos}{" "}
+                  <button
+                    type="button"
+                    onClick={handleNavigateToPrivacidad}
+                    className="text-indigo-400 underline font-semibold"
+                  >
+                    {language === "en" ? "Privacy Policy" : "Política de Privacidad"}
+                  </button>
+                  .
+                </span>
+              </label>
+              <button
+                onClick={handleAutorizarDatos}
+                disabled={!aceptaAutorizacionDatos || autorizandoDatos}
+                className="w-full mt-5 py-2.5 rounded-lg text-xs font-bold bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white flex items-center justify-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-95 transition-opacity"
+              >
+                {autorizandoDatos ? <Loader2 className="w-4 h-4 animate-spin" /> : (language === "en" ? "Continue" : "Continuar")}
+              </button>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -2035,13 +2282,13 @@ export default function App() {
                         <div className="space-y-1">
                           <label className="text-[9px] text-slate-500 uppercase block font-mono">Coincidencia G-Sheet:</label>
                           <select
-                            value={p.matchedRecipient?.name || "__none__"}
+                            value={p.matchedRecipient ? String(p.matchedRecipient.originalRowIndex) : "__none__"}
                             onChange={(e) => handleManualPairing(p.pageIndex, e.target.value)}
                             className="bg-[#16181D] border border-[#2D2F36] text-[10px] text-white rounded w-full p-1 focus:outline-none focus:border-[#8B5CF6]"
                           >
                             <option value="__none__">Ninguno (Ignorar)</option>
                             {recipients.map((rec) => (
-                              <option key={rec.originalRowIndex} value={rec.name}>
+                              <option key={rec.originalRowIndex} value={String(rec.originalRowIndex)}>
                                 {rec.originalRowIndex}. {rec.name}
                               </option>
                             ))}
@@ -2095,8 +2342,10 @@ export default function App() {
                   </thead>
                   <tbody className="text-[11px] font-sans">
                     {filteredRecipients.map((rec) => {
-                      // Check matching status of this recipient
-                      const matchedPage = pages.find((p) => p.matchedRecipient?.name === rec.name);
+                      // Check matching status of this recipient (A.1: por originalRowIndex, nunca
+                      // por nombre — con homonimos, comparar por nombre siempre mostraba el
+                      // estado de la PRIMERA fila con ese nombre para las demas).
+                      const matchedPage = pages.find((p) => p.matchedRecipient?.originalRowIndex === rec.originalRowIndex);
                       let statusLabel = "ESPERANDO";
                       let statusClass = "text-slate-500";
 
