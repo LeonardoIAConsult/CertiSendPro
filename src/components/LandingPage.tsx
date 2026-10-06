@@ -17,7 +17,6 @@ import {
   Coins,
   Send,
   Loader2,
-  TrendingUp,
   X
 } from "lucide-react";
 import { LogoMark, AnimatedGlyph } from "./BrandLogo";
@@ -49,6 +48,7 @@ interface LandingPageProps {
   setTheme: (theme: "light" | "dark") => void;
   onStart: () => void;
   onViewPrivacy: () => void;
+  onViewTerminos: () => void;
   isLoggingIn: boolean;
 }
 
@@ -59,10 +59,10 @@ export default function LandingPage({
   setTheme,
   onStart,
   onViewPrivacy,
+  onViewTerminos,
   isLoggingIn
 }: LandingPageProps) {
   const t = translations[language];
-  const [certsCount, setCertsCount] = useState<number>(150);
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null);
 
@@ -176,12 +176,6 @@ export default function LandingPage({
     }
   };
 
-  // Calculate estimated monthly pricing
-  const isProRecommended = certsCount > 200;
-  const payAsYouGoPrice = (certsCount * 0.10).toFixed(2);
-  const proPrice = "29.00";
-  const finalPrice = isProRecommended ? proPrice : payAsYouGoPrice;
-
   // Compra por contacto (2026-10-05, decision de Leonardo). El cobro esta arreglado en el
   // servidor pero APAGADO (PAGOS_ACTIVOS) hasta definir que recibe quien paga: hoy la app no
   // tiene planes, y la web promete "/mes" con un pago unico. Antes, este boton fallaba y aun asi
@@ -191,6 +185,16 @@ export default function LandingPage({
     const cuerpo = language === "en"
       ? `Hi, I'm interested in ${planName} (US$${precioMostrado}). `
       : `Hola, me interesa ${planName} (US$${precioMostrado}). `;
+    window.location.href = `mailto:contacto@leonardoantolinez.com?subject=${encodeURIComponent(asunto)}&body=${encodeURIComponent(cuerpo)}`;
+  };
+
+  // Pro no se vende en v1 (Tarea 11, cobro real con planes, 2026-10-05): sin precio que mostrar
+  // en el correo (Tarea 8, la suscripcion de Pro, todavia no existe).
+  const handleContactarPro = () => {
+    const asunto = "CertiSend: Plan Pro";
+    const cuerpo = language === "en"
+      ? "Hi, I'm interested in the CertiSend Pro plan. "
+      : "Hola, me interesa el plan Pro de CertiSend. ";
     window.location.href = `mailto:contacto@leonardoantolinez.com?subject=${encodeURIComponent(asunto)}&body=${encodeURIComponent(cuerpo)}`;
   };
 
@@ -469,15 +473,17 @@ export default function LandingPage({
               </button>
             </div>
 
-            {/* Pro Plan (Destacado) */}
+            {/* Pro Plan (no se vende en v1, Tarea 11 / cobro real con planes, 2026-10-05: sin
+                precio ni "Recomendado" para algo que todavia no se puede comprar — ver
+                handleContactarPro, boton de correo igual que siempre). */}
             <div className="p-8 rounded-3xl border-2 border-indigo-600 bg-gradient-to-b from-[#1C1F30] to-[#0F1119] text-white relative flex flex-col justify-between shadow-2xl shadow-indigo-600/10">
               <div className="absolute -top-4 right-6 bg-gradient-to-r from-blue-500 to-indigo-600 text-[10px] font-extrabold uppercase py-1 px-3 rounded-full tracking-wider shadow">
-                Recomendado
+                Próximamente
               </div>
               <div className="space-y-6">
                 <div>
                   <span className="text-xs font-bold text-indigo-400 uppercase tracking-widest">{t.planProName}</span>
-                  <p className="text-4xl font-extrabold mt-2">{t.planProPrice}</p>
+                  <p className="text-2xl font-extrabold mt-2">{t.planProPrice}</p>
                 </div>
                 <div className="space-y-3 pt-6 border-t border-dashed border-indigo-500/30">
                   <div className="flex items-center gap-2.5 text-xs text-gray-300">
@@ -492,36 +498,40 @@ export default function LandingPage({
                     <Check className="w-4 h-4 text-emerald-400 shrink-0" />
                     <span>{t.planProFeature3}</span>
                   </div>
-                  <div className="flex items-center gap-2.5 text-xs text-gray-300">
-                    <Check className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>{t.planProFeature4}</span>
-                  </div>
                 </div>
               </div>
               <button
-                onClick={() => handlePurchasePlan("CertiSend Pro Monthly", 29.00)}
-                disabled={loadingPlan !== null}
+                onClick={handleContactarPro}
                 className="w-full mt-8 py-3.5 rounded-xl font-extrabold text-xs bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white hover:opacity-95 transition-all shadow-md shadow-indigo-500/30 flex items-center justify-center gap-1.5"
               >
-                {loadingPlan === "CertiSend Pro Monthly" ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <>
-                    <span>{t.buyNow}</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                )}
+                <span>{t.proContactar}</span>
+                <ArrowRight className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Pay as you go Plan */}
+            {/* Paquete (M30/Tarea 11): el precio grande es el COP real del dia, de /api/precios
+                (precios.cop), nunca un "$0,10 USD por envio" fijo (H5, retirado); mientras no
+                haya llegado, se muestra planPayGoPriceCargando en vez de un numero inventado. */}
             <div className={`p-8 rounded-3xl border flex flex-col justify-between ${
               theme === "dark" ? "bg-[#13151F] border-[#222530]" : "bg-white border-gray-100 shadow-sm"
             }`}>
               <div className="space-y-6">
                 <div>
                   <span className="text-xs font-bold text-purple-500 uppercase tracking-widest">{t.planPayGoName}</span>
-                  <p className="text-3xl font-extrabold mt-2">{t.planPayGoPrice}</p>
+                  {precios ? (
+                    <>
+                      <p className="text-3xl font-extrabold mt-2">
+                        {language === "en"
+                          ? `COP ${precios.cop.toLocaleString("en-US")}`
+                          : `$${precios.cop.toLocaleString("es-CO")} COP`}
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        {t.checkoutReferencia.replace("{usd}", String(precios.usd))}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-lg font-bold mt-2 text-slate-500">{t.planPayGoPriceCargando}</p>
+                  )}
                 </div>
                 <div className="space-y-3 pt-6 border-t border-dashed border-slate-500/20">
                   <div className="flex items-center gap-2.5 text-xs text-slate-500">
@@ -535,6 +545,14 @@ export default function LandingPage({
                   <div className="flex items-center gap-2.5 text-xs text-slate-500">
                     <Check className="w-4 h-4 text-emerald-500 shrink-0" />
                     <span>{t.planPayGoFeature3}</span>
+                  </div>
+                  <div className="flex items-center gap-2.5 text-xs text-slate-500">
+                    <Check className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <span>{t.planPayGoFeature4}</span>
+                  </div>
+                  <div className="flex items-center gap-2.5 text-xs text-slate-500">
+                    <Check className="w-4 h-4 text-emerald-500 shrink-0" />
+                    <span>{t.planPayGoFeature5}</span>
                   </div>
                 </div>
               </div>
@@ -562,46 +580,9 @@ export default function LandingPage({
               </button>
             </div>
           </div>
-
-          {/* Interactive Pricing Cost Calculator (NUEVA: Para que el cliente analice e interactúe) */}
-          <div className={`p-8 rounded-3xl border max-w-2xl mx-auto space-y-6 ${
-            theme === "dark" ? "bg-[#13151F] border-[#222530]" : "bg-white border-gray-200 shadow-md"
-          }`}>
-            <div className="flex items-center gap-2">
-              <TrendingUp className="w-6 h-6 text-indigo-500" />
-              <h3 className="font-extrabold text-lg">{t.calculatorTitle}</h3>
-            </div>
-            <p className="text-xs text-slate-500 leading-relaxed">{t.calculatorSub}</p>
-
-            <div className="space-y-4">
-              <div className="flex justify-between text-xs font-mono">
-                <span>{t.calcCertificates}</span>
-                <span className="font-bold text-indigo-500 text-sm">{certsCount}</span>
-              </div>
-              <input
-                type="range"
-                min="10"
-                max="1000"
-                step="10"
-                value={certsCount}
-                onChange={(e) => setCertsCount(Number(e.target.value))}
-                className="w-full accent-indigo-500"
-              />
-              <div className="grid grid-cols-2 gap-4 pt-4 border-t border-dashed border-slate-500/20 items-center">
-                <div>
-                  <p className="text-[10px] text-slate-500 uppercase tracking-widest">{t.calcTotalEstimate}</p>
-                  <p className="text-3xl font-black text-indigo-500">${finalPrice} <span className="text-xs font-normal">USD</span></p>
-                </div>
-                <div className={`p-3 rounded-xl border text-[11px] font-semibold text-center leading-tight ${
-                  isProRecommended 
-                    ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-400" 
-                    : "bg-blue-500/10 border-blue-500/30 text-blue-400"
-                }`}>
-                  {isProRecommended ? t.calcProPlan : t.calcPayAsYouGo}
-                </div>
-              </div>
-            </div>
-          </div>
+          {/* Calculadora de costo por envio RETIRADA (R6 de docs/legal/textos-checkout.md v1.2:
+              "$0,10 por envío" no existe como precio — H5). Las tarjetas de arriba ya muestran el
+              precio real del Paquete (COP del dia) y que Pro no se vende todavia. */}
         </div>
       </section>
 
@@ -665,6 +646,12 @@ export default function LandingPage({
           {t.footerText}
         </p>
         <div className="mt-2 flex justify-center gap-4">
+          <button
+            onClick={onViewTerminos}
+            className="text-indigo-500 hover:underline font-semibold cursor-pointer text-[11px]"
+          >
+            {language === "es" ? "Términos y Condiciones" : "Terms and Conditions"}
+          </button>
           <button
             onClick={onViewPrivacy}
             className="text-indigo-500 hover:underline font-semibold cursor-pointer text-[11px]"

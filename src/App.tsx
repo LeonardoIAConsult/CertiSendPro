@@ -43,7 +43,9 @@ import {
 import { findBestRecipient } from "./utils/matching";
 import JSZip from "jszip";
 import LandingPage from "./components/LandingPage";
-import PrivacyPolicy from "./components/PrivacyPolicy";
+import LegalPage from "./components/LegalPage";
+import terminosMd from "./legal/terminos.md?raw";
+import privacidadMd from "./legal/privacidad.md?raw";
 import { translations } from "./utils/translations";
 import {
   type CuentaInfo,
@@ -89,25 +91,44 @@ export default function App() {
   const [needsAuth, setNeedsAuth] = useState(true);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  // Privacy Policy state
-  const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(window.location.pathname === "/privacy");
+  // Paginas legales /terminos y /privacidad (Tarea 11, cobro real con planes, 2026-10-05).
+  // Reemplaza al viejo /privacy (PrivacyPolicy.tsx, version de julio de 2026 con texto falso
+  // sobre almacenamiento — H11/B30). "/privacy" sigue funcionando como ALIAS (nunca se rompe un
+  // enlace ya compartido): se reescribe la barra de direcciones a "/privacidad" con
+  // `replaceState` (no agrega una entrada nueva al historial) y se renderiza la misma pagina.
+  const rutaLegalDesdePath = (pathname: string): "terminos" | "privacidad" | null => {
+    if (pathname === "/terminos") return "terminos";
+    if (pathname === "/privacidad" || pathname === "/privacy") return "privacidad";
+    return null;
+  };
+  const [legalRoute, setLegalRoute] = useState<"terminos" | "privacidad" | null>(
+    rutaLegalDesdePath(window.location.pathname)
+  );
 
   useEffect(() => {
+    if (window.location.pathname === "/privacy") {
+      window.history.replaceState({}, "", "/privacidad");
+    }
     const handlePopState = () => {
-      setShowPrivacyPolicy(window.location.pathname === "/privacy");
+      setLegalRoute(rutaLegalDesdePath(window.location.pathname));
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  const handleNavigateToPrivacy = () => {
-    window.history.pushState({}, "", "/privacy");
-    setShowPrivacyPolicy(true);
+  const handleNavigateToTerminos = () => {
+    window.history.pushState({}, "", "/terminos");
+    setLegalRoute("terminos");
+  };
+
+  const handleNavigateToPrivacidad = () => {
+    window.history.pushState({}, "", "/privacidad");
+    setLegalRoute("privacidad");
   };
 
   const handleNavigateToHome = () => {
     window.history.pushState({}, "", "/");
-    setShowPrivacyPolicy(false);
+    setLegalRoute(null);
   };
 
   // Localization & Theme states
@@ -1376,11 +1397,28 @@ export default function App() {
     </div>
   );
 
-  if (showPrivacyPolicy) {
+  if (legalRoute === "terminos") {
     return (
-      <PrivacyPolicy
+      <LegalPage
         theme={theme}
+        titulo="Términos y Condiciones"
+        markdown={terminosMd}
         onBack={handleNavigateToHome}
+        onNavigateOtra={handleNavigateToPrivacidad}
+        tituloOtra="Política de Privacidad"
+      />
+    );
+  }
+
+  if (legalRoute === "privacidad") {
+    return (
+      <LegalPage
+        theme={theme}
+        titulo="Política de Privacidad"
+        markdown={privacidadMd}
+        onBack={handleNavigateToHome}
+        onNavigateOtra={handleNavigateToTerminos}
+        tituloOtra="Términos y Condiciones"
       />
     );
   }
@@ -1395,7 +1433,8 @@ export default function App() {
           theme={theme}
           setTheme={setTheme}
           onStart={handleLogin}
-          onViewPrivacy={handleNavigateToPrivacy}
+          onViewPrivacy={handleNavigateToPrivacidad}
+          onViewTerminos={handleNavigateToTerminos}
           isLoggingIn={isLoggingIn}
         />
       </>
@@ -2143,7 +2182,13 @@ export default function App() {
         <div className="flex items-center gap-4">
           <span>© 2026 CertiSend Pro. Todos los derechos reservados.</span>
           <button
-            onClick={handleNavigateToPrivacy}
+            onClick={handleNavigateToTerminos}
+            className="text-slate-400 hover:text-white underline transition-colors cursor-pointer"
+          >
+            Términos y Condiciones
+          </button>
+          <button
+            onClick={handleNavigateToPrivacidad}
             className="text-slate-400 hover:text-white underline transition-colors cursor-pointer"
           >
             Política de Privacidad

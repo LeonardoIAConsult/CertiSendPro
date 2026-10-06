@@ -182,18 +182,21 @@ function formatearCop(cop: number): string {
   return cop.toLocaleString("es-CO");
 }
 
-// ── Identidad del proveedor en el pie del acuse (M36(1), corrige vuelta 27) ─────────────────────
+// ── Identidad del proveedor en el pie del acuse (M36(1), corrige vuelta 27; Tarea 11, 2026-10-05:
+// se quita el hardcode) ──────────────────────────────────────────────────────────────────────
 // Plantilla v1.2 (docs/legal/plantilla-confirmacion-compra.md) exige nombre, documento, direccion,
-// telefono y correo del proveedor en el pie. Constantes de configuracion: lo que SI se conoce hoy
-// (nombre, telefono, correo — ver la plantilla y docs/legal/textos-checkout.md) queda fijo; lo que
-// falta (documento/NIT, direccion de notificacion — pendientes del contador/abogado colegiado,
-// Tarea 0/13 del plan) se deja como el literal "[PENDIENTE]", NUNCA inventado. Cambiar estos
-// valores cuando Leonardo los confirme es el UNICO paso que desbloquea el envio del acuse
-// (ver `tienePlaceholderPendiente` y M36(2) abajo).
-export const PROVEEDOR_NOMBRE = "LEONARDO ANTOLINEZ P.";
-export const PROVEEDOR_DOCUMENTO = "[PENDIENTE]";
-export const PROVEEDOR_DIRECCION = "[PENDIENTE]";
-export const PROVEEDOR_TELEFONO = "[TELEFONO-REDACTADO]";
+// telefono y correo del proveedor en el pie. El repo es PUBLICO: nombre/documento/direccion/
+// telefono reales NUNCA se escriben aqui, solo se leen de las variables de entorno del servidor
+// (PROVEEDOR_NOMBRE, PROVEEDOR_DOC, PROVEEDOR_DIR, PROVEEDOR_TEL — Cloud Run / Secret Manager en
+// produccion, nunca un archivo versionado). Si una falta, queda el literal "[PENDIENTE]" (NUNCA
+// inventado) y `tienePlaceholderPendiente` bloquea el envio del acuse (M36(2) abajo) — mismo
+// comportamiento que ya existia para documento/direccion, ahora igual para las cuatro. El correo
+// de contacto SI queda fijo: es el unico canal publico ya establecido en toda la app y los
+// documentos legales (textos-checkout.md H9), no un dato personal sensible.
+export const PROVEEDOR_NOMBRE = process.env.PROVEEDOR_NOMBRE || "[PENDIENTE]";
+export const PROVEEDOR_DOCUMENTO = process.env.PROVEEDOR_DOC || "[PENDIENTE]";
+export const PROVEEDOR_DIRECCION = process.env.PROVEEDOR_DIR || "[PENDIENTE]";
+export const PROVEEDOR_TELEFONO = process.env.PROVEEDOR_TEL || "[PENDIENTE]";
 export const PROVEEDOR_CORREO = "contacto@leonardoantolinez.com";
 const PROVEEDOR_WEB = "https://certisendpro.online";
 

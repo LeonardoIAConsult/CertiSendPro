@@ -39,33 +39,36 @@ export interface TranslationDict {
   // Pricing Section
   pricingTitle: string;
   pricingSub: string;
-  calculatorTitle: string;
-  calculatorSub: string;
-  calcCertificates: string;
-  calcTotalEstimate: string;
-  calcPayAsYouGo: string;
-  calcProPlan: string;
   buyNow: string;
-  
+
   // Plans
   planFreeName: string;
   planFreePrice: string;
   planFreeFeature1: string;
   planFreeFeature2: string;
   planFreeFeature3: string;
-  
+
+  // Pro no se vende en v1 (decision de Leonardo, 2026-10-05): planProPrice reemplaza el precio
+  // falso ("$29 USD / mes", nunca cobrado — Tarea 8 del plan no existe todavia) por el estado
+  // real: "Próximamente · escríbenos". proContactar es el texto del boton de ese plan (mailto,
+  // igual que siempre funciono este boton; solo cambia la etiqueta).
   planProName: string;
   planProPrice: string;
   planProFeature1: string;
   planProFeature2: string;
   planProFeature3: string;
-  planProFeature4: string;
-  
+  proContactar: string;
+
+  // Paquete (Tarea 11, cobro real con planes, 2026-10-05): planPayGoPrice se retira — el precio
+  // real en COP del dia se calcula en LandingPage.tsx con /api/precios (nunca un "$0,10 USD por
+  // envio" fijo, H5); planPayGoPriceCargando es el texto mientras ese precio no ha llegado.
   planPayGoName: string;
-  planPayGoPrice: string;
+  planPayGoPriceCargando: string;
   planPayGoFeature1: string;
   planPayGoFeature2: string;
   planPayGoFeature3: string;
+  planPayGoFeature4: string;
+  planPayGoFeature5: string;
 
   // FAQ Section
   faqTitle: string;
@@ -133,17 +136,19 @@ export const translations: Record<Lang, TranslationDict> = {
     loginWithGoogle: "Ingresar con Google",
     logout: "Cerrar sesión",
     workspace: "Consola de Trabajo",
-    tagline: "Automatización premium de PDFs y envío masivo personalizado en segundos",
+    // R6 ampliada de docs/legal/textos-checkout.md v1.2 (N2, Tarea 11, 2026-10-05): textos
+    // revisados para que ninguno prometa algo que la app no hace de verdad.
+    tagline: "Certificados personalizados, enviados desde tu propio Gmail",
     english: "English",
     spanish: "Español",
     lightMode: "Modo Claro",
     darkMode: "Modo Oscuro",
-    
-    heroTitle: "Envía cientos de PDF´s personalizados en 1 solo clic",
-    heroSub: "Sube un solo PDF con todos los diplomas, tarjetas, invitaciones, certificados o lo que quieras enviar, conecta tu Google Sheet donde está la lista de personas a quien le quieres enviar el documento personalizado, y CertiSend Pro emparejará y enviará de forma automática y segura cada destinatario.",
+
+    heroTitle: "Envía cientos de certificados personalizados desde tu propio Gmail",
+    heroSub: "Sube un solo PDF con todos los diplomas, tarjetas, invitaciones, certificados o lo que quieras enviar, conecta tu Google Sheet donde está la lista de personas a quien le quieres enviar el documento personalizado, y CertiSend Pro empareja cada certificado con su destinatario, tú lo revisas y se envía desde tu Gmail.",
     startFree: "Comenzar Gratis",
     seeDemo: "Ver Planes y Precios",
-    
+
     featuresTitle: "Características Premium",
     featuresSub: "CertiSend Pro es una herramienta diseñada para automatizar el envío de tu flujo de PDF´s sin esfuerzo.",
     feat1Title: "Segmentación Inteligente",
@@ -151,60 +156,58 @@ export const translations: Record<Lang, TranslationDict> = {
     feat2Title: "Lectura de Google Sheets",
     feat2Desc: "Conéctate de forma directa y segura con tus hojas de cálculo (sheet) online, para leer nombres y correos.",
     feat3Title: "Escaneo con IA",
-    feat3Desc: "CertiSend Pro lee visualmente cada PDF para extraer el nombre con precisión humana.",
-    feat4Title: "Entrega Certificada",
+    feat3Desc: "CertiSend lee el nombre con IA y te deja revisarlo antes de enviar.",
+    feat4Title: "Envío desde tu Gmail",
     feat4Desc: "Envía correos personalizados directamente desde tu cuenta de Gmail con el certificado adjunto.",
-    
-    securityTitle: "Tus Datos Están 100% Protegidos",
-    securitySub: "Privacidad de nivel empresarial. La seguridad de tu información es nuestro estándar principal.",
-    sec1Title: "Sin Almacenamiento de Datos",
-    sec1Desc: "No guardamos tus listas de contactos, correos electrónicos ni certificados en bases de datos externas. Todo se procesa en tiempo real directamente en tu navegador y servidor de sesión segura.",
+
+    securityTitle: "Cómo cuidamos tus datos",
+    securitySub: "Lo que guardamos, lo que no y quién más los procesa, sin letra pequeña.",
+    sec1Title: "Tus listas y certificados no se guardan",
+    sec1Desc: "Tu lista de destinatarios no se guarda en nuestros servidores y tus PDF se borran solos en unas 2 horas. Guardamos solo tu cuenta, tu plan y tus pagos, como explica la Política de Privacidad.",
     sec2Title: "Conexión Directa de API",
     sec2Desc: "La aplicación utiliza tokens de acceso temporales directos de Google OAuth 2.0. Los correos se envían desde tu propia bandeja de salida de Gmail.",
-    sec3Title: "Aislamiento de Clientes",
-    sec3Desc: "Cada sesión es completamente privada e independiente. Ningún otro usuario puede acceder a tus archivos ni ver los datos de tus destinatarios.",
-    
+    sec3Title: "Tu sesión es tuya",
+    sec3Desc: "Tus archivos y tu lista se procesan solo en tu sesión; no los mostramos a otros usuarios.",
+
     pricingTitle: "Planes Sencillos y Transparentes",
-    pricingSub: "Elige el plan que mejor se adapte a tu volumen de PDF´s. Sin contratos, cancela cuando quieras.",
-    calculatorTitle: "Calculadora de Costos Estimada",
-    calculatorSub: "Arrastra para calcular cuántos certificados necesitas enviar este mes y te recomendaremos la mejor opción.",
-    calcCertificates: "Certificados a enviar:",
-    calcTotalEstimate: "Costo estimado mensual:",
-    calcPayAsYouGo: "Te recomendamos el plan Pago por Uso",
-    calcProPlan: "Te recomendamos el plan CertiSend Pro",
+    pricingSub: "Sin permanencia: cancelas cuando quieres y conservas lo pagado hasta su fecha.",
     buyNow: "Hablemos de este plan",
-    
+
     planFreeName: "Plan Gratuito",
-    planFreePrice: "$0 USD",
+    planFreePrice: "$0",
     planFreeFeature1: "Hasta 15 certificados por lote",
-    planFreeFeature2: "Escaneo básico de nombres con IA",
-    planFreeFeature3: "Conexión estándar con Google Sheets",
-    
+    planFreeFeature2: "Asunto y cuerpo del correo personalizados",
+    planFreeFeature3: "Lectura de nombres con IA",
+
+    // Pro no se vende en v1 (decision de Leonardo, 2026-10-05): sin precio ni "escaneo
+    // prioritario"/"24/7" (no existen); el boton manda un correo, igual que siempre.
     planProName: "Plan Pro Ilimitado",
-    planProPrice: "$29 USD / mes",
+    planProPrice: "Próximamente · escríbenos",
     planProFeature1: "Certificados ilimitados por lote",
-    planProFeature2: "Escaneo prioritario de alta velocidad",
-    planProFeature3: "Marca de correo personalizada y HTML",
-    planProFeature4: "Soporte prioritario 24/7",
-    
-    planPayGoName: "Pago Por Uso (SaaS)",
-    planPayGoPrice: "$0.10 USD / envío",
-    planPayGoFeature1: "Sin cuotas mensuales recurrentes",
-    planPayGoFeature2: "Solo pagas por los correos enviados con éxito",
-    planPayGoFeature3: "Ideal para eventos de temporada u ocasionales",
-    
+    planProFeature2: "Asunto y cuerpo del correo personalizados",
+    planProFeature3: "Soporte prioritario por correo",
+    proContactar: "Escríbenos",
+
+    planPayGoName: "Paquete",
+    planPayGoPriceCargando: "Calculando el precio de hoy…",
+    planPayGoFeature1: "150 envíos con éxito para lotes de más de 15",
+    planPayGoFeature2: "Los lotes de 15 o menos siguen siendo gratis y no gastan el Paquete",
+    planPayGoFeature3: "Válidos 1 mes o hasta gastarlos; no se acumulan",
+    planPayGoFeature4: "Pago único o renovación mensual opcional",
+    planPayGoFeature5: "Los envíos que fallan no se descuentan",
+
     faqTitle: "Preguntas Frecuentes",
     faqSub: "Resolvemos tus dudas sobre el funcionamiento y la seguridad de la plataforma.",
     faq1Q: "¿Cómo reconoce el sistema los nombres en los diplomas?",
-    faq1A: "Utilizamos la tecnología de IA, la cual analiza visualmente el PDF para encontrar el nombre de forma inteligente, evitando firmas y otros textos distractores.",
+    faq1A: "Usamos IA (Gemini, de Google) para leer el nombre en cada página y compararlo con tu lista. Puede equivocarse: por eso te mostramos cada certificado con el nombre y el correo de su destinatario para que lo revises antes de enviar.",
     faq2Q: "¿Mis contactos o PDFs se guardan en sus servidores?",
-    faq2A: "No. Los archivos PDF y datos de Google Sheets se procesan bajo una sesión efímera que expira automáticamente a las 2 horas. Tus datos nunca son persistidos a largo plazo ni compartidos.",
+    faq2A: "Tus PDF se borran solos en unas 2 horas y tu lista no se guarda en nuestros servidores. Tu cuenta y tus pagos se guardan según la Política de Privacidad.",
     faq3Q: "¿Cómo funciona el envío masivo?",
-    faq3A: "Se realiza a través de la API oficial de Gmail mediante la autenticación segura Google OAuth. El destinatario verá que el correo proviene directamente de tu dirección oficial, garantizando máxima entregabilidad.",
+    faq3A: "Se envía con la API oficial de Gmail: el correo sale desde tu propia cuenta de Gmail, con tu dirección.",
     faq4Q: "¿Cuáles son los métodos de pago aceptados?",
-    faq4A: "Para Colombia y Latinoamérica, ofrecemos integraciones de pago seguras mediante Mercado Pago, soportando tarjetas de crédito, PSE y transferencias bancarias locales tanto en COP como en USD.",
-    
-    footerText: "CertiSend Pro es un servicio independiente de automatización segura de diplomas.",
+    faq4A: "Pagos en pesos colombianos con Mercado Pago, con los medios que Mercado Pago muestre al pagar.",
+
+    footerText: "CertiSend Pro es un servicio de Leonardo Antolinez P. para enviar certificados desde tu propio Gmail.",
     footerRights: "Todos los derechos reservados.",
 
     batchLimitFree: "El plan Gratis permite hasta 15 certificados por lote. Puedes dividirlo o escribirnos.",
@@ -240,17 +243,19 @@ export const translations: Record<Lang, TranslationDict> = {
     loginWithGoogle: "Login with Google",
     logout: "Log out",
     workspace: "Workspace Console",
-    tagline: "Premium PDF automation and custom bulk delivery in seconds",
+    // R6 ampliada de docs/legal/textos-checkout.md v1.2 (N2, Tarea 11, 2026-10-05): courtesy
+    // translation, same corrections as the ES block above.
+    tagline: "Personalized certificates, sent from your own Gmail",
     english: "English",
     spanish: "Español",
     lightMode: "Light Mode",
     darkMode: "Dark Mode",
-    
-    heroTitle: "Send hundreds of custom PDFs in 1 simple click",
-    heroSub: "Upload a single PDF containing all diplomas, cards, invitations, certificates, or whatever you want to send, connect your Google Sheet where the list of people you want to send the personalized document to is located, and CertiSend Pro will automatically and securely match and deliver to each recipient.",
+
+    heroTitle: "Send hundreds of personalized certificates from your own Gmail",
+    heroSub: "Upload a single PDF containing all diplomas, cards, invitations, certificates, or whatever you want to send, connect your Google Sheet where the list of people you want to send the personalized document to is located, and CertiSend Pro matches each certificate to its recipient, you review it, and it is sent from your Gmail.",
     startFree: "Start for Free",
     seeDemo: "See Plans & Pricing",
-    
+
     featuresTitle: "Premium Features",
     featuresSub: "CertiSend Pro is a tool designed to automate your PDF delivery workflow completely hassle-free.",
     feat1Title: "Smart PDF Splitting",
@@ -258,60 +263,58 @@ export const translations: Record<Lang, TranslationDict> = {
     feat2Title: "Google Sheets Integration",
     feat2Desc: "Connect directly and securely to your online spreadsheets (sheets) to fetch recipient names and emails instantly.",
     feat3Title: "AI Scanning",
-    feat3Desc: "CertiSend Pro visually reads each PDF to extract the name with human-grade accuracy.",
-    feat4Title: "Certified Email Delivery",
+    feat3Desc: "CertiSend reads the name with AI and lets you review it before sending.",
+    feat4Title: "Sent from your Gmail",
     feat4Desc: "Send personalized emails directly from your own Gmail account with the certificate attached.",
-    
-    securityTitle: "Your Data is 100% Protected",
-    securitySub: "Enterprise-grade privacy. Information security is our core standard.",
-    sec1Title: "Zero Data Retention",
-    sec1Desc: "We never store your contact lists, emails, or certificate files in external databases. Everything is processed in real-time within your browser and secure temporary session.",
+
+    securityTitle: "How we look after your data",
+    securitySub: "What we keep, what we don't, and who else processes it, no fine print.",
+    sec1Title: "Your lists and certificates are not stored",
+    sec1Desc: "Your recipient list is not stored on our servers and your PDFs are deleted automatically within about 2 hours. We only keep your account, plan and payments, as explained in the Privacy Policy.",
     sec2Title: "Direct API Integration",
     sec2Desc: "The app relies on temporary secure access tokens from Google OAuth 2.0. Emails are dispatched directly from your own Gmail outbox.",
-    sec3Title: "Total Client Isolation",
-    sec3Desc: "Every session is completely private and isolated. No other user can ever access your uploaded files or recipient details.",
-    
+    sec3Title: "Your session is yours",
+    sec3Desc: "Your files and list are processed only in your session; we don't show them to other users.",
+
     pricingTitle: "Simple and Transparent Pricing",
-    pricingSub: "Choose the plan that best fits your PDF volume. No lock-ins, cancel anytime.",
-    calculatorTitle: "Estimated Cost Calculator",
-    calculatorSub: "Drag the slider to calculate how many certificates you need to send this month, and we will recommend the best plan.",
-    calcCertificates: "Certificates to send:",
-    calcTotalEstimate: "Estimated monthly cost:",
-    calcPayAsYouGo: "We recommend the Pay-as-you-go Plan",
-    calcProPlan: "We recommend the CertiSend Pro Plan",
+    pricingSub: "No minimum term: cancel anytime and keep what you paid until its end date.",
     buyNow: "Let's talk about this plan",
-    
+
     planFreeName: "Free Plan",
-    planFreePrice: "$0 USD",
+    planFreePrice: "$0",
     planFreeFeature1: "Up to 15 certificates per batch",
-    planFreeFeature2: "Basic AI name scanning",
-    planFreeFeature3: "Standard Google Sheets connection",
-    
+    planFreeFeature2: "Custom subject and body",
+    planFreeFeature3: "AI name reading",
+
+    // Pro is not for sale in v1 (Leonardo's decision, 2026-10-05): no price, and no "priority
+    // scanning"/"24/7" (they don't exist); the button emails us, same as it always did.
     planProName: "Unlimited Pro Plan",
-    planProPrice: "$29 USD / month",
+    planProPrice: "Coming soon · email us",
     planProFeature1: "Unlimited certificates per batch",
-    planProFeature2: "Priority high-speed scanning",
-    planProFeature3: "Custom email branding and HTML",
-    planProFeature4: "24/7 priority support",
-    
-    planPayGoName: "Pay-As-You-Go",
-    planPayGoPrice: "$0.10 USD / delivery",
-    planPayGoFeature1: "No recurring monthly fees",
-    planPayGoFeature2: "Only pay for successfully delivered emails",
-    planPayGoFeature3: "Ideal for seasonal or occasional events",
-    
+    planProFeature2: "Custom subject and body",
+    planProFeature3: "Priority email support",
+    proContactar: "Email us",
+
+    planPayGoName: "Bundle",
+    planPayGoPriceCargando: "Calculating today's price…",
+    planPayGoFeature1: "150 successful sends for batches over 15",
+    planPayGoFeature2: "Batches of 15 or fewer stay free and never spend the Bundle",
+    planPayGoFeature3: "Valid for 1 month or until used up; unused sends do not roll over",
+    planPayGoFeature4: "One-time payment or optional monthly renewal",
+    planPayGoFeature5: "Failed sends are never deducted",
+
     faqTitle: "Frequently Asked Questions",
     faqSub: "Answering your common questions about how the platform works and its security.",
     faq1Q: "How does the system recognize names on certificates?",
-    faq1A: "We use AI technology, which visually analyzes the PDF to intelligently find the name, avoiding signatures and other distracting texts.",
+    faq1A: "We use AI (Google's Gemini) to read the name on each page and compare it with your list. It can make mistakes, so we show you each certificate with its recipient's name and email for you to review before sending.",
     faq2Q: "Are my contacts or PDFs saved on your servers?",
-    faq2A: "No. The PDF files and Google Sheets rows are processed in an ephemeral session that automatically expires after 2 hours. Your files are never stored permanently.",
+    faq2A: "Your PDFs are deleted automatically within about 2 hours and your list is not stored on our servers. Your account and payments are kept as described in the Privacy Policy.",
     faq3Q: "How does the bulk emailing work?",
-    faq3A: "Emails are sent via the official Gmail API using secure Google OAuth. Your recipients will see that the email comes directly from your official address, ensuring peak deliverability.",
+    faq3A: "It is sent through the official Gmail API: the email goes out from your own Gmail account, with your address.",
     faq4Q: "What payment methods are supported?",
-    faq4A: "For Colombia and Latin America, we offer secure checkout integrations through Mercado Pago, supporting major credit cards, bank transfers, and local payment methods in USD and COP.",
-    
-    footerText: "CertiSend Pro is an independent, secure certificate automation utility.",
+    faq4A: "Payments in Colombian pesos through Mercado Pago, with the methods Mercado Pago shows at checkout.",
+
+    footerText: "CertiSend Pro is a service by Leonardo Antolinez P. to send certificates from your own Gmail.",
     footerRights: "All rights reserved.",
 
     batchLimitFree: "The Free plan allows up to 15 certificates per batch. You can split it or email us.",
