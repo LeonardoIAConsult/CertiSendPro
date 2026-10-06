@@ -1,26 +1,40 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { 
-  Sparkles, 
-  ShieldCheck, 
-  Zap, 
-  ArrowRight, 
-  HelpCircle, 
-  DollarSign, 
-  Check, 
-  Layers, 
-  ChevronDown, 
-  Lock, 
-  Globe, 
-  Sun, 
-  Moon, 
+import {
+  Sparkles,
+  ShieldCheck,
+  Zap,
+  ArrowRight,
+  HelpCircle,
+  DollarSign,
+  Check,
+  Layers,
+  ChevronDown,
+  Lock,
+  Globe,
+  Sun,
+  Moon,
   Coins,
   Send,
   Loader2,
-  TrendingUp
+  TrendingUp,
+  X
 } from "lucide-react";
 import { LogoMark, AnimatedGlyph } from "./BrandLogo";
 import { translations, TranslationDict } from "../utils/translations";
+import { getIdToken } from "../firebaseAuth";
+import { puedePagar, interpretarRespuestaCobro, textoTerminos, textoRetracto } from "../utils/checkout";
+
+/** Lo que necesita el panel de checkout del Paquete, de GET /api/precios (M30, corrige vuelta
+ * 24): `pagosActivos` es lo UNICO que le dice al cliente si create-preference esta encendido —
+ * `PAGOS_ACTIVOS` es una variable de SERVIDOR, nunca llega al bundle de Vite. */
+interface PreciosDelDia {
+  cop: number;
+  usd: number;
+  trm: number;
+  fechaDesde: string;
+  pagosActivos: boolean;
+}
 
 interface LandingPageProps {
   language: "es" | "en";
@@ -45,6 +59,107 @@ export default function LandingPage({
   const [certsCount, setCertsCount] = useState<number>(150);
   const [activeFaq, setActiveFaq] = useState<number | null>(null);
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null);
+
+  // ── Checkout del Paquete (M30, cobro real con planes, corrige vuelta 24) ────────────────────
+  // El panel vive aqui (no en App.tsx): comprar el Paquete solo exige el ID token de Firebase
+  // (exigirAuth en el servidor), independiente del access token de Gmail que decide `needsAuth`
+  // en App.tsx — un usuario con sesion de Firebase pero sin Gmail todavia ve esta landing y
+  // puede pagar igual. Se lee `pagosActivos` de /api/precios porque `PAGOS_ACTIVOS` es una
+  // variable de SERVIDOR: sin este campo, el panel no tendria forma de saber si el boton va a
+  // terminar en un 503.
+  const [precios, setPrecios] = useState<PreciosDelDia | null>(null);
+  useEffect(() => {
+    let cancelado = false;
+    fetch("/api/precios")
+      .then(async (res) => {
+        if (!res.ok || cancelado) return;
+        const data = await res.json();
+        if (cancelado) return;
+        setPrecios({
+          cop: data.paquete.cop,
+          usd: data.paquete.usd,
+          trm: data.trm,
+          fechaDesde: data.fechaDesde,
+          pagosActivos: data.pagosActivos === true,
+        });
+      })
+      .catch(() => {
+        /* Sin precios, el boton del Paquete se queda en el flujo de mailto (ver `pagosActivos`
+         * por defecto: `precios` null se trata como pagos apagados mas abajo). */
+      });
+    return () => {
+      cancelado = true;
+    };
+  }, []);
+
+  const [panelAbierto, setPanelAbierto] = useState(false);
+  const [copActual, setCopActual] = useState<number | null>(null);
+  const [aceptaTerminos, setAceptaTerminos] = useState(false);
+  const [aceptaRetracto, setAceptaRetracto] = useState(false);
+  const [pagando, setPagando] = useState(false);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const [precioCambio, setPrecioCambio] = useState<{ anterior: number; nuevo: number } | null>(null);
+
+  const abrirPanelPaquete = () => {
+    if (!precios) return;
+    setCopActual(precios.cop);
+    setAceptaTerminos(false);
+    setAceptaRetracto(false);
+    setPanelError(null);
+    setPrecioCambio(null);
+    setPanelAbierto(true);
+  };
+
+  const handlePagarPaquete = async () => {
+    if (!precios || copActual === null || !puedePagar(aceptaTerminos, aceptaRetracto)) return;
+    setPagando(true);
+    setPanelError(null);
+    try {
+      // Hace falta sesion de Firebase para pagar (create-preference exige el ID token): si no
+      // hay una, se reusa el mismo flujo de "Ingresar con Google" del resto de la landing en vez
+      // de mandar una peticion que el servidor rechazaria con 401.
+      const idToken = await getIdToken();
+      if (!idToken) {
+        setPagando(false);
+        onStart();
+        return;
+      }
+      const res = await fetch("/api/mercadopago/create-preference", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({
+          plan: "paquete",
+          aceptaTerminos: true,
+          aceptaRetracto: true,
+          copMostrado: copActual,
+          idioma: language,
+          modalidad: "unico",
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      const resultado = interpretarRespuestaCobro(res.status, body);
+      if (resultado.tipo === "ok") {
+        window.location.href = resultado.initPoint;
+        return;
+      }
+      if (resultado.tipo === "precio_cambio") {
+        // R8 de textos-checkout.md v1.2: el monto cambio desde que se abrio el panel (cambio la
+        // TRM o paso la medianoche) — se muestra el nuevo y se obliga a volver a marcar las dos
+        // casillas sobre ese monto, nunca se reintenta solo con el viejo.
+        setPrecioCambio({ anterior: copActual, nuevo: resultado.copNuevo });
+        setCopActual(resultado.copNuevo);
+        setAceptaTerminos(false);
+        setAceptaRetracto(false);
+        setPagando(false);
+        return;
+      }
+      setPanelError(resultado.mensaje);
+      setPagando(false);
+    } catch (err: any) {
+      setPanelError(err?.message || t.checkoutErrorGenerico);
+      setPagando(false);
+    }
+  };
 
   // Calculate estimated monthly pricing
   const isProRecommended = certsCount > 200;
@@ -408,12 +523,16 @@ export default function LandingPage({
                   </div>
                 </div>
               </div>
-              <button 
-                onClick={() => handlePurchasePlan("CertiSend Pay-as-you-go Bundle", 15.00)}
+              <button
+                onClick={() =>
+                  precios?.pagosActivos
+                    ? abrirPanelPaquete()
+                    : handlePurchasePlan("CertiSend Pay-as-you-go Bundle", 15.00)
+                }
                 disabled={loadingPlan !== null}
                 className={`w-full mt-8 py-3 rounded-xl font-bold text-xs transition-colors border flex items-center justify-center gap-1.5 ${
-                  theme === "dark" 
-                    ? "bg-[#161821] hover:bg-[#202330] border-[#222530] text-white" 
+                  theme === "dark"
+                    ? "bg-[#161821] hover:bg-[#202330] border-[#222530] text-white"
                     : "bg-white hover:bg-gray-50 border-gray-200 text-gray-700 shadow-sm"
                 }`}
               >
@@ -421,7 +540,7 @@ export default function LandingPage({
                   <Loader2 className="w-4 h-4 animate-spin" />
                 ) : (
                   <>
-                    <span>{t.buyNow}</span>
+                    <span>{precios?.pagosActivos ? t.buyPaquete : t.buyNow}</span>
                     <Coins className="w-4 h-4 text-yellow-500" />
                   </>
                 )}
@@ -539,6 +658,105 @@ export default function LandingPage({
           </button>
         </div>
       </footer>
+
+      {/* Panel de checkout del Paquete (M30, cobro real con planes, corrige vuelta 24). Solo se
+          puede abrir con PAGOS_ACTIVOS encendido (`abrirPanelPaquete` exige `precios.pagosActivos`
+          antes de montarse, ver el onClick del boton del Paquete arriba). /terminos y /privacidad
+          siguen en borrador (falta NIT y revision de abogado colegiado): el enlace apunta ahi
+          igual, pero la ruta debe existir en produccion ANTES de encender PAGOS_ACTIVOS. */}
+      <AnimatePresence>
+        {panelAbierto && precios && copActual !== null && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+            onClick={() => !pagando && setPanelAbierto(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              onClick={(e) => e.stopPropagation()}
+              className={`w-full max-w-md rounded-2xl p-6 space-y-5 border ${
+                theme === "dark" ? "bg-[#13151F] border-[#222530] text-white" : "bg-white border-gray-200 text-gray-900"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <h3 className="font-extrabold text-lg">{t.checkoutPaqueteTitle}</h3>
+                <button
+                  onClick={() => !pagando && setPanelAbierto(false)}
+                  className="text-slate-400 hover:text-rose-400 p-1"
+                  aria-label={t.checkoutCerrar}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {precioCambio && (
+                <div className="text-xs rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-500 p-3 leading-relaxed">
+                  {t.checkoutPrecioCambio
+                    .replace("{anterior}", precioCambio.anterior.toLocaleString(language === "en" ? "en-US" : "es-CO"))
+                    .replace("{nuevo}", precioCambio.nuevo.toLocaleString(language === "en" ? "en-US" : "es-CO"))}
+                </div>
+              )}
+
+              <div className="space-y-1">
+                <p className="text-3xl font-black text-indigo-500">
+                  {language === "en" ? "COP " : "$"}
+                  {copActual.toLocaleString(language === "en" ? "en-US" : "es-CO")}
+                  {language === "es" ? " COP" : ""}
+                </p>
+                <p className="text-[11px] text-slate-500">
+                  {t.checkoutReferencia.replace("{usd}", String(precios.usd))} ·{" "}
+                  {t.checkoutTrmNota.replace("{trm}", String(precios.trm)).replace("{fecha}", precios.fechaDesde)}
+                </p>
+              </div>
+
+              <label className="flex items-start gap-2.5 text-[11px] leading-relaxed cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={aceptaTerminos}
+                  onChange={(e) => setAceptaTerminos(e.target.checked)}
+                  className="mt-0.5 accent-indigo-500 shrink-0"
+                />
+                <span>
+                  {textoTerminos(copActual, language)}{" "}
+                  <a
+                    href="/terminos"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-indigo-500 hover:underline font-semibold"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {t.checkoutVerTerminos}
+                  </a>
+                </span>
+              </label>
+
+              <label className="flex items-start gap-2.5 text-[11px] leading-relaxed cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={aceptaRetracto}
+                  onChange={(e) => setAceptaRetracto(e.target.checked)}
+                  className="mt-0.5 accent-indigo-500 shrink-0"
+                />
+                <span>{textoRetracto(language)}</span>
+              </label>
+
+              {panelError && <p className="text-xs text-rose-400 font-semibold">{panelError}</p>}
+
+              <button
+                onClick={handlePagarPaquete}
+                disabled={!puedePagar(aceptaTerminos, aceptaRetracto) || pagando}
+                className="w-full py-3 rounded-xl font-extrabold text-xs bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-95 transition-all shadow-md shadow-indigo-500/30 flex items-center justify-center gap-2"
+              >
+                {pagando ? <Loader2 className="w-4 h-4 animate-spin" /> : <span>{t.checkoutPagar}</span>}
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
     </div>
   );

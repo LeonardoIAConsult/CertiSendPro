@@ -61,11 +61,22 @@ export interface AvisoWebhookCrudo {
  * `data.id` (se mira primero). Esta funcion solo decide DE DONDE sacar el id; nunca decide si el
  * pago es real — eso lo hace `procesarWebhookMP` volviendo a consultar la API de Mercado Pago.
  */
+/** Express parsea un parametro de query REPETIDO (`?type=a&type=b`) como arreglo, no como
+ * string: sin esto, `String(["payment","payment"])` daria "payment,payment" y nunca igualaria
+ * "payment" (bajo, corrige vuelta 24). Se toma el PRIMER valor, igual que si solo hubiera llegado
+ * una vez; el body de Mercado Pago (JSON) nunca manda arreglos aqui, pero la funcion es segura
+ * con cualquiera de los dos. */
+function primerValor(valor: unknown): unknown {
+  return Array.isArray(valor) ? valor[0] : valor;
+}
+
 export function extraerAvisoWebhookMP(crudo: AvisoWebhookCrudo): { tipo: string; paymentId: string } {
   const query = crudo.query || {};
   const body = crudo.body || {};
-  const tipo = String(query.type || query.topic || body?.type || body?.topic || "");
-  const paymentId = String(query["data.id"] || query.id || body?.data?.id || body?.id || "");
+  const tipo = String(primerValor(query.type) || primerValor(query.topic) || body?.type || body?.topic || "");
+  const paymentId = String(
+    primerValor(query["data.id"]) || primerValor(query.id) || body?.data?.id || body?.id || ""
+  );
   return { tipo, paymentId };
 }
 

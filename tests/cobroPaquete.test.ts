@@ -34,6 +34,11 @@ function construirDependencias(db: FirestoreFalso, orden: string[]) {
   };
 }
 
+// cop esperado con la TRM/usd por defecto de abajo (4123 * 15, redondeado) — `copMostrado` debe
+// coincidir con esto en la mayoria de las pruebas (las que SI deben llegar a crear algo); las
+// pruebas de M28 (precio cambiado) lo pisan a proposito con `overrides`.
+const COP_POR_DEFECTO = copDesdeUsd(15, 4123);
+
 function opcionesBase(overrides: Partial<Parameters<typeof crearCobroPaquete>[0]> = {}) {
   const db = new FirestoreFalso();
   const orden: string[] = [];
@@ -43,8 +48,12 @@ function opcionesBase(overrides: Partial<Parameters<typeof crearCobroPaquete>[0]
     orden,
     opts: {
       uid: "uid-1",
+      email: "cliente@test.com",
       aceptaTerminos: true,
       aceptaRetracto: true,
+      copMostrado: COP_POR_DEFECTO,
+      idioma: "es",
+      modalidad: "unico",
       obtenerTrm: async () => ({ valor: 4123, fechaDesde: "2026-10-05" }),
       copDesdeUsd,
       usdPaquete: 15,
@@ -128,6 +137,73 @@ test("sin TRM disponible -> 503 y no se crea preferencia ni aceptacion (nunca se
   assert.deepEqual(orden, []);
   assert.equal(db.leer("preferencias/ref-1"), undefined);
   assert.equal(db.leer("aceptaciones/ref-1"), undefined);
+});
+
+// ── M28 (corrige vuelta 24): copMostrado no coincide -> 409 y NO se crea nada ──────────────────
+
+test("copMostrado distinto del cop recalculado -> 409 con copNuevo, y NO se crea preferencia, aceptacion ni llamada a MP", async () => {
+  const { db, orden, opts } = opcionesBase({ copMostrado: COP_POR_DEFECTO - 1 });
+  const resultado = await crearCobroPaquete(opts);
+
+  assert.equal(resultado.httpStatus, 409);
+  assert.equal((resultado.body as any).copNuevo, COP_POR_DEFECTO);
+  assert.deepEqual(orden, [], "ninguna dependencia debe llamarse con el precio desactualizado");
+  assert.equal(db.leer("preferencias/ref-1"), undefined);
+  assert.equal(db.leer("aceptaciones/ref-1"), undefined);
+});
+
+test("copMostrado ausente (undefined, no enviado) -> 409, nunca se asume que coincide", async () => {
+  const { orden, opts } = opcionesBase({ copMostrado: undefined });
+  const resultado = await crearCobroPaquete(opts);
+  assert.equal(resultado.httpStatus, 409);
+  assert.deepEqual(orden, []);
+});
+
+test("copMostrado como texto numerico igual al cop recalculado SI coincide (Number() lo convierte)", async () => {
+  const { opts } = opcionesBase({ copMostrado: String(COP_POR_DEFECTO) as any });
+  const resultado = await crearCobroPaquete(opts);
+  assert.equal(resultado.httpStatus, 200);
+});
+
+// ── M28: idioma del checkout -> texto de la casilla guardado en ESE idioma, mas email y modalidad ──
+
+test('idioma="en" -> textoCasilla y textoRetracto guardados en ingles, email y modalidad guardados', async () => {
+  const { db, opts } = opcionesBase({ idioma: "en", email: "english@test.com" });
+  const resultado = await crearCobroPaquete(opts);
+
+  assert.equal(resultado.httpStatus, 200);
+  const aceptacion = db.leer("aceptaciones/ref-1") as any;
+  assert.equal(aceptacion.email, "english@test.com");
+  assert.equal(aceptacion.modalidad, "unico");
+  assert.equal(aceptacion.idioma, "en");
+  assert.match(aceptacion.textoCasilla, /I have read and accept/);
+  assert.match(aceptacion.textoRetracto, /I want the service to start immediately/);
+  assert.doesNotMatch(aceptacion.textoCasilla, /He leído/);
+});
+
+test('idioma invalido/ausente -> se guarda como "es" (nunca se asume ingles por defecto)', async () => {
+  const { db, opts } = opcionesBase({ idioma: "fr" as any });
+  const resultado = await crearCobroPaquete(opts);
+  assert.equal(resultado.httpStatus, 200);
+  const aceptacion = db.leer("aceptaciones/ref-1") as any;
+  assert.equal(aceptacion.idioma, "es");
+  assert.match(aceptacion.textoCasilla, /He leído y acepto/);
+});
+
+test("email ausente en el token (null) -> se guarda null, nunca se inventa uno", async () => {
+  const { db, opts } = opcionesBase({ email: null });
+  await crearCobroPaquete(opts);
+  const aceptacion = db.leer("aceptaciones/ref-1") as any;
+  assert.equal(aceptacion.email, null);
+});
+
+// ── M28: modalidad distinta de "unico" se rechaza (Tarea 7, renovable, no existe todavia) ──────
+
+test('modalidad="renovable" -> 400, nada se crea (esta ruta solo activa "unico")', async () => {
+  const { orden, opts } = opcionesBase({ modalidad: "renovable" });
+  const resultado = await crearCobroPaquete(opts);
+  assert.equal(resultado.httpStatus, 400);
+  assert.deepEqual(orden, []);
 });
 
 // ── Mercado Pago responde error -> 500, pero la aceptacion YA quedo guardada (se cobro lo que se mostro) ──

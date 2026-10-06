@@ -724,7 +724,32 @@ const limitarCobroGlobal: express.RequestHandler = (_req, res, next) => {
   next();
 };
 
-app.post("/api/mercadopago/create-preference", limitarCobroGlobal, exigirAuth, async (req, res) => {
+// ── Tope POR USUARIO de create-preference (M29, corrige vuelta 24) ─────────────────────────────
+// Antes, `limitarCobroGlobal` corria ANTES de `exigirAuth` en la ruta de abajo: una peticion SIN
+// token (401) ya gastaba un cupo del contador GLOBAL compartido por todos los usuarios, asi que
+// 20 peticiones sin token podian agotar el tope global y bloquear a un usuario real autenticado
+// que llegara despues. Ahora el orden es exigirAuth -> limitarCobroPorUid -> limitarCobroGlobal:
+// sin un uid valido nunca se llega a ningun contador. `evaluarLimite` (server/limitador.ts) ya
+// esta probado con node:test; este Map solo lo indexa por uid, igual patron que `visitas` arriba.
+const VENTANA_COBRO_UID_MS = 60_000;
+const MAX_COBROS_POR_UID_VENTANA = Number(process.env.RATE_LIMIT_COBROS_UID_PER_MIN || 3);
+const estadosCobroPorUid = new Map<string, EstadoVentana>();
+const limitarCobroPorUid: express.RequestHandler = (req, res, next) => {
+  const uid = req.uid!; // exigirAuth ya corrio antes en la cadena de middlewares: siempre hay uid.
+  const ahora = Date.now();
+  const r = evaluarLimite(estadosCobroPorUid.get(uid) ?? null, ahora, VENTANA_COBRO_UID_MS, MAX_COBROS_POR_UID_VENTANA);
+  estadosCobroPorUid.set(uid, r.estado);
+  if (estadosCobroPorUid.size > 5000) {
+    for (const [k, val] of estadosCobroPorUid) if (ahora - val.desde > VENTANA_COBRO_UID_MS) estadosCobroPorUid.delete(k);
+  }
+  if (!r.permitido) {
+    res.setHeader("Retry-After", r.retryAfterSegundos!);
+    return res.status(429).json({ error: "Demasiados intentos de cobro. Espera un minuto." });
+  }
+  next();
+};
+
+app.post("/api/mercadopago/create-preference", exigirAuth, limitarCobroPorUid, limitarCobroGlobal, async (req, res) => {
   // APAGADO hasta que Leonardo defina la entrega (05-oct): la landing manda a contacto. Encender
   // con PAGOS_ACTIVOS=1 en Cloud Run cuando exista que activar tras el pago (ver memoria).
   if (process.env.PAGOS_ACTIVOS !== "1") {
@@ -734,10 +759,16 @@ app.post("/api/mercadopago/create-preference", limitarCobroGlobal, exigirAuth, a
     // `amount`/`currency`/`planName` del cliente se ignoran a proposito. `aceptaTerminos` y
     // `aceptaRetracto` son las DOS casillas sin marcar del checkout (Tarea 14): las valida
     // `crearCobroPaquete`, mas abajo, para que la prueba "sin casilla no crea nada" sea real.
-    const { plan, aceptaTerminos, aceptaRetracto } = req.body as {
+    // `copMostrado`/`idioma`/`modalidad` son del checkout (M28, corrige vuelta 24): el servidor
+    // SIEMPRE recalcula el cop con la TRM de este momento; `copMostrado` solo se usa para
+    // comparar (409 si no coincide, ver crearCobroPaquete), nunca para fijar el precio.
+    const { plan, aceptaTerminos, aceptaRetracto, copMostrado, idioma, modalidad } = req.body as {
       plan?: string;
       aceptaTerminos?: unknown;
       aceptaRetracto?: unknown;
+      copMostrado?: unknown;
+      idioma?: unknown;
+      modalidad?: unknown;
     };
     if (plan === "pro") {
       // Pro es suscripcion (Tarea 8); todavia no existe que activar cuando MP confirme el cobro.
@@ -759,8 +790,12 @@ app.post("/api/mercadopago/create-preference", limitarCobroGlobal, exigirAuth, a
 
     const resultado = await crearCobroPaquete({
       uid: req.uid!,
+      email: req.email ?? null,
       aceptaTerminos,
       aceptaRetracto,
+      copMostrado,
+      idioma,
+      modalidad,
       obtenerTrm: trmHoy,
       copDesdeUsd,
       usdPaquete: usd,
@@ -896,6 +931,11 @@ app.get("/api/precios", async (_req, res) => {
       fechaHasta: trm.fechaHasta,
       paquete: { usd: usdPaquete, cop: copDesdeUsd(usdPaquete, trm.valor) },
       pro: { usd: usdPro, cop: copDesdeUsd(usdPro, trm.valor) },
+      // M30 (corrige vuelta 24): la UI no tiene otra forma de saber si `create-preference` esta
+      // encendido (PAGOS_ACTIVOS es una variable de servidor, nunca expuesta al bundle del
+      // cliente) — sin este campo, el panel de pago del Paquete seguiria ofreciendo "Pagar"
+      // aunque el servidor vaya a responder 503 a cualquier intento.
+      pagosActivos: process.env.PAGOS_ACTIVOS === "1",
     });
   } catch (error: any) {
     console.error("Error al calcular /api/precios:", error);

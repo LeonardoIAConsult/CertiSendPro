@@ -9,8 +9,8 @@
 // Quien llama a esta funcion (server.ts) ya resolvio antes: que `PAGOS_ACTIVOS` este encendido,
 // que el plan pedido sea "paquete" y que exista el access token de Mercado Pago — esos tres no
 // necesitan Firestore ni fetch inyectado para probarse, por eso se quedan en la ruta HTTP.
-import type { Plan } from "./cuentas";
-import { TERMINOS_VERSION, TEXTO_CASILLA_RETRACTO, textoCasillaTerminos } from "./cuentas";
+import type { Idioma, Modalidad, Plan } from "./cuentas";
+import { TERMINOS_VERSION, normalizarIdioma, textoCasillaRetracto, textoCasillaTerminos } from "./cuentas";
 
 export interface TrmDelDia {
   valor: number;
@@ -26,10 +26,21 @@ export interface RespuestaCrearPreferenciaMP {
 
 export interface CrearCobroPaqueteOpts {
   uid: string;
+  /** Correo del token verificado (`req.email`, NUNCA uno que mande el body del navegador). */
+  email: string | null;
   /** Lo que mando el navegador en el body (`req.body.aceptaTerminos`/`.aceptaRetracto`): se
    * valida aqui, no antes, para que la prueba "sin casilla -> no se crea nada" sea real. */
   aceptaTerminos: unknown;
   aceptaRetracto: unknown;
+  /** El monto en COP que el navegador mostraba cuando el usuario marco las casillas (M28, corrige
+   * vuelta 24). Se compara contra el COP recalculado AQUI con la TRM de este momento: si no
+   * coincide (cambio la TRM, o cruzo la medianoche), no se crea nada — ver mas abajo. */
+  copMostrado: unknown;
+  /** Idioma en el que el usuario vio el checkout (M28): normalizado con `normalizarIdioma`. */
+  idioma: unknown;
+  /** Modalidad elegida. Hoy esta ruta solo sabe activar "unico" (Tarea 7 agrega "renovable" al
+   * webhook); cualquier otro valor se rechaza con 400 antes de tocar Firestore o Mercado Pago. */
+  modalidad: unknown;
   obtenerTrm(): Promise<TrmDelDia | null>;
   copDesdeUsd(usd: number, trmValor: number): number;
   usdPaquete: number;
@@ -43,8 +54,11 @@ export interface CrearCobroPaqueteOpts {
     id: string,
     datos: {
       uid: string;
+      email: string | null;
       versionTerminos: string;
       plan: Plan;
+      modalidad: Modalidad;
+      idioma: Idioma;
       cop: number;
       trm: number;
       preferenciaId: string;
@@ -65,6 +79,7 @@ export type ResultadoCrearCobroPaquete =
       httpStatus: 200;
       body: { success: true; initPoint: string; cop: number; usd: number; trm: number; fechaTrm: string };
     }
+  | { httpStatus: 409; body: { error: string; copNuevo: number } }
   | { httpStatus: number; body: { error: string } };
 
 export async function crearCobroPaquete(opts: CrearCobroPaqueteOpts): Promise<ResultadoCrearCobroPaquete> {
@@ -81,12 +96,32 @@ export async function crearCobroPaquete(opts: CrearCobroPaqueteOpts): Promise<Re
     };
   }
 
+  // Hoy no existe nada que active una renovacion (Tarea 7 pendiente): rechazar ANTES de calcular
+  // precio o tocar Firestore, en vez de crear un cobro "unico" para una modalidad que el usuario
+  // no pidio.
+  const modalidad: Modalidad = opts.modalidad === "renovable" ? "renovable" : "unico";
+  if (modalidad !== "unico") {
+    return { httpStatus: 400, body: { error: "Esa modalidad todavía no está disponible. Elige pago único." } };
+  }
+  const idioma = normalizarIdioma(opts.idioma);
+
   const trm = await opts.obtenerTrm();
   if (!trm) {
     return { httpStatus: 503, body: { error: "No podemos calcular el precio de hoy; intenta más tarde." } };
   }
 
   const cop = opts.copDesdeUsd(opts.usdPaquete, trm.valor);
+
+  // M28 (corrige vuelta 24): el servidor manda sobre el precio, nunca el navegador — pero si lo
+  // que el navegador MOSTRABA ya no coincide con lo que se cobraria ahora (cambio la TRM, paso la
+  // medianoche, el checkout quedo abierto varios minutos), no se crea preferencia ni aceptacion ni
+  // se llama a Mercado Pago: se devuelve el monto nuevo para que el usuario lo revise y vuelva a
+  // marcar las casillas (R8 de textos-checkout.md v1.2).
+  const copMostradoNum = Number(opts.copMostrado);
+  if (!Number.isFinite(copMostradoNum) || copMostradoNum !== cop) {
+    return { httpStatus: 409, body: { error: "El precio cambió; revisa el nuevo monto", copNuevo: cop } };
+  }
+
   const referenciaId = opts.generarId();
   const externalReference = `CERTISEND|${opts.uid}|paquete|${cop}|${referenciaId}`;
 
@@ -102,13 +137,16 @@ export async function crearCobroPaquete(opts: CrearCobroPaqueteOpts): Promise<Re
   });
   await opts.guardarAceptacion(referenciaId, {
     uid: opts.uid,
+    email: opts.email,
     versionTerminos: TERMINOS_VERSION,
     plan: "paquete",
+    modalidad,
+    idioma,
     cop,
     trm: trm.valor,
     preferenciaId: referenciaId,
-    textoCasilla: textoCasillaTerminos(cop),
-    textoRetracto: TEXTO_CASILLA_RETRACTO,
+    textoCasilla: textoCasillaTerminos(cop, idioma),
+    textoRetracto: textoCasillaRetracto(idioma),
   });
 
   const respuestaMP = await opts.crearPreferenciaMP({ cop, externalReference });

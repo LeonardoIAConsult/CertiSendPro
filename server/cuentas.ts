@@ -153,17 +153,35 @@ export async function obtenerPreferencia(id: string): Promise<PreferenciaGuardad
 
 export const TERMINOS_VERSION = "1.2";
 
+/** Idioma de la UI en el momento del cobro (M28, corrige vuelta 24): el checkout acepta "es" o
+ * "en"; cualquier otro valor (ausente, invalido) se trata como "es" — ver `normalizarIdioma`. */
+export type Idioma = "es" | "en";
+
+/** Modalidad de pago del Paquete. Hoy `create-preference` solo ofrece "unico" (Tarea 6); la
+ * "renovable" es la Tarea 7, todavia no existe que activar en el webhook para esa modalidad. */
+export type Modalidad = "unico" | "renovable";
+
 /** Texto EXACTO de la casilla T4 (`textos-checkout.md` v1.2) para un pago UNICO: sin la clausula
- * de renovacion. `montoCop` se formatea con puntos de miles (regla R7 del mismo documento). */
-export function textoCasillaTerminos(montoCop: number): string {
+ * de renovacion. `montoCop` se formatea con puntos/comas de miles segun el idioma (regla R7 del
+ * mismo documento). `idioma` (M28, 2026-10-05): el checkout tambien se ofrece en ingles — el
+ * texto que se guarda como prueba de aceptacion (`guardarAceptacion`) debe ser el MISMO idioma
+ * que vio el usuario al marcar la casilla, nunca siempre español. */
+export function textoCasillaTerminos(montoCop: number, idioma: Idioma = "es"): string {
+  if (idioma === "en") {
+    return (
+      `I have read and accept the Terms and Conditions of Sale and Subscription (version ${TERMINOS_VERSION}) ` +
+      `and the Privacy Policy. I understand I will pay COP $${montoCop.toLocaleString("en-US")} today.`
+    );
+  }
   return (
     `He leído y acepto los Términos y Condiciones de Venta y Suscripción (versión ${TERMINOS_VERSION}) ` +
     `y la Política de Privacidad. Entiendo que pagaré $${montoCop.toLocaleString("es-CO")} COP hoy.`
   );
 }
 
-/** Texto EXACTO de la casilla T5 (`textos-checkout.md` v1.2): declaracion de inicio inmediato y
- * excepcion del derecho de retracto. No depende del plan ni del monto, siempre es el mismo. */
+/** Texto EXACTO de la casilla T5 (`textos-checkout.md` v1.2, ES) — nombre sin sufijo de idioma
+ * por compatibilidad con el codigo/pruebas existentes de la Tarea 14 (siempre fue español). No
+ * depende del plan ni del monto, siempre es el mismo. */
 export const TEXTO_CASILLA_RETRACTO =
   "Quiero que el servicio empiece de inmediato al confirmarse mi pago. Sé que, por eso, no procede " +
   "el derecho de retracto de 5 días hábiles (Ley 1480 de 2011, artículo 47, numeral 1). Puedo " +
@@ -171,10 +189,38 @@ export const TEXTO_CASILLA_RETRACTO =
   "ley me reconoce y, si es un Paquete y no hago ningún envío con él, puedo pedir su devolución " +
   "completa dentro de los 5 días hábiles siguientes al pago.";
 
+/** Traduccion fiel de `TEXTO_CASILLA_RETRACTO` (T5 EN, `textos-checkout.md` v1.2 — la version en
+ * ingles YA existe en ese documento, no fue necesario traducir a mano desde cero). */
+export const TEXTO_CASILLA_RETRACTO_EN =
+  "I want the service to start immediately once my payment is confirmed. I understand that, for this " +
+  "reason, the 5-business-day right of withdrawal does not apply (Colombian Law 1480 of 2011, article " +
+  "47, item 1). I can cancel renewals at any time, I keep the refunds and payment reversal rights the " +
+  "law grants me, and, for a Bundle with no sends used, I can request a full refund within 5 business " +
+  "days after payment.";
+
+/** Texto EXACTO de la casilla T5 en el idioma pedido (M28). */
+export function textoCasillaRetracto(idioma: Idioma = "es"): string {
+  return idioma === "en" ? TEXTO_CASILLA_RETRACTO_EN : TEXTO_CASILLA_RETRACTO;
+}
+
+/** Normaliza cualquier valor que mande el navegador a un `Idioma` valido: solo "en" exacto da
+ * ingles, cualquier otra cosa (ausente, "es", invalido) da español — nunca lanza. */
+export function normalizarIdioma(valor: unknown): Idioma {
+  return valor === "en" ? "en" : "es";
+}
+
 export interface AceptacionGuardada {
   uid: string;
+  /** Correo del token verificado (`req.email`), nunca uno que mande el navegador en el body
+   * (M28, 2026-10-05). `null` si el token de Firebase no trae correo. */
+  email: string | null;
   versionTerminos: string;
   plan: Plan;
+  /** Modalidad elegida en el checkout (M28): hoy siempre "unico" (Tarea 7 agrega "renovable"). */
+  modalidad: Modalidad;
+  /** Idioma en el que el usuario vio y marco las casillas (M28): el mismo que `textoCasilla`
+   * y `textoRetracto` de abajo. */
+  idioma: Idioma;
   cop: number;
   trm: number;
   /** Id de `preferencias/{id}` a la que queda enlazada esta aceptacion (hoy, el mismo id). */

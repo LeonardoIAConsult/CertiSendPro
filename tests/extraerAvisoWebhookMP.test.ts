@@ -61,3 +61,17 @@ test("extraerAvisoWebhookMP: query['data.id'] manda incluso si el body tambien t
   });
   assert.equal(r.paymentId, "DE-LA-QUERY");
 });
+
+// Bajo (corrige vuelta 24): Express parsea un parametro de query REPETIDO como arreglo.
+test('extraerAvisoWebhookMP: "type" repetido en la query (arreglo) -> toma el primer valor', () => {
+  const r = extraerAvisoWebhookMP({
+    query: { type: ["payment", "payment"], "data.id": ["N1", "N2"] },
+    body: {},
+  });
+  assert.deepEqual(r, { tipo: "payment", paymentId: "N1" });
+});
+
+test('extraerAvisoWebhookMP: "topic" repetido (IPN viejo, arreglo) -> toma el primer valor', () => {
+  const r = extraerAvisoWebhookMP({ query: { topic: ["payment", "merchant_order"], id: ["N1"] }, body: {} });
+  assert.deepEqual(r, { tipo: "payment", paymentId: "N1" });
+});

@@ -106,6 +106,23 @@ export interface TranslationDict {
   // Firebase no se sondea nada (se mentiria con "confirmando"/"en revision"); se pide iniciar
   // sesion.
   pagoSinSesion: string;
+
+  // Panel de checkout del Paquete (M30, cobro real con planes, corrige vuelta 24). Solo se
+  // muestra con PAGOS_ACTIVOS encendido (ver `/api/precios` -> `pagosActivos`); con pagos
+  // apagados el boton del Paquete sigue mandando a `buyNow` (mailto). Textos citados de
+  // `docs/legal/textos-checkout.md` v1.2 (T1/T4/T5); `checkoutReferencia`/`checkoutTrmNota` usan
+  // {usd}/{trm}/{fecha}, `checkoutPrecioCambio` usa {anterior}/{nuevo} (reemplazados en
+  // LandingPage.tsx).
+  buyPaquete: string;
+  checkoutPaqueteTitle: string;
+  checkoutReferencia: string;
+  checkoutTrmNota: string;
+  checkoutVerTerminos: string;
+  checkoutPrecioCambio: string;
+  checkoutPagar: string;
+  checkoutCerrar: string;
+  checkoutErrorGenerico: string;
+  checkoutSinPrecios: string;
 }
 
 export type Lang = "es" | "en";
@@ -204,6 +221,17 @@ export const translations: Record<Lang, TranslationDict> = {
     pagoRevision: "Tu pago está en revisión; te avisamos por correo.",
     pagoRechazado: "No se realizó ningún cobro.",
     pagoSinSesion: "Inicia sesión para ver el estado de tu pago.",
+
+    buyPaquete: "Comprar paquete",
+    checkoutPaqueteTitle: "Paquete · 150 envíos",
+    checkoutReferencia: "Referencia US${usd}",
+    checkoutTrmNota: "TRM {trm} COP, vigente el {fecha}",
+    checkoutVerTerminos: "Ver Términos y Condiciones",
+    checkoutPrecioCambio: "El precio cambió: antes ${anterior} COP, ahora ${nuevo} COP. Revisa y vuelve a marcar las casillas.",
+    checkoutPagar: "Pagar",
+    checkoutCerrar: "Cerrar",
+    checkoutErrorGenerico: "No se pudo iniciar el pago con Mercado Pago.",
+    checkoutSinPrecios: "No podemos calcular el precio de hoy; intenta más tarde.",
   },
   en: {
     appName: "CertiSend Pro",
@@ -298,5 +326,16 @@ export const translations: Record<Lang, TranslationDict> = {
     pagoRevision: "Your payment is under review; we'll email you.",
     pagoRechazado: "No charge was made.",
     pagoSinSesion: "Sign in to see your payment status.",
+
+    buyPaquete: "Buy bundle",
+    checkoutPaqueteTitle: "Bundle · 150 sends",
+    checkoutReferencia: "Reference US${usd}",
+    checkoutTrmNota: "TRM {trm} COP, effective {fecha}",
+    checkoutVerTerminos: "View Terms and Conditions",
+    checkoutPrecioCambio: "The price changed: before COP ${anterior}, now COP ${nuevo}. Please review and tick the boxes again.",
+    checkoutPagar: "Pay",
+    checkoutCerrar: "Close",
+    checkoutErrorGenerico: "We couldn't start the payment with Mercado Pago.",
+    checkoutSinPrecios: "We couldn't get today's price; please try again later.",
   }
 };
