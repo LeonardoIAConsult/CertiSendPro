@@ -392,18 +392,81 @@ test("construirAvisoReembolsoLeonardo: sin correo del comprador, dice que falta 
   assert.match(sinCorreo.texto, /escríbele/);
 });
 
-// ── Medio 1 (vuelta 35): aviso de reversion al COMPRADOR (Terminos sec. 9.2) ────────────────────
-test("construirAvisoReversionComprador: ES cumple §9.2 con 'te lo informamos al correo de tu cuenta'", () => {
-  const { asunto, texto } = construirAvisoReversionComprador({ idioma: "es", paymentId: "pago-1" });
-  assert.match(asunto, /pago-1/);
-  assert.match(texto, /te lo informamos al correo de tu cuenta/i);
-  assert.match(texto, /sección 9\.2/);
+// ── F1 (Abogado_LAP ronda 5 / verificacion ronda 5, 2026-10-06): aviso de reversion al COMPRADOR
+// (Terminos sec. 9.2) con DOS variantes segun si `cuentaRevertida` (el resultado REAL de
+// revertirPagoSiNoRevertidoTx) revirtio la cuenta o no. La variante (a) NUNCA debe salir si no se
+// revirtio (le diria a quien conserva su Paquete que lo perdio), y viceversa.
+const FECHA_REVERSION = new Date("2026-10-06T15:00:00.000Z");
+
+test("construirAvisoReversionComprador: ES, cuentaRevertida=true -> dice plan Gratis, lotes de 15 y como reclamar", () => {
+  const { asunto, texto } = construirAvisoReversionComprador({
+    idioma: "es", paymentId: "pago-1", status: "refunded", cuentaRevertida: true, fecha: FECHA_REVERSION,
+  });
+  assert.match(asunto, /plan Gratis/);
+  assert.match(texto, /pasó al plan Gratis/);
+  assert.match(texto, /lotes de hasta 15 certificados/);
+  assert.match(texto, /pago-1/);
+  assert.match(texto, /si no reconoces este movimiento/i);
+  assert.doesNotMatch(texto, /no cambia/);
 });
 
-test("construirAvisoReversionComprador: EN tiene su propio texto (no una copia del ES)", () => {
-  const { texto } = construirAvisoReversionComprador({ idioma: "en", paymentId: "pago-1" });
-  assert.match(texto, /we inform you at your account/i);
-  assert.doesNotMatch(texto, /te lo informamos/i);
+test("construirAvisoReversionComprador: ES, cuentaRevertida=false -> dice que la cuenta NO cambia (nunca 'plan Gratis')", () => {
+  const { asunto, texto } = construirAvisoReversionComprador({
+    idioma: "es", paymentId: "pago-1", status: "refunded", cuentaRevertida: false, fecha: FECHA_REVERSION,
+  });
+  assert.match(texto, /tu cuenta no cambia/);
+  assert.match(texto, /pago-1/);
+  assert.doesNotMatch(asunto, /plan Gratis/);
+  assert.doesNotMatch(texto, /pasó al plan Gratis/);
+  assert.doesNotMatch(texto, /lotes de hasta 15/);
+});
+
+test("construirAvisoReversionComprador: EN, cuentaRevertida=true -> dice Free plan y batches of up to 15 (no una copia del ES)", () => {
+  const { asunto, texto } = construirAvisoReversionComprador({
+    idioma: "en", paymentId: "pago-1", status: "refunded", cuentaRevertida: true, fecha: FECHA_REVERSION,
+  });
+  assert.match(asunto, /Free plan/);
+  assert.match(texto, /moved to the Free plan/);
+  assert.match(texto, /batches of up to 15 certificates/);
+  assert.doesNotMatch(texto, /pasó al plan Gratis/i);
+});
+
+test("construirAvisoReversionComprador: EN, cuentaRevertida=false -> dice que la cuenta no cambia (no 'Free plan')", () => {
+  const { texto } = construirAvisoReversionComprador({
+    idioma: "en", paymentId: "pago-1", status: "refunded", cuentaRevertida: false, fecha: FECHA_REVERSION,
+  });
+  assert.match(texto, /does not change/);
+  assert.doesNotMatch(texto, /Free plan/);
+});
+
+test("construirAvisoReversionComprador: elige contracargo/chargeback cuando status es charged_back, reembolso/refund si no", () => {
+  const conContracargo = construirAvisoReversionComprador({
+    idioma: "es", paymentId: "pago-1", status: "charged_back", cuentaRevertida: true, fecha: FECHA_REVERSION,
+  });
+  assert.match(conContracargo.texto, /contracargo/);
+  assert.doesNotMatch(conContracargo.texto, /reembolso/);
+
+  const conReembolso = construirAvisoReversionComprador({
+    idioma: "en", paymentId: "pago-1", status: "refunded", cuentaRevertida: true, fecha: FECHA_REVERSION,
+  });
+  assert.match(conReembolso.texto, /refund/);
+  assert.doesNotMatch(conReembolso.texto, /chargeback/);
+});
+
+// Oraculo de la mutacion (F1): invertir la condicion de `cuentaRevertida` dentro de
+// `construirAvisoReversionComprador` (p. ej. `if (!datos.cuentaRevertida)`) hace que ESTA pareja
+// de pruebas caiga: la variante (a) dejaria de traer "plan Gratis" y la (b) empezaria a traerlo.
+test("construirAvisoReversionComprador: mutacion — invertir cuentaRevertida cambia la variante elegida", () => {
+  const revertida = construirAvisoReversionComprador({
+    idioma: "es", paymentId: "pago-1", status: "refunded", cuentaRevertida: true, fecha: FECHA_REVERSION,
+  });
+  const noRevertida = construirAvisoReversionComprador({
+    idioma: "es", paymentId: "pago-1", status: "refunded", cuentaRevertida: false, fecha: FECHA_REVERSION,
+  });
+  assert.match(revertida.texto, /plan Gratis/);
+  assert.doesNotMatch(noRevertida.texto, /plan Gratis/);
+  assert.notEqual(revertida.texto, noRevertida.texto);
+  assert.notEqual(revertida.asunto, noRevertida.asunto);
 });
 
 // ── Medio 2 (vuelta 35): proveedorConfigurado/relayConfigurado para GET /api/health ─────────────

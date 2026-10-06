@@ -375,37 +375,71 @@ export function construirCorreoConfirmacionCompra(
   };
 }
 
-// ── Aviso de reversion al COMPRADOR (Medio 1, vuelta 35) ────────────────────────────────────────
+// ── Aviso de reversion al COMPRADOR (Medio 1, vuelta 35; F1 Abogado_LAP ronda 5/verificacion
+// ronda 5, 2026-10-06) ───────────────────────────────────────────────────────────────────────
 // Terminos sec. 9.2 exige que, ante un reembolso/contracargo reportado por Mercado Pago, se
 // informe al comprador — la via mas simple que cumple la seccion es mandarlo DIRECTO al correo de
 // su cuenta (el mismo que ya recibio el acuse de compra), en vez de que Leonardo tenga que
-// escribirlo a mano cada vez. Texto minimo a proposito: no es un tramite de devolucion (eso ya lo
-// decidio Mercado Pago/el banco antes de que este correo salga), solo la confirmacion de que la
-// reversion quedo registrada.
-export function construirAvisoReversionComprador(datos: { idioma: "es" | "en"; paymentId: string }): {
+// escribirlo a mano cada vez. F1: el correo tiene DOS variantes segun si la reversion de verdad
+// toco la cuenta (`cuentaRevertida`, el resultado REAL de `revertirPagoSiNoRevertidoTx` — nunca se
+// infiere de otra cosa): (a) revertida -> la cuenta volvio a Gratis, puede seguir enviando lotes
+// de hasta 15 y que hacer si no reconoce el movimiento; (b) no revertida (el pago ya no era el
+// activo) -> la cuenta no cambia. Decirle "tu cuenta volvio a Gratis" a quien SI conserva su
+// Paquete seria una promesa falsa.
+export function construirAvisoReversionComprador(datos: {
+  idioma: "es" | "en";
+  paymentId: string;
+  status: string;
+  cuentaRevertida: boolean;
+  fecha: Date;
+}): {
   asunto: string;
   texto: string;
 } {
+  const refMp = datos.paymentId;
+  const fechaTexto = formatearFechaBogotaDDMMAAAA(datos.fecha);
+
   if (datos.idioma === "en") {
+    const tipo = datos.status === "charged_back" ? "chargeback" : "refund";
+    if (datos.cuentaRevertida) {
+      return {
+        asunto: `Your CertiSend Pro account is back on the Free plan`,
+        texto:
+          `Hello: Mercado Pago informed us of a ${tipo} of payment ${refMp}. Because of this, your ` +
+          `account moved to the Free plan on ${fechaTexto}: you can keep sending batches of up to ` +
+          `15 certificates at no cost. If you don't recognize this, write to ${PROVEEDOR_CORREO} ` +
+          `with reference ${refMp}.\n\n` +
+          pieProveedor("en"),
+      };
+    }
     return {
-      asunto: `CertiSend — Your payment ${datos.paymentId} was reversed`,
+      asunto: `CertiSend Pro: we recorded the reversal of your payment ${refMp}`,
       texto:
-        `Hello:\n\n` +
-        `We're writing to let you know that your payment ${datos.paymentId} with CertiSend was reversed ` +
-        `(refund or chargeback reported by Mercado Pago). We inform you at your account's email, as our ` +
-        `Terms of Service (sec. 9.2) require.\n\n` +
-        `If you have any questions, write to ${PROVEEDOR_CORREO}.\n\n` +
+        `Hello: Mercado Pago informed us of a ${tipo} of payment ${refMp}. That payment was not ` +
+        `your active plan, so your account does not change. If you don't recognize this, write to ` +
+        `${PROVEEDOR_CORREO} with reference ${refMp}.\n\n` +
         pieProveedor("en"),
     };
   }
+
+  const tipo = datos.status === "charged_back" ? "contracargo" : "reembolso";
+  if (datos.cuentaRevertida) {
+    return {
+      asunto: `Tu cuenta de CertiSend Pro volvió al plan Gratis`,
+      texto:
+        `Hola: Mercado Pago nos informó un ${tipo} del pago ${refMp}. Por eso tu cuenta pasó al ` +
+        `plan Gratis desde el ${fechaTexto}: puedes seguir enviando lotes de hasta 15 certificados ` +
+        `sin costo. Si no reconoces este movimiento, escríbenos a ${PROVEEDOR_CORREO} con la ` +
+        `referencia ${refMp}.\n\n` +
+        pieProveedor("es"),
+    };
+  }
   return {
-    asunto: `CertiSend — Tu pago ${datos.paymentId} fue revertido`,
+    asunto: `CertiSend Pro: registramos la reversión de tu pago ${refMp}`,
     texto:
-      `Hola:\n\n` +
-      `Te escribimos para informarte que tu pago ${datos.paymentId} con CertiSend fue revertido ` +
-      `(reembolso o contracargo reportado por Mercado Pago). Te lo informamos al correo de tu cuenta, ` +
-      `como exigen nuestros Términos y Condiciones (sección 9.2).\n\n` +
-      `Si tienes alguna pregunta, escríbenos a ${PROVEEDOR_CORREO}.\n\n` +
+      `Hola: Mercado Pago nos informó un ${tipo} del pago ${refMp}. Ese pago no correspondía a tu ` +
+      `plan activo, así que tu cuenta no cambia. Si no reconoces este movimiento, escríbenos a ` +
+      `${PROVEEDOR_CORREO} con la referencia ${refMp}.\n\n` +
       pieProveedor("es"),
   };
 }

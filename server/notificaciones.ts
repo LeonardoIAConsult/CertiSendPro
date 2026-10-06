@@ -257,15 +257,18 @@ export const depsAvisarReembolsoReales: AvisarReembolsoDeps = {
 };
 
 /**
- * Medio 1 (vuelta 35): avisa al COMPRADOR (mismo mecanismo de reclamo transaccional que
- * `notificarActivacionPaquete` — nunca duplica, nunca lanza) que su pago fue revertido, tal como
- * exige Terminos sec. 9.2 ("te lo informamos al correo de tu cuenta" — la via mas simple que
- * cumple la seccion: mandarlo directo a ese correo, sin que Leonardo tenga que escribirlo a mano).
+ * Medio 1 (vuelta 35); F1 (Abogado_LAP ronda 5/verificacion ronda 5, 2026-10-06): avisa al
+ * COMPRADOR (mismo mecanismo de reclamo transaccional que `notificarActivacionPaquete` — nunca
+ * duplica, nunca lanza) que su pago fue revertido, con la variante EXACTA que exige Terminos sec.
+ * 9.2 segun lo que de verdad paso con su cuenta: `cuentaRevertida` es el resultado REAL de
+ * `revertirPagoSiNoRevertidoTx` (nunca se infiere de otra cosa, nunca se asume) — si el pago no
+ * era el activo, la cuenta no cambia y el correo tiene que decir eso, no "pasaste a Gratis".
  * Devuelve `{correoComprador, avisoEnviado}` para que `avisarReembolsoPaquete` pueda decirle a
  * Leonardo si todavia falta escribirle a mano (si no se encontro correo, o si el envio fallo).
  */
 async function avisarReversionAlComprador(
-  datos: { paymentId: string; referenciaId: string },
+  datos: { paymentId: string; referenciaId: string; status: string },
+  cuentaRevertida: boolean,
   ahora: Date,
   deps: AvisarReembolsoDeps
 ): Promise<{ correoComprador: string | null; avisoEnviado: boolean }> {
@@ -284,6 +287,9 @@ async function avisarReversionAlComprador(
     const { asunto, texto } = construirAvisoReversionComprador({
       idioma: aceptacion?.idioma ?? "es",
       paymentId: datos.paymentId,
+      status: datos.status,
+      cuentaRevertida,
+      fecha: ahora,
     });
     const ok = await deps.enviarCorreo({ para: correoComprador, asunto, texto, idEnvio: `${datos.paymentId}:reversionComprador` });
     await cerrarReclamoConReintento(datos.paymentId, deps, "reversionComprador", ok, ahora);
@@ -319,13 +325,14 @@ export async function avisarReembolsoPaquete(
   const resultado = await deps.revertirPago(datos.paymentId, datos.uid);
   if (resultado === "ya_procesado" || resultado === "ignorado") return;
 
-  const { correoComprador, avisoEnviado } = await avisarReversionAlComprador(datos, ahora, deps);
+  const cuentaRevertida = resultado === "revertido";
+  const { correoComprador, avisoEnviado } = await avisarReversionAlComprador(datos, cuentaRevertida, ahora, deps);
 
   const { asunto, texto } = construirAvisoReembolsoLeonardo({
     uid: datos.uid,
     paymentId: datos.paymentId,
     status: datos.status,
-    cuentaRevertida: resultado === "revertido",
+    cuentaRevertida,
     correoComprador,
     avisoCompradorEnviado: avisoEnviado,
   });

@@ -652,9 +652,13 @@ export default function LandingPage({
                       </p>
                       {/* O3 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto; T1 de
                           docs/legal/textos-checkout.md): la tarjeta del plan tambien debe decir
-                          "precio total, sin cargos adicionales", no solo el panel de pago. */}
+                          "precio total, sin cargos adicionales", no solo el panel de pago.
+                          Bajo (verificacion ronda 5, 2026-10-06): con PAGOS_ACTIVOS apagado el
+                          boton de esta tarjeta manda un mailto, no hay pago real hoy — "Total a
+                          pagar hoy" solo aplica cuando precios.pagosActivos es true (el panel real
+                          de pago, mas abajo, SIEMPRE lo usa con pagos activos). */}
                       <p className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 mt-0.5">
-                        {t.checkoutPrecioTotalSinCargos}
+                        {precios.pagosActivos ? t.checkoutPrecioTotalSinCargos : t.checkoutPrecioDeHoySinCargos}
                       </p>
                     </>
                   ) : (

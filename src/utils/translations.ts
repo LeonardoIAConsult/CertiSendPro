@@ -138,6 +138,10 @@ export interface TranslationDict {
   // pago), "pago único" y el vencimiento con la perdida de los envios no usados — Terminos
   // §6.2/§4.5 ya lo prometian, la pantalla no lo mostraba.
   checkoutPrecioTotalSinCargos: string;
+  // Bajo (verificacion ronda 5, 2026-10-06): la tarjeta del Paquete usa esta clave incluso con
+  // PAGOS_ACTIVOS apagado (boton = mailto, no hay pago real hoy) — "Total a pagar hoy" quedaba mal
+  // ahi; con pagos apagados la tarjeta usa esta clave en su lugar (LandingPage.tsx).
+  checkoutPrecioDeHoySinCargos: string;
   checkoutPagoUnicoNota: string;
   checkoutVencimientoNota: string;
   checkoutMercadoPagoNota: string;
@@ -265,6 +269,7 @@ export const translations: Record<Lang, TranslationDict> = {
     checkoutSinPrecios: "No podemos calcular el precio de hoy; intenta más tarde.",
 
     checkoutPrecioTotalSinCargos: "Total a pagar hoy · precio total, sin cargos adicionales.",
+    checkoutPrecioDeHoySinCargos: "Precio de hoy · precio total, sin cargos adicionales.",
     checkoutPagoUnicoNota: "Pago único: no se renueva y no habrá más cobros. Se activa cuando Mercado Pago confirme el pago.",
     checkoutVencimientoNota: "Importante: tus 150 envíos vencen un mes después de confirmarse el pago o cuando los gastes, lo que ocurra primero. Los envíos que no uses se pierden y no se acumulan.",
     checkoutMercadoPagoNota: "Pagas con Mercado Pago. CertiSend no ve ni guarda los datos de tu tarjeta.",
@@ -382,6 +387,7 @@ export const translations: Record<Lang, TranslationDict> = {
     // O3 (sin "even if you renew": v1 solo tiene el Paquete de pago único, nunca renovable — ver
     // el dictamen, que pide quitar esa clausula de la frase EN de T6).
     checkoutPrecioTotalSinCargos: "Total due today · total price, no additional charges.",
+    checkoutPrecioDeHoySinCargos: "Today's price · total price, no additional charges.",
     checkoutPagoUnicoNota: "One-time payment: it does not renew and there will be no further charges. It's activated once Mercado Pago confirms the payment.",
     checkoutVencimientoNota: "Important: your 150 sends expire one month after the payment is confirmed or when used up, whichever comes first. Unused sends are lost and do not carry over.",
     checkoutMercadoPagoNota: "Payment is processed by Mercado Pago. CertiSend never sees or stores your card details.",

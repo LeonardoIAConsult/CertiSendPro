@@ -17,7 +17,8 @@ process.env.PROVEEDOR_DOC = "900000000-1";
 process.env.PROVEEDOR_DIR = "Calle 1 # 2-3, Bogotá";
 process.env.PROVEEDOR_TEL = "+57 300 000 0000";
 
-const { construirCorreoConfirmacionCompra, tienePlaceholderPendiente, PROVEEDOR_NOMBRE } = await import("../server/avisos");
+const { construirCorreoConfirmacionCompra, construirAvisoReversionComprador, tienePlaceholderPendiente, PROVEEDOR_NOMBRE } =
+  await import("../server/avisos");
 
 const DATOS_BASE = {
   cop: 49102,
@@ -54,4 +55,25 @@ test("O1: construirCorreoConfirmacionCompra (EN) con los 4 PROVEEDOR_* puestos -
 test("tienePlaceholderPendiente: sigue detectando el marcador de IVA viejo si alguien lo reintroduce", () => {
   const conMarcadorViejo = `Precio pagado: $49.102 COP [PENDIENTE: confirmar con contador si este precio incluye IVA]\n`;
   assert.equal(tienePlaceholderPendiente(conMarcadorViejo), true);
+});
+
+// F1 (verificacion ronda 5, 2026-10-06), oraculo: el correo de reversion al comprador, con los 4
+// PROVEEDOR_* puestos (como en produccion), tampoco debe llevar nunca un placeholder pendiente —
+// ni en la variante (a) cuentaRevertida=true ni en la (b) false.
+const FECHA_REVERSION = new Date("2026-10-06T15:00:00.000Z");
+
+test("F1: construirAvisoReversionComprador (ES, cuentaRevertida=true) con los 4 PROVEEDOR_* puestos -> SIN placeholder pendiente", () => {
+  const { texto } = construirAvisoReversionComprador({
+    idioma: "es", paymentId: "pago-1", status: "refunded", cuentaRevertida: true, fecha: FECHA_REVERSION,
+  });
+  assert.equal(tienePlaceholderPendiente(texto), false);
+  assert.doesNotMatch(texto, /\[PENDIENTE/);
+});
+
+test("F1: construirAvisoReversionComprador (EN, cuentaRevertida=false) con los 4 PROVEEDOR_* puestos -> SIN placeholder pendiente", () => {
+  const { texto } = construirAvisoReversionComprador({
+    idioma: "en", paymentId: "pago-1", status: "charged_back", cuentaRevertida: false, fecha: FECHA_REVERSION,
+  });
+  assert.equal(tienePlaceholderPendiente(texto), false);
+  assert.doesNotMatch(texto, /\[PENDING/);
 });

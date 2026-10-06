@@ -497,17 +497,44 @@ test("Medio 1: dos avisos casi simultaneos del mismo pago -> 1 solo correo al co
 // confirma que `merge/acuses` ya trae este correo cableado de punta a punta, como dice ad80fd6.
 // Mutacion: si `avisarReversionAlComprador` dejara de llamar a `deps.enviarCorreo` para el
 // comprador (o la reversion quedara best-effort SIN reclamo), esta prueba cae.
-test("O4: avisarReembolsoPaquete manda al comprador el texto EXACTO de construirAvisoReversionComprador (sec. 9.2)", async () => {
+//
+// F1 (verificacion ronda 5, 2026-10-06): `depsReembolsoFalsas` revierte por defecto
+// (`revertirPago: async () => "revertido"`), asi que el texto esperado aqui es la variante (a)
+// — cuentaRevertida=true, "pasó al plan Gratis". Ver abajo la pareja con "no_activo" (variante b).
+test("O4: avisarReembolsoPaquete manda al comprador el texto EXACTO de construirAvisoReversionComprador (sec. 9.2, variante a: revertida)", async () => {
   const { deps, correosEnviados } = depsReembolsoFalsas({
     obtenerAceptacion: async () => ({ email: "comprador@test.com", idioma: "es" }),
   });
-  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps);
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps, AHORA);
   const alComprador = correosEnviados.find((c) => c.para === "comprador@test.com");
   assert.ok(alComprador, "el comprador DEBE recibir un correo de reversion");
-  const esperado = construirAvisoReversionComprador({ idioma: "es", paymentId: "pago-1" });
+  const esperado = construirAvisoReversionComprador({
+    idioma: "es", paymentId: "pago-1", status: "charged_back", cuentaRevertida: true, fecha: AHORA,
+  });
   assert.equal(alComprador!.asunto, esperado.asunto);
   assert.equal(alComprador!.texto, esperado.texto);
-  assert.match(alComprador!.texto, /sección 9\.2/);
+  assert.match(alComprador!.texto, /plan Gratis/);
+});
+
+// F1: cuando el pago NO era el activo (`revertirPago` devuelve "no_activo"), el comprador debe
+// recibir la variante (b) — la cuenta no cambia. Si alguien invirtiera la condicion dentro de
+// `construirAvisoReversionComprador`, esta prueba y la de arriba quedarian intercambiadas, pero
+// la de arriba (que exige "plan Gratis") caeria igual.
+test("O4/F1: avisarReembolsoPaquete manda al comprador la variante (b) cuando el pago ya no era el activo", async () => {
+  const { deps, correosEnviados } = depsReembolsoFalsas({
+    revertirPago: async () => "no_activo",
+    obtenerAceptacion: async () => ({ email: "comprador@test.com", idioma: "es" }),
+  });
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded", referenciaId: "ref-1" }, deps, AHORA);
+  const alComprador = correosEnviados.find((c) => c.para === "comprador@test.com");
+  assert.ok(alComprador, "el comprador DEBE recibir un correo de reversion aunque la cuenta no cambiara");
+  const esperado = construirAvisoReversionComprador({
+    idioma: "es", paymentId: "pago-1", status: "refunded", cuentaRevertida: false, fecha: AHORA,
+  });
+  assert.equal(alComprador!.asunto, esperado.asunto);
+  assert.equal(alComprador!.texto, esperado.texto);
+  assert.match(alComprador!.texto, /tu cuenta no cambia/);
+  assert.doesNotMatch(alComprador!.texto, /plan Gratis/);
 });
 
 // ── Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): aviso a Leonardo ──
