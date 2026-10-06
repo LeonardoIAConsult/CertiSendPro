@@ -97,10 +97,51 @@ async function intentarEnviarUnDestinatario(
   if (!reclamado) return; // ya reclamado o ya enviado por otra entrega.
 
   const ok = await deps.enviarCorreo(correo);
-  if (ok) {
-    await deps.marcarCorreoEnviado(paymentId, destinatario);
-  } else {
-    await deps.liberarReclamoCorreo(paymentId, destinatario);
+  await cerrarReclamoConReintento(paymentId, deps, destinatario, ok);
+}
+
+/**
+ * Hallazgo de `/code-review` sobre el commit de M33-M36 (vuelta 27): `enviarCorreo` nunca lanza
+ * (siempre resuelve `boolean`, ver server/avisos.ts), pero la escritura que CIERRA el reclamo
+ * (`marcarCorreoEnviado`/`liberarReclamoCorreo`) SI puede fallar (Firestore sin red justo en ese
+ * instante) — y si eso pasa, el campo queda en `"reclamado"` para siempre: `reclamarEnvioCorreoTx`
+ * trata cualquier valor truthy como "ya tomado" (server/cuentas.ts), asi que ninguna entrega
+ * futura del mismo `paymentId` reintentaria ESE destinatario.
+ *
+ * Mitigacion MINIMA (deliberada: NO es una reconciliacion completa con TTL/cron, que seria una
+ * tarea aparte y el propio `/code-review` la califico de "no bloqueante" para el lanzamiento): un
+ * reintento INMEDIATO de la MISMA operacion (nunca cambia de `marcarCorreoEnviado` a
+ * `liberarReclamoCorreo` o viceversa — eso arriesgaria un reenvio duplicado si el correo YA se
+ * mando). Si el reintento TAMBIEN falla, se deja un log con un marcador fijo y grepable
+ * (`RECLAMO_SIN_SALIDA`) para resolverlo a mano en Firestore — mismo patron ya aceptado en este
+ * proyecto para la devolucion manual de la Tarea 9.
+ */
+async function cerrarReclamoConReintento(
+  paymentId: string,
+  deps: NotificarActivacionDeps,
+  destinatario: DestinatarioCorreo,
+  envioOk: boolean
+): Promise<void> {
+  const cerrarReclamo = () =>
+    envioOk
+      ? deps.marcarCorreoEnviado(paymentId, destinatario)
+      : deps.liberarReclamoCorreo(paymentId, destinatario);
+  try {
+    await cerrarReclamo();
+  } catch (error: any) {
+    console.error(
+      `[NOTIFICACIONES] fallo al cerrar el reclamo de correo (reintentando una vez). paymentId=${paymentId} destinatario=${destinatario}:`,
+      error?.message || error
+    );
+    try {
+      await cerrarReclamo();
+    } catch (error2: any) {
+      console.error(
+        `[NOTIFICACIONES] RECLAMO_SIN_SALIDA: el reclamo de "${destinatario}" para paymentId=${paymentId} quedo en "reclamado" tras 2 fallos seguidos de Firestore. ` +
+          `Resolver a mano en pagosProcesados/${paymentId}: debe quedar en ${envioOk ? '"enviado" (el correo SI se mando)' : "null (para que una entrega futura reintente)"}.`,
+        error2?.message || error2
+      );
+    }
   }
 }
 

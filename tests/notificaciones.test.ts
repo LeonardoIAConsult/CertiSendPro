@@ -248,6 +248,41 @@ test("notificarActivacionPaquete (M36(2)): el aviso de bloqueo a Leonardo tiene 
   assert.equal(avisosBloqueo.length, 1, "el aviso de bloqueo no se repite en una entrega posterior");
 });
 
+// ── Hallazgo de /code-review sobre el commit de M33-M36 (vuelta 27): si la escritura que CIERRA
+// el reclamo falla, `cerrarReclamoConReintento` reintenta UNA vez la MISMA operacion antes de
+// darse por vencido (y nunca lanza, con o sin exito en el reintento) ───────────────────────────
+
+test("notificarActivacionPaquete: si marcarCorreoEnviado falla UNA vez (transitorio), el reintento lo resuelve sin lanzar", async () => {
+  let llamadas = 0;
+  const { deps, correosEnviados, reclamos } = depsActivacionFalsas({
+    marcarCorreoEnviado: async (_paymentId, destinatario) => {
+      llamadas++;
+      if (llamadas === 1) throw new Error("Firestore sin red (transitorio)");
+      reclamos.set(destinatario, "enviado");
+    },
+  });
+  await assert.doesNotReject(notificarActivacionPaquete(DATOS_BASE, deps));
+  assert.equal(correosEnviados.length, 2, "los correos SI se mandaron (el fallo fue solo en el cierre del reclamo)");
+  assert.equal(reclamos.get("leonardo"), "enviado", "el reintento si logro marcar el reclamo como enviado");
+});
+
+test("notificarActivacionPaquete: si marcarCorreoEnviado falla DOS veces seguidas, la funcion no lanza (queda 'reclamado', log RECLAMO_SIN_SALIDA)", async () => {
+  const logs: string[] = [];
+  const logOriginal = console.error;
+  console.error = (...args: any[]) => logs.push(args.map(String).join(" "));
+  try {
+    const { deps } = depsActivacionFalsas({
+      marcarCorreoEnviado: async () => {
+        throw new Error("Firestore sin red (persistente)");
+      },
+    });
+    await assert.doesNotReject(notificarActivacionPaquete(DATOS_BASE, deps));
+  } finally {
+    console.error = logOriginal;
+  }
+  assert.ok(logs.some((l) => l.includes("RECLAMO_SIN_SALIDA")), "debe quedar un log grepable para resolverlo a mano");
+});
+
 // ── avisarReembolsoPaquete: aviso a Leonardo, idempotente por `revertirPago` ───────────────────
 
 function depsReembolsoFalsas(overrides: Partial<AvisarReembolsoDeps> = {}): {
