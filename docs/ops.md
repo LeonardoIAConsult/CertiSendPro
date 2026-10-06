@@ -361,3 +361,12 @@ coordinado con un momento de bajo tráfico, nunca a mitad de una campaña de env
   48h (momento en el que se abandona y se alerta, ver §1).
 - No reemplaza la devolución manual del dinero (Tarea 9 del plan) ni la revisión del panel de
   Mercado Pago — solo automatiza el correo de confirmación de compra.
+
+
+## Estado aplicado en producción (2026-10-06)
+
+- Revisión `certisend-api-00003-x6l` con SA `certisend-api@` (datastore.user + firebaseauth.viewer + secretAccessor), secretos HUELLA_LOTE_SECRET y AVISOS_RELAY_SECRET, PROVEEDOR_*, AVISOS_RELAY_URL, SCHEDULER_*. `PAGOS_ACTIVOS` sin definir (pagos apagados). `/api/health` → `listo:true, relay:true`.
+- Job `certisend-barrido-acuses` creado (America/Bogota, cada 30 min). Fue necesario dar al agente de servicio de Cloud Scheduler (`service-522374745014@gcp-sa-cloudscheduler.iam.gserviceaccount.com`) `roles/iam.serviceAccountTokenCreator` sobre `certisend-scheduler@`; sin eso el job no dispara (status -1, sin logs). `jobs run` manual → 200.
+- Métricas `certisend_alertas_acuse` y `certisend_barrido_job_fallos`, canal de correo a contacto@ y dos políticas de alerta (`--combiner=OR` es obligatorio en `gcloud alpha monitoring policies create`).
+- Hosting y reglas de Firestore desplegados; `Cache-Control: no-cache` en las rutas del SPA.
+- Rollback conjunto: `gcloud run services update-traffic certisend-api --to-revisions=certisend-api-00002-lwz=100` + release anterior de Hosting.
