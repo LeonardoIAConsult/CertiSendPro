@@ -30,7 +30,7 @@ test("domingoDePascua: 2027 = 28 de marzo (calendariosnacionales.com/co/2027/fes
 
 // ── 2026: al menos 8 fechas verificadas contra rulex.org/festivos ──────────────────────────────
 
-test("festivosColombia(2026): coincide fecha por fecha con rulex.org/festivos (18 festivos)", () => {
+test("festivosColombia(2026): coincide fecha por fecha con rulex.org/festivos + M38 (19 festivos, Chiquinquirá desde 2026)", () => {
   const festivos2026 = festivosColombia(2026);
   const esperados2026 = [
     "2026-01-01", // Año Nuevo (fijo)
@@ -43,6 +43,7 @@ test("festivosColombia(2026): coincide fecha por fecha con rulex.org/festivos (1
     "2026-06-08", // Corpus Christi (Pascua+64, ya cae en lunes)
     "2026-06-15", // Sagrado Corazón (Pascua+71, ya cae en lunes)
     "2026-06-29", // San Pedro y San Pablo (29-jun, YA es lunes en 2026: no se traslada)
+    "2026-07-13", // M38: Nuestra Señora del Rosario de Chiquinquirá (9-jul, jueves -> lunes siguiente)
     "2026-07-20", // Independencia (fijo, nunca se traslada aunque no caiga en lunes)
     "2026-08-07", // Batalla de Boyacá (fijo)
     "2026-08-17", // Asunción de la Virgen (15-ago, trasladado: sábado -> lunes siguiente)
@@ -52,16 +53,16 @@ test("festivosColombia(2026): coincide fecha por fecha con rulex.org/festivos (1
     "2026-12-08", // Inmaculada Concepción (fijo)
     "2026-12-25", // Navidad (fijo)
   ];
-  assert.equal(esperados2026.length, 18, "el propio test debe listar los 18 festivos, para no verificar de menos");
+  assert.equal(esperados2026.length, 19, "el propio test debe listar los 19 festivos, para no verificar de menos");
   for (const fecha of esperados2026) {
     assert.ok(festivos2026.has(fecha), `${fecha} debe ser festivo en 2026`);
   }
-  assert.equal(festivos2026.size, 18, "no deben colisionar dos festivos en la misma fecha de 2026");
+  assert.equal(festivos2026.size, 19, "no deben colisionar dos festivos en la misma fecha de 2026");
 });
 
 // ── 2027: al menos 8 fechas verificadas contra calendariosnacionales.com/co/2027/festivos ──────
 
-test("festivosColombia(2027): coincide fecha por fecha con calendariosnacionales.com/co/2027/festivos (18 festivos)", () => {
+test("festivosColombia(2027): coincide fecha por fecha con calendariosnacionales.com/co/2027/festivos + M38 (19 festivos)", () => {
   const festivos2027 = festivosColombia(2027);
   const esperados2027 = [
     "2027-01-01", // Año Nuevo (fijo)
@@ -74,6 +75,7 @@ test("festivosColombia(2027): coincide fecha por fecha con calendariosnacionales
     "2027-05-31", // Corpus Christi (Pascua+64)
     "2027-06-07", // Sagrado Corazón (Pascua+71)
     "2027-07-05", // San Pedro y San Pablo (29-jun, trasladado: martes -> lunes siguiente)
+    "2027-07-12", // M38: Nuestra Señora del Rosario de Chiquinquirá (9-jul, viernes -> lunes siguiente)
     "2027-07-20", // Independencia (fijo)
     "2027-08-07", // Batalla de Boyacá (fijo)
     "2027-08-16", // Asunción de la Virgen (15-ago, trasladado: domingo -> lunes siguiente)
@@ -83,11 +85,38 @@ test("festivosColombia(2027): coincide fecha por fecha con calendariosnacionales
     "2027-12-08", // Inmaculada Concepción (fijo)
     "2027-12-25", // Navidad (fijo)
   ];
-  assert.equal(esperados2027.length, 18, "el propio test debe listar los 18 festivos, para no verificar de menos");
+  assert.equal(esperados2027.length, 19, "19 festivos en 2027 (oraculo M38): el propio test debe listarlos todos, para no verificar de menos");
   for (const fecha of esperados2027) {
     assert.ok(festivos2027.has(fecha), `${fecha} debe ser festivo en 2027`);
   }
-  assert.equal(festivos2027.size, 18, "no deben colisionar dos festivos en la misma fecha de 2027");
+  assert.equal(festivos2027.size, 19, "19 festivos en 2027 (oraculo M38): no deben colisionar dos festivos en la misma fecha");
+});
+
+// ── M38 (corrige vuelta 28, 2026-10-05): Ley 2578 de 2026 — Chiquinquirá (9-jul) trasladable al
+// lunes siguiente, SOLO desde 2026 ──────────────────────────────────────────────────────────────
+
+test("M38: 13-jul-2026, 12-jul-2027 y 10-jul-2028 son festivos (9-jul trasladado al lunes siguiente)", () => {
+  assert.equal(esFestivoColombia("2026-07-13"), true, "2026: 9-jul es jueves -> lunes 13-jul");
+  assert.equal(esFestivoColombia("2027-07-12"), true, "2027: 9-jul es viernes -> lunes 12-jul");
+  assert.equal(esFestivoColombia("2028-07-10"), true, "2028: 9-jul es domingo -> lunes 10-jul");
+  // El 9 de julio en si (jueves/viernes/domingo segun el año) NUNCA es el festivo: se traslada.
+  assert.equal(esFestivoColombia("2026-07-09"), false);
+  assert.equal(esFestivoColombia("2027-07-09"), false);
+});
+
+test("M38: antes de 2026 el 9 de julio (ni su lunes trasladado) no es festivo — la ley no es retroactiva", () => {
+  assert.equal(esFestivoColombia("2025-07-09"), false);
+  // 9-jul-2025 es miercoles -> si se aplicara el traslado habria dado 14-jul-2025; tampoco debe serlo.
+  assert.equal(esFestivoColombia("2025-07-14"), false);
+  // No se compara el tamaño total de 2025 contra 18: por una coincidencia AJENA a M38 (29-jun-2025,
+  // domingo, se traslada al mismo lunes 30-jun que ya ocupa el Sagrado Corazón de ese año),
+  // festivosColombia(2025) ya daba 17 fechas unicas ANTES de este cambio — fuera del alcance de
+  // M38 (que solo agrega Chiquinquirá desde 2026), se deja documentado, no se corrige en silencio.
+  assert.equal(festivosColombia(2026).size - festivosColombia(2025).size >= 1, true, "2026 debe tener al menos 1 festivo mas que 2025 (Chiquinquirá)");
+});
+
+test("M38: 19 festivos en 2027 (18 de siempre + Chiquinquirá)", () => {
+  assert.equal(festivosColombia(2027).size, 19);
 });
 
 // ── esFestivoColombia: helper de consulta puntual, usado por sumarDiasHabiles ──────────────────

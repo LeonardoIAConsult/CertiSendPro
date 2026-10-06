@@ -24,6 +24,17 @@
 //   - 2026: https://rulex.org/festivos (tabla completa de los 18 festivos, cita Ley 51 de 1983)
 //   - 2027: https://calendariosnacionales.com/co/2027/festivos/ (tabla completa de los 18 festivos)
 // Las 18 fechas de cada año se compararon una a una en tests/festivosColombia.test.ts.
+//
+// M38 (corrige vuelta 28, 2026-10-05) — festivo 19 desde 2026: Ley 2578 de 2026 (sancionada el
+// 1-jun-2026) declara el 9 de julio, Nuestra Señora del Rosario de Chiquinquirá, festivo nacional,
+// trasladable al lunes siguiente por la Ley Emiliani (igual que los 7 de FESTIVOS_TRASLADABLES_A_LUNES
+// de arriba). Fuente: El Tiempo, "Para cuándo quedó definido el nuevo festivo en Colombia" —
+// https://www.eltiempo.com/politica/gobierno/para-cuando-quedo-definido-el-nuevo-festivo-en-colombia-pilas-aplica-desde-julio-del-2026-todo-lo-que-debe-saber-de-ley-que-sanciono-el-gobierno-3562200
+// Hay una demanda ante la Corte Constitucional contra esta ley (misma fuente), pero la ley SIGUE
+// VIGENTE mientras la Corte no la tumbe — por eso se implementa ya, no se espera el fallo. Si la
+// Corte la declara inconstitucional, hay que retirar este festivo (y, para los años ya transcurridos
+// con la ley vigente, puede hacer falta una regla de transición — no hoy). Solo aplica desde 2026
+// (la ley no tiene efecto retroactivo): `FESTIVO_CHIQUINQUIRA_DESDE_ANIO` abajo.
 
 /** Domingo de Pascua (calendario gregoriano) por el algoritmo de Meeus/Jones/Butcher — el estándar
  * para calcular la fecha sin tablas. Devuelve mes (3=marzo, 4=abril) y día. Verificado: Pascua 2026
@@ -93,16 +104,24 @@ const FESTIVOS_TRASLADABLES_A_LUNES: Array<[number, number]> = [
   [11, 11], // Independencia de Cartagena
 ];
 
-/** Los 18 festivos de Colombia de `anio`, como texto `yyyy-mm-dd`. Calculado, no una tabla fija a
- * mano: válido para cualquier año, verificado contra fuentes externas solo para 2026 y 2027 (ver
- * cabecera del archivo y tests/festivosColombia.test.ts). */
+/** M38: Ley 2578 de 2026 solo aplica desde el año en que se sancionó (1-jun-2026); un "9 de julio"
+ * de 2025 o antes nunca fue festivo. */
+const FESTIVO_CHIQUINQUIRA_DESDE_ANIO = 2026;
+
+/** Los festivos de Colombia de `anio` (18 hasta 2025; 19 desde 2026, M38), como texto
+ * `yyyy-mm-dd`. Calculado, no una tabla fija a mano: válido para cualquier año, verificado contra
+ * fuentes externas solo para 2026 y 2027 (ver cabecera del archivo y tests/festivosColombia.test.ts). */
 export function festivosColombia(anio: number): Set<string> {
   const fechas: Date[] = [];
 
   for (const [mes, dia] of FESTIVOS_FIJOS) {
     fechas.push(fechaCalendario(anio, mes, dia));
   }
-  for (const [mes, dia] of FESTIVOS_TRASLADABLES_A_LUNES) {
+  const trasladables = [...FESTIVOS_TRASLADABLES_A_LUNES];
+  if (anio >= FESTIVO_CHIQUINQUIRA_DESDE_ANIO) {
+    trasladables.push([7, 9]); // M38: Nuestra Señora del Rosario de Chiquinquirá (Ley 2578 de 2026).
+  }
+  for (const [mes, dia] of trasladables) {
     fechas.push(siguienteLunesOMismoDia(fechaCalendario(anio, mes, dia)));
   }
 

@@ -19,13 +19,16 @@ import {
   obtenerPreferencia,
   activarPaqueteSiNoProcesado,
   guardarAceptacion,
+  listarPagosPendientesDeAcuse,
+  listarPagosParaBarridoGlobal,
+  type PagoProcesadoAcuse,
 } from "./server/cuentas";
 import { trmHoy, copDesdeUsd } from "./server/trm";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete } from "./server/cobroPaquete";
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
 import { enviarCorreo, construirAvisoFalloWebhookLeonardo } from "./server/avisos";
-import { notificarActivacionPaquete, avisarReembolsoPaquete, CORREO_LEONARDO } from "./server/notificaciones";
+import { notificarActivacionPaquete, avisarReembolsoPaquete, reintentarAcusePendiente, CORREO_LEONARDO } from "./server/notificaciones";
 
 const app = express();
 // Cloud Run inyecta PORT; en local sigue siendo 3000.
@@ -900,6 +903,54 @@ async function avisarSiFallaRepetido(paymentId: string, httpStatus: number): Pro
   }
 }
 
+// ── M37 (corrige vuelta 28, "reclamo atascado y sin reintento", 2026-10-05): reintento del acuse
+// de compra SIN Cloud Scheduler (su API no esta habilitada en este proyecto) ───────────────────
+// Dos disparadores, los dos EN SEGUNDO PLANO (`.catch()`, nunca `await`): nunca deben demorar ni
+// poder romper la respuesta de la ruta que los dispara.
+//   (1) cada GET /api/cuenta de un usuario autenticado revisa SUS pagosProcesados pendientes
+//       (maximo 1 intento cada 2 min por uid — `ultimoReintentoAcusePorUid`, mismo patron de Map
+//       en memoria que `visitas`/`fallosWebhookPorPago`).
+//   (2) cada aviso del webhook barre hasta 5 pagos pendientes de CUALQUIER usuario con mas de 5
+//       min de antiguedad (`listarPagosParaBarridoGlobal`, server/cuentas.ts).
+function datosReintentoDesdePago(pago: PagoProcesadoAcuse, uidRespaldo?: string) {
+  return {
+    paymentId: pago.paymentId,
+    uid: pago.uid ?? uidRespaldo!,
+    referenciaId: pago.referenciaId,
+    cop: pago.cop,
+    trm: pago.trm,
+    fechaTrm: pago.fechaTrm,
+    fecha: pago.fecha.toDate(),
+    vence: pago.vence.toDate(),
+  };
+}
+
+const ULTIMO_REINTENTO_ACUSE_POR_UID_MS = 2 * 60_000;
+const ultimoReintentoAcusePorUid = new Map<string, number>();
+
+async function reintentarAcusesDeUid(uid: string): Promise<void> {
+  const ahora = Date.now();
+  const ultimo = ultimoReintentoAcusePorUid.get(uid);
+  if (ultimo && ahora - ultimo < ULTIMO_REINTENTO_ACUSE_POR_UID_MS) return;
+  ultimoReintentoAcusePorUid.set(uid, ahora);
+  if (ultimoReintentoAcusePorUid.size > 5000) {
+    for (const [k, v] of ultimoReintentoAcusePorUid) if (ahora - v > ULTIMO_REINTENTO_ACUSE_POR_UID_MS) ultimoReintentoAcusePorUid.delete(k);
+  }
+
+  const pendientes = await listarPagosPendientesDeAcuse(uid);
+  for (const pago of pendientes) {
+    await reintentarAcusePendiente(datosReintentoDesdePago(pago, uid));
+  }
+}
+
+async function barrerAcusesPendientesGlobal(): Promise<void> {
+  const pendientes = await listarPagosParaBarridoGlobal(new Date());
+  for (const pago of pendientes) {
+    if (!pago.uid) continue; // sin uid guardado (pago de antes de M37): nada que reconstruir.
+    await reintentarAcusePendiente(datosReintentoDesdePago(pago));
+  }
+}
+
 app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
   let paymentIdInterno = "";
   try {
@@ -940,6 +991,12 @@ app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
 
     await avisarSiFallaRepetido(paymentId, resultado.httpStatus);
     res.status(resultado.httpStatus).json({ recibido: resultado.httpStatus === 200 });
+
+    // M37 (2): barrido de hasta 5 acuses pendientes de CUALQUIER usuario, en segundo plano — nunca
+    // debe demorar ni poder tumbar la respuesta que MP ya recibio arriba.
+    barrerAcusesPendientesGlobal().catch((error: any) => {
+      console.error("[MP WEBHOOK] fallo el barrido de acuses pendientes (M37):", error?.message || error);
+    });
   } catch (error: any) {
     // Error inesperado: 500 para que Mercado Pago reintente en vez de perder el aviso en silencio.
     console.error("[MP WEBHOOK] error inesperado:", error?.message || error);
@@ -998,6 +1055,13 @@ app.get("/api/cuenta", exigirAuth, async (req, res) => {
       ultimoPago: cuenta.ultimoPago
         ? { id: cuenta.ultimoPago.id, fecha: cuenta.ultimoPago.fecha.toDate().toISOString() }
         : null,
+    });
+
+    // M37 (1): reintento del acuse de compra EN SEGUNDO PLANO (maximo 1 intento cada 2 min por
+    // uid) — el comprador consulta esta ruta justo despues de pagar, asi que es el disparador mas
+    // rapido para recuperar un acuse que quedo sin enviar, sin Cloud Scheduler.
+    reintentarAcusesDeUid(req.uid!).catch((error: any) => {
+      console.error("[CUENTA] fallo el reintento de acuses pendientes (M37):", error?.message || error);
     });
   } catch (error: any) {
     console.error("Error al obtener la cuenta:", error);

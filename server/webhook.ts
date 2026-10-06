@@ -71,11 +71,13 @@ export interface ProcesarWebhookMPOpts {
   obtenerPago(paymentId: string): Promise<RespuestaPagoMP>;
   /** Lee `preferencias/{id}` (el id aleatorio del external_reference). */
   obtenerPreferencia(id: string): Promise<PreferenciaGuardada | null>;
-  /** Activa el Paquete de forma idempotente; ver server/cuentas.ts. */
+  /** Activa el Paquete de forma idempotente; ver server/cuentas.ts. `referenciaId`/`fechaTrm`
+   * (M37, corrige vuelta 28) se guardan junto con el pago para poder reconstruir el aviso de
+   * compra en un reintento posterior sin volver a consultar Mercado Pago. */
   activarPaquete(
     uid: string,
     paymentId: string,
-    datos: { cop: number; trm: number; fecha: Timestamp }
+    datos: { cop: number; trm: number; fecha: Timestamp; referenciaId: string; fechaTrm: string }
   ): Promise<"activado" | "repetido">;
   /** Para construir el Timestamp de la fecha del pago sin importar firebase-admin aqui (se inyecta
    * desde server.ts/los tests, que ya tienen el Timestamp real o uno falso). */
@@ -281,6 +283,8 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
     cop: referencia.cop,
     trm: preferencia.trm,
     fecha: opts.timestampDesdeFecha(fechaPago),
+    referenciaId: referencia.referenciaId,
+    fechaTrm: preferencia.fechaTrm,
   });
 
   // Tarea 5 (2026-10-05): se intenta en los DOS casos ("activado" fresco o "repetido") — la propia

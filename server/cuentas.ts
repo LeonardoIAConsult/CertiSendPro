@@ -282,22 +282,49 @@ export function sumarUnMes(fecha: Date): Date {
  * escritura; la cuenta se escribe en UNA sola llamada (`tx.set`, reemplaza el documento completo:
  * nunca se "suman" los 150 al saldo anterior, se vuelve a fijar — spec: "no se acumulan").
  *
+ * M37 (corrige vuelta 28, 2026-10-05): `pagoRef` tambien guarda `uid`/`referenciaId`/`fechaTrm`/
+ * `fecha`/`vence` — lo minimo para poder RECONSTRUIR el aviso de compra (`notificarActivacion...`,
+ * server/notificaciones.ts) en un reintento posterior (GET /api/cuenta o el barrido del webhook,
+ * ver mas arriba) sin volver a consultar Mercado Pago ni depender de `cuentas/{uid}` (que para
+ * entonces puede ya tener OTRO `vence`, de una compra posterior — spec: "no se acumulan"). Los 3
+ * campos nuevos de `datos` son OPCIONALES para no romper llamadas viejas que no los necesitan
+ * (esas llamadas simplemente no habilitan el reintento automatico para ESE pago); en produccion
+ * (`activarPaqueteSiNoProcesado`, mas abajo) SIEMPRE se mandan.
+ *
  * Devuelve "repetido" sin tocar la cuenta si `paymentId` ya estaba marcado como procesado.
  */
 export async function activarPaqueteSiNoProcesadoTx(
   tx: TransaccionLike,
   pagoRef: any,
   cuentaRef: any,
-  datos: { paymentId: string; cop: number; trm: number; fecha: Timestamp }
+  datos: {
+    paymentId: string;
+    cop: number;
+    trm: number;
+    fecha: Timestamp;
+    uid?: string;
+    referenciaId?: string;
+    fechaTrm?: string;
+  }
 ): Promise<"activado" | "repetido"> {
   const pagoSnap = await tx.get(pagoRef);
   if (pagoSnap.exists) return "repetido";
 
-  tx.set(pagoRef, { procesadoEn: Timestamp.now() });
+  const vence = Timestamp.fromDate(sumarUnMes(datos.fecha.toDate()));
+  tx.set(pagoRef, {
+    procesadoEn: Timestamp.now(),
+    uid: datos.uid ?? null,
+    referenciaId: datos.referenciaId ?? null,
+    cop: datos.cop,
+    trm: datos.trm,
+    fechaTrm: datos.fechaTrm ?? null,
+    fecha: datos.fecha,
+    vence,
+  });
   tx.set(cuentaRef, {
     plan: "paquete",
     enviosRestantes: ENVIOS_PAQUETE,
-    vence: Timestamp.fromDate(sumarUnMes(datos.fecha.toDate())),
+    vence,
     renueva: false, // pago unico (Tarea 6); "renovar cada mes" es la Tarea 7.
     mpSuscripcionId: null,
     reservadosPaquete: 0, // D4/requisito de la Tarea 6: nunca hereda reservas de un ciclo anterior.
@@ -311,12 +338,12 @@ export async function activarPaqueteSiNoProcesadoTx(
 export async function activarPaqueteSiNoProcesado(
   uid: string,
   paymentId: string,
-  datos: { cop: number; trm: number; fecha: Timestamp }
+  datos: { cop: number; trm: number; fecha: Timestamp; referenciaId: string; fechaTrm: string }
 ): Promise<"activado" | "repetido"> {
   const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
   const cuentaRef = db().collection("cuentas").doc(uid);
   return db().runTransaction((tx) =>
-    activarPaqueteSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, ...datos })
+    activarPaqueteSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, uid, ...datos })
   );
 }
 
@@ -340,52 +367,200 @@ export async function activarPaqueteSiNoProcesado(
 // devuelve `false` — solo UNA de las dos manda el correo. Si el envio falla, quien llamo debe
 // `liberarReclamoCorreo` para volver el campo a `null` y permitir que una entrega FUTURA reintente
 // SOLO ese destinatario (nunca el otro, que puede ya estar en "enviado").
-export type DestinatarioCorreo = "comprador" | "leonardo" | "bloqueoProveedor";
+//
+// M37 (corrige vuelta 28, "reclamo atascado y sin reintento", 2026-10-05): si quien reclamo un
+// correo MUERE antes de llamar a `marcarCorreoEnviado`/`liberarReclamoCorreo` (el proceso se cae,
+// Cloud Run recicla la instancia a mitad del envio...), el campo se quedaba en "reclamado" PARA
+// SIEMPRE — `reclamarEnvioCorreoTx` trataba cualquier valor truthy como "ya tomado, no reintentar
+// nunca". Ahora cada reclamo guarda TAMBIEN cuando se reclamo (`<campo>ReclamadoEn`, Timestamp DEL
+// SERVIDOR, nunca uno que mande el llamador) y un reclamo "reclamado" de mas de
+// `UMBRAL_RECLAMO_ATASCADO_MS` se trata como LIBRE — se vuelve a reclamar, en vez de bloquear para
+// siempre. Un reclamo "reclamado" FRESCO (dentro del umbral) sigue bloqueando igual que antes: dos
+// intentos simultaneos de recuperar un reclamo atascado solo dejan ganar a uno (ver
+// tests/reintentoAcuse.test.ts).
+export type DestinatarioCorreo = "comprador" | "leonardo" | "bloqueoProveedor" | "acuse20h";
+
+/** M37: un reclamo "reclamado" de mas de 10 minutos se trata como libre. 10 minutos es mucho mas
+ * que lo que tarda un envio de correo real (segundos) pero deja margen para una instancia de Cloud
+ * Run lenta en arrancar; no tan largo como para demorar un reintento automatico de verdad. */
+export const UMBRAL_RECLAMO_ATASCADO_MS = 10 * 60_000;
 
 function campoCorreoDestinatario(destinatario: DestinatarioCorreo): string {
   if (destinatario === "comprador") return "correoComprador";
   if (destinatario === "leonardo") return "correoLeonardo";
+  if (destinatario === "acuse20h") return "avisoAcuse20h";
   return "avisoBloqueoProveedor";
 }
 
-/** Cuerpo transaccional del reclamo (M35): si `pagosProcesados/{paymentId}.<campo>` ya tiene un
- * valor (otra entrega ya lo reclamo o ya lo envio), no reclama — devuelve `false`. Si esta libre
- * (`null`/ausente), lo marca "reclamado" y devuelve `true`: quien recibe `true` es el UNICO
- * responsable de, despues, marcarlo "enviado" (exito) o liberarlo de vuelta a `null` (fallo). */
+function campoReclamadoEnDestinatario(destinatario: DestinatarioCorreo): string {
+  return `${campoCorreoDestinatario(destinatario)}ReclamadoEn`;
+}
+
+/** Cuerpo transaccional del reclamo (M35; M37 agrega el reclamo ATASCADO): si
+ * `pagosProcesados/{paymentId}.<campo>` ya dice "enviado", nunca reclama. Si dice "reclamado",
+ * reclama de nuevo SOLO si quedo atascado (sin `<campo>ReclamadoEn` propio — datos de antes de
+ * M37 — o con mas de `UMBRAL_RECLAMO_ATASCADO_MS` desde que se reclamo); si esta libre (`null`/
+ * ausente) o atascado, lo marca "reclamado" con la fecha DE `ahora` y devuelve `true`: quien
+ * recibe `true` es el UNICO responsable de, despues, marcarlo "enviado" (exito) o liberarlo de
+ * vuelta a `null` (fallo). */
 export async function reclamarEnvioCorreoTx(
   tx: TransaccionLike,
   pagoRef: any,
-  destinatario: DestinatarioCorreo
+  destinatario: DestinatarioCorreo,
+  ahora: Date = new Date()
 ): Promise<boolean> {
   const campo = campoCorreoDestinatario(destinatario);
+  const campoFecha = campoReclamadoEnDestinatario(destinatario);
   const snap = await tx.get(pagoRef);
   const datos = snap.exists ? snap.data() : undefined;
-  if (datos?.[campo]) return false;
-  tx.update(pagoRef, { [campo]: "reclamado" });
+  const valor = datos?.[campo];
+
+  if (valor === "enviado") return false;
+  if (valor) {
+    const reclamadoEn = datos?.[campoFecha];
+    const ms = reclamadoEn && typeof reclamadoEn.toMillis === "function" ? reclamadoEn.toMillis() : null;
+    const atascado = ms === null || ahora.getTime() - ms > UMBRAL_RECLAMO_ATASCADO_MS;
+    if (!atascado) return false; // reclamo fresco: otra entrega lo esta procesando AHORA MISMO.
+  }
+
+  tx.update(pagoRef, { [campo]: "reclamado", [campoFecha]: Timestamp.fromDate(ahora) });
   return true;
 }
 
 /** Envoltorio real: abre la transaccion de Firestore y le pasa la referencia real. */
-export async function reclamarEnvioCorreo(paymentId: string, destinatario: DestinatarioCorreo): Promise<boolean> {
+export async function reclamarEnvioCorreo(
+  paymentId: string,
+  destinatario: DestinatarioCorreo,
+  ahora: Date = new Date()
+): Promise<boolean> {
   const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
-  return db().runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, destinatario));
+  return db().runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, destinatario, ahora));
 }
 
-/** Marca `<campo>="enviado"` tras enviar (con exito) el correo de ESE destinatario. */
+/** Marca `<campo>="enviado"` tras enviar (con exito) el correo de ESE destinatario. Limpia tambien
+ * `<campo>ReclamadoEn` (M37): un correo ya enviado no necesita recordar cuando se reclamo. */
 export async function marcarCorreoEnviado(paymentId: string, destinatario: DestinatarioCorreo): Promise<void> {
   await db()
     .collection("pagosProcesados")
     .doc(String(paymentId))
-    .update({ [campoCorreoDestinatario(destinatario)]: "enviado" });
+    .update({ [campoCorreoDestinatario(destinatario)]: "enviado", [campoReclamadoEnDestinatario(destinatario)]: null });
 }
 
 /** Libera el reclamo (vuelve `<campo>` a `null`) cuando el envio a ESE destinatario fallo, para
- * que una entrega futura pueda reintentar SOLO ese destinatario sin reenviar al otro. */
+ * que una entrega futura pueda reintentar SOLO ese destinatario sin reenviar al otro. Limpia
+ * tambien `<campo>ReclamadoEn` (M37). */
 export async function liberarReclamoCorreo(paymentId: string, destinatario: DestinatarioCorreo): Promise<void> {
   await db()
     .collection("pagosProcesados")
     .doc(String(paymentId))
-    .update({ [campoCorreoDestinatario(destinatario)]: null });
+    .update({ [campoCorreoDestinatario(destinatario)]: null, [campoReclamadoEnDestinatario(destinatario)]: null });
+}
+
+// ── M37: lectura/consulta de pagosProcesados para el reintento del acuse SIN Cloud Scheduler ────
+// Sin la API de Cloud Scheduler habilitada en este proyecto, la unica forma de recuperar un acuse
+// de compra que quedo sin enviar es que algo que YA se ejecuta por otra razon lo revise de paso:
+// (1) el propio comprador consultando GET /api/cuenta justo despues de pagar (server.ts), y (2)
+// cada aviso que llega al webhook de Mercado Pago (server.ts). Las dos rutas usan las funciones de
+// abajo para encontrar candidatos; la decision de "cuales SI reintentar" es PURA
+// (`seleccionarPagosParaBarrido`) para poder probarla con node:test sin Firestore real.
+//
+// Deliberado: nunca se consulta Firestore con `where("correoComprador", "!=", "enviado")` — esa
+// clase de filtro EXCLUYE los documentos donde el campo es `null`/esta ausente (el caso mas comun:
+// un pago cuyo primer intento de correo nunca se reclamo), asi que ni siquiera verificaria lo que
+// se necesita. En su lugar, se consulta por un campo de IGUALDAD simple (`uid`, o ningun filtro
+// mas que el orden) y se filtra en memoria.
+
+export interface PagoProcesadoAcuse {
+  paymentId: string;
+  uid: string | null;
+  referenciaId: string | null;
+  cop: number;
+  trm: number;
+  fechaTrm: string | null;
+  /** Fecha del PAGO (nunca de cuando se proceso el aviso). */
+  fecha: Timestamp;
+  /** Fecha de vencimiento del Paquete que activo este pago (= `cuenta.vence` en el momento de la
+   * activacion — puede diferir del `vence` ACTUAL de la cuenta si hubo una compra posterior). */
+  vence: Timestamp;
+  /** "enviado" | "reclamado" | null. */
+  correoComprador: string | null;
+}
+
+function pagoProcesadoAcuseDesdeDoc(id: string, data: Record<string, any>): PagoProcesadoAcuse {
+  return {
+    paymentId: id,
+    uid: data.uid ?? null,
+    referenciaId: data.referenciaId ?? null,
+    cop: data.cop,
+    trm: data.trm,
+    fechaTrm: data.fechaTrm ?? null,
+    fecha: data.fecha,
+    vence: data.vence,
+    correoComprador: data.correoComprador ?? null,
+  };
+}
+
+/** Lee `pagosProcesados/{paymentId}.correoComprador` tal cual ("enviado" | "reclamado" | null) —
+ * usada por `reintentarAcusePendiente` (server/notificaciones.ts) para decidir, DESPUES de
+ * reintentar, si el acuse sigue sin salir (y por tanto si hay que escalar a Leonardo tras 20h). */
+export async function obtenerEstadoCorreoComprador(paymentId: string): Promise<string | null> {
+  const snap = await db().collection("pagosProcesados").doc(String(paymentId)).get();
+  return snap.exists ? (snap.data()?.correoComprador ?? null) : null;
+}
+
+/** Candidatos de UN `uid` para reintentar el acuse (M37, path (1): GET /api/cuenta). Hasta
+ * `limite` pagos de ESTE usuario con `correoComprador !== "enviado"` — consulta por `uid`
+ * (indice de un solo campo, automatico en Firestore) y filtro en memoria. */
+export async function listarPagosPendientesDeAcuse(uid: string, limite = 5): Promise<PagoProcesadoAcuse[]> {
+  const snap = await db().collection("pagosProcesados").where("uid", "==", uid).limit(20).get();
+  const candidatos = snap.docs.map((d) => pagoProcesadoAcuseDesdeDoc(d.id, d.data()));
+  return candidatos.filter((p) => p.correoComprador !== "enviado").slice(0, limite);
+}
+
+/** PURA (M37): de una tanda de `pagosProcesados` recientes (id + datos crudos del documento,
+ * mas antiguo el que menos `procesadoEn` tenga), elige hasta `limite` candidatos para el barrido
+ * GLOBAL del webhook (path (2)): `correoComprador !== "enviado"`, con `uid` guardado (sin `uid` —
+ * un pago de antes de M37 — no hay con que reconstruir el aviso) y `procesadoEn` con al menos
+ * `antiguedadMinMs` de antiguedad respecto a `ahora` (no tiene sentido perseguir un pago que
+ * `notificarActivacionPaquete` todavia esta procesando en SU primera entrega, hace unos segundos). */
+export function seleccionarPagosParaBarrido(
+  candidatos: Array<{ id: string; data: Record<string, any> }>,
+  ahora: Date,
+  antiguedadMinMs: number,
+  limite: number
+): PagoProcesadoAcuse[] {
+  const seleccionados: PagoProcesadoAcuse[] = [];
+  for (const { id, data } of candidatos) {
+    if (seleccionados.length >= limite) break;
+    if ((data.correoComprador ?? null) === "enviado") continue;
+    if (!data.uid) continue;
+    const procesadoEn = data.procesadoEn;
+    const ms = procesadoEn && typeof procesadoEn.toMillis === "function" ? procesadoEn.toMillis() : 0;
+    if (ahora.getTime() - ms < antiguedadMinMs) continue;
+    seleccionados.push(pagoProcesadoAcuseDesdeDoc(id, data));
+  }
+  return seleccionados;
+}
+
+/** Envoltorio real de `seleccionarPagosParaBarrido`: mira los `TAMANO_VENTANA_BARRIDO` pagos
+ * procesados MAS RECIENTES (sin filtro de Firestore sobre `correoComprador`, ver la nota de
+ * arriba) y filtra/ordena en memoria. Barato a la escala actual de CertiSend (cero clientes de
+ * pago en 2026-10-05); si el volumen crece mucho, esto puede necesitar un indice compuesto por
+ * `correoComprador`+`procesadoEn` — no hoy. */
+const TAMANO_VENTANA_BARRIDO = 50;
+
+export async function listarPagosParaBarridoGlobal(
+  ahora: Date,
+  antiguedadMinMs = 5 * 60_000,
+  limite = 5
+): Promise<PagoProcesadoAcuse[]> {
+  const snap = await db()
+    .collection("pagosProcesados")
+    .orderBy("procesadoEn", "desc")
+    .limit(TAMANO_VENTANA_BARRIDO)
+    .get();
+  const candidatos = snap.docs.map((d) => ({ id: d.id, data: d.data() }));
+  return seleccionarPagosParaBarrido(candidatos, ahora, antiguedadMinMs, limite);
 }
 
 // ── Reversion por contracargo o reembolso (Tarea 9, cobro real con planes, 2026-10-05) ─────────

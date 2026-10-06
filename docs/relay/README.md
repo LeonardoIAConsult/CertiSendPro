@@ -34,29 +34,44 @@ revisión" de la app, corregido en M32, no promete un correo mientras esto no es
      montarlo como la variable de entorno `AVISOS_RELAY_SECRET` del servicio de CertiSend (mismo
      patrón que `MERCADO_PAGO_ACCESS_TOKEN`, que ya vive en Secret Manager para este servicio).
 
-3. **Implementar como App Web.**
+3. **PASO OBLIGATORIO (M39, antes de seguir): correr `runTestHmac()` en el editor REAL de Apps
+   Script y ver "OK".**
+   - Desde el editor de Apps Script (tras pegar el código del paso 1 y guardar la propiedad del
+     secreto del paso 2 — `runTestHmac()` no depende de ese secreto, pero conviene tenerlo ya
+     puesto), seleccionar la función `runTestHmac` en el desplegable de funciones → *Ejecutar* →
+     ver el log (*Ver* → *Registros* / `Ctrl+Enter`).
+   - Debe decir exactamente **"OK: coincide con tests/avisos.test.ts y tests/relayGs.test.ts"**.
+     El vector de prueba lleva tildes y ñ a propósito ("Confirmación de compra — Año ñandú ×2"):
+     prueba que `Utilities.computeHmacSha256Signature(cadena, secreto, Utilities.Charset.UTF_8)`
+     calcula el HMAC con el MISMO charset (UTF‑8 explícito) que usa `server/avisos.ts`
+     (`createHmac(...).update(cuerpo, "utf8")`) — sin esto, cualquier correo real (que siempre
+     lleva texto en español) firmaría distinto en los dos lados y el relay rechazaría TODOS los
+     avisos como `solicitud_invalida`, en silencio.
+   - Si dice **"DISTINTO"**, NO seguir con los pasos de abajo: algo en el algoritmo de firma (o el
+     charset) se desvió entre los dos lados — revisar `hmacHex_`/`cadenaCanonica_` en
+     [`avisos-relay.gs`](./avisos-relay.gs) contra `firmarHmac`/`cadenaCanonicaAviso` en
+     `server/avisos.ts` antes de continuar.
+
+4. **Implementar como App Web.**
    - *Implementar* → *Nueva implementación* → tipo *Aplicación web*.
    - *Ejecutar como:* Yo (la cuenta `contacto@leonardoantolinez.com`).
    - *Quién tiene acceso:* Cualquier persona (el relay se protege con la firma HMAC, no con el
      control de acceso de Apps Script — igual que el relay de Faro).
    - Copiar la URL `/exec` que entrega el despliegue.
 
-4. **Configurar `AVISOS_RELAY_URL` en Cloud Run.**
-   - Variable de entorno `AVISOS_RELAY_URL` = la URL `/exec` del paso 3.
+5. **Configurar `AVISOS_RELAY_URL` en Cloud Run (solo después de ver "OK" en el paso 3).**
+   - Variable de entorno `AVISOS_RELAY_URL` = la URL `/exec` del paso 4.
 
-5. **Probar antes de depender de esto en producción.**
-   - Desde el editor de Apps Script, correr `runTestHmac()` (sin desplegar nada): debe decir "OK:
-     coincide con tests/avisos.test.ts" en el log. Si dice "DISTINTO", algo en el algoritmo de
-     firma se desvió entre los dos lados — no seguir sin resolver esto.
+6. **Probar antes de depender de esto en producción.**
    - Correr `runTestEnvio()` (ya con `AVISOS_RELAY_SECRET` configurado en Propiedades del
      script): debe llegar un correo de prueba a `contacto@leonardoantolinez.com`.
    - Desde Cloud Run (o local, apuntando `AVISOS_RELAY_URL`/`AVISOS_RELAY_SECRET` a los valores
      reales), forzar una llamada a `enviarCorreo` — por ejemplo, un pago de prueba de bajo monto
      (Tarea 13 del plan) — y confirmar que llegan los dos correos (comprador + Leonardo).
    - Probar también SIN el secreto correcto (una firma a mano con un secreto distinto): el relay
-     debe responder `{ok:false, error:"firma_invalida"}` y **no** enviar nada.
+     debe responder `{ok:false, error:"solicitud_invalida"}` y **no** enviar nada.
 
-6. **Monitoreo básico.**
+7. **Monitoreo básico.**
    - *Apps Script* → *Ejecuciones* muestra cada llamada al relay (éxito/error), útil para
      diagnosticar sin tocar Cloud Run.
    - Las notificaciones de error del propio relay (`notifyLeo_`) llegan a

@@ -151,9 +151,20 @@ function cadenaCanonica_(ts, nonce, para, asunto, texto) {
 /** HMAC-SHA256 de `cadena` con `secreto`, en hexadecimal minuscula (mismo formato que el `.digest
  * ('hex')` de Node en server/avisos.ts: `Utilities.computeHmacSha256Signature` devuelve un
  * arreglo de bytes CON SIGNO (-128..127); hay que normalizar cada byte a 0..255 antes de pasarlo
- * a hex, o los bytes negativos saldrian mal). */
+ * a hex, o los bytes negativos saldrian mal).
+ *
+ * M39 (corrige vuelta 28, 2026-10-05): se pasa `Utilities.Charset.UTF_8` EXPLICITO como 3er
+ * argumento. Sin el, Apps Script decide el charset por su cuenta para convertir `cadena` a bytes
+ * antes de firmar — con texto que solo tiene ASCII (como los vectores viejos de M33) nunca se
+ * notaba la diferencia, pero `asunto`/`texto` reales SIEMPRE llevan tildes/ñ (nombres de clientes,
+ * "Confirmación de tu compra..."), y un charset implicito distinto de UTF-8 en cualquiera de los
+ * dos lados (este .gs firma aqui tambien al *verificar*; `server/avisos.ts` firma con
+ * `createHmac(...).update(cuerpo, "utf8")`, siempre UTF-8) haria que la firma calculada aqui NUNCA
+ * coincidiera con la que mando el backend para un correo con texto en español — y el relay
+ * rechazaria TODOS los avisos reales como "solicitud_invalida", silenciosamente (ver
+ * `runTestHmac()` abajo, que ahora prueba exactamente este caso con un vector con tildes/ñ). */
 function hmacHex_(cadena, secreto) {
-  var bytes = Utilities.computeHmacSha256Signature(cadena, secreto);
+  var bytes = Utilities.computeHmacSha256Signature(cadena, secreto, Utilities.Charset.UTF_8);
   var hex = '';
   for (var i = 0; i < bytes.length; i++) {
     var b = bytes[i];
@@ -224,24 +235,31 @@ function json_(o) {
 // funciones que terminan en "_", igual que en Code.gs de Faro).
 
 /**
- * M33: verifica el vector HMAC compartido con tests/avisos.test.ts (`VECTOR_HMAC_ESPERADO`),
- * ahora sobre la cadena canonica COMPLETA (con nonce) — antes este vector llamaba a `hmacHex_`
- * directo sobre un texto literal sin pasar por `cadenaCanonica_`, lo que nunca ejercitaba el
- * agregado del nonce. Con ts=1700000000, nonce="nonce-de-prueba", para="a@b.com",
- * asunto="Asunto", texto="Texto del correo", secreto="secreto-de-prueba", debe dar EXACTAMENTE
- * "20f0e9b0af94d0e8d7dd20cc2b7199663ef20eadfc8ea3c2c1055f8ead6341a1" (calculado del lado de Node
- * con `crypto.createHmac('sha256', 'secreto-de-prueba').update(cadena).digest('hex')`, cadena =
- * "1700000000\nnonce-de-prueba\na@b.com\nAsunto\nTexto del correo"). Correr desde el editor de
- * Apps Script (seleccionar esta funcion -> Ejecutar) y mirar el log.
+ * M39 (corrige vuelta 28, 2026-10-05): el vector de prueba ahora lleva tildes Y ñ en el `texto`
+ * ("Confirmación de compra — Año ñandú ×2") — el vector viejo de M33 era ASCII puro y por eso
+ * NUNCA habria detectado un charset implicito distinto de UTF-8 en `hmacHex_` (ver el comentario
+ * de esa funcion arriba). Con ts=1700000000, nonce="nonce-de-prueba", para="a@b.com",
+ * asunto="Asunto", texto="Confirmación de compra — Año ñandú ×2", secreto="secreto-de-prueba",
+ * debe dar EXACTAMENTE "d808e9696d8701509709bcc9a16b8a736b4946b225b1deb508be560f684c42b4"
+ * (calculado del lado de Node con
+ * `crypto.createHmac('sha256','secreto-de-prueba').update(cadena,'utf8').digest('hex')`, misma
+ * cadena canonica de abajo) — EXACTAMENTE el mismo valor que prueba tests/relayGs.test.ts
+ * ejecutando este .gs real dentro de un sandbox de Node (M39).
+ *
+ * ESTE ES EL PASO OBLIGATORIO ANTES DE CONFIGURAR AVISOS_RELAY_URL (ver docs/relay/README.md):
+ * correr `runTestHmac` en el editor REAL de Apps Script (nunca solo en el sandbox de Node) y
+ * confirmar "OK" en el log — eso prueba que ESTE despliegue en particular (con el charset
+ * explicito nuevo) calcula el HMAC igual que server/avisos.ts para texto con tildes/ñ, antes de
+ * que un correo real dependa de ello.
  */
 function runTestHmac() {
-  var cadena = cadenaCanonica_(1700000000, 'nonce-de-prueba', 'a@b.com', 'Asunto', 'Texto del correo');
+  var cadena = cadenaCanonica_(1700000000, 'nonce-de-prueba', 'a@b.com', 'Asunto', 'Confirmación de compra — Año ñandú ×2');
   var resultado = hmacHex_(cadena, 'secreto-de-prueba');
   Logger.log(resultado);
   Logger.log(
-    resultado === '20f0e9b0af94d0e8d7dd20cc2b7199663ef20eadfc8ea3c2c1055f8ead6341a1'
-      ? 'OK: coincide con tests/avisos.test.ts'
-      : 'DISTINTO: revisar el algoritmo de firma/la cadena canonica en los dos lados'
+    resultado === 'd808e9696d8701509709bcc9a16b8a736b4946b225b1deb508be560f684c42b4'
+      ? 'OK: coincide con tests/avisos.test.ts y tests/relayGs.test.ts'
+      : 'DISTINTO: revisar el algoritmo de firma/la cadena canonica/el charset en los dos lados'
   );
 }
 

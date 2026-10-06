@@ -25,17 +25,32 @@ const CODIGO_GS = readFileSync(RUTA_GS, "utf8");
 interface SandboxRelay {
   sandbox: any;
   correosEnviados: Array<{ to: string; subject: string; body: string; name?: string }>;
+  /** M39: charset con el que se llamo `Utilities.computeHmacSha256Signature` en cada invocacion
+   * (en orden). El .gs real SIEMPRE debe pasar `Utilities.Charset.UTF_8` (3er argumento) — sin
+   * esto, un charset implicito podria dar una firma distinta para texto con tildes/ñ (ver el
+   * comentario de `hmacHex_` en docs/relay/avisos-relay.gs). */
+  charsetsUsados: Array<string | undefined>;
 }
 
 /** Crea un sandbox nuevo (cache de nonces vacia) y ejecuta avisos-relay.gs dentro de el. */
 function construirSandbox(secreto: string | null): SandboxRelay {
   const cacheNonces = new Map<string, string>();
   const correosEnviados: SandboxRelay["correosEnviados"] = [];
+  const charsetsUsados: SandboxRelay["charsetsUsados"] = [];
 
   const Utilities = {
+    // M39: el .gs real referencia `Utilities.Charset.UTF_8` como 3er argumento de
+    // `computeHmacSha256Signature` — sin esta propiedad en el shim, ejecutar el .gs real lanzaria
+    // "Cannot read properties of undefined" en cuanto `hmacHex_` se llamara.
+    Charset: { UTF_8: "UTF-8" },
     // Replica el comportamiento REAL de Apps Script: bytes CON SIGNO (-128..127), no 0..255 como
-    // da Node `Buffer` por defecto — es justo lo que `hmacHex_` normaliza (ver el .gs).
-    computeHmacSha256Signature(cadena: string, secretoFirma: string): number[] {
+    // da Node `Buffer` por defecto — es justo lo que `hmacHex_` normaliza (ver el .gs). El 3er
+    // argumento (`charset`) se REGISTRA (M39, `charsetsUsados`) para poder probar que el .gs real
+    // lo manda explicito; Node ya interpreta un string JS como UTF-8 con `.update(cadena,"utf8")`
+    // sin importar ese argumento, asi que no cambia el resultado — lo que prueba es que el .gs
+    // SIGUE pasandolo, no que cambie el calculo.
+    computeHmacSha256Signature(cadena: string, secretoFirma: string, charset?: string): number[] {
+      charsetsUsados.push(charset);
       const buffer = createHmac("sha256", secretoFirma).update(cadena, "utf8").digest();
       return Array.from(buffer).map((b) => (b > 127 ? b - 256 : b));
     },
@@ -87,7 +102,7 @@ function construirSandbox(secreto: string | null): SandboxRelay {
   };
   vm.createContext(sandbox);
   vm.runInContext(CODIGO_GS, sandbox, { filename: "avisos-relay.gs" });
-  return { sandbox, correosEnviados };
+  return { sandbox, correosEnviados, charsetsUsados };
 }
 
 function cuerpoFirmadoReal(secreto: string, datos: { ts: number; nonce: string; para: string; asunto: string; texto: string }) {
@@ -281,4 +296,58 @@ test("M33: igualesEnTiempoConstante_ del .gs es una comparacion EXACTA (no solo 
   assert.equal(sandbox.igualesEnTiempoConstante_("abc123", "abc124"), false, "un solo caracter distinto al final debe fallar");
   assert.equal(sandbox.igualesEnTiempoConstante_("abc123", "abc1234"), false, "longitudes distintas nunca son iguales");
   assert.equal(sandbox.igualesEnTiempoConstante_("xbc123", "abc123"), false, "un caracter distinto al INICIO tambien debe fallar (nunca corta temprano)");
+});
+
+// ── M39 (corrige vuelta 28, 2026-10-05): charset explicito del HMAC con un vector con tildes/ñ ───
+
+const VECTOR_M39 = {
+  ts: 1700000000,
+  nonce: "nonce-de-prueba",
+  para: "a@b.com",
+  asunto: "Asunto",
+  texto: "Confirmación de compra — Año ñandú ×2",
+};
+const HASH_M39_ESPERADO = "d808e9696d8701509709bcc9a16b8a736b4946b225b1deb508be560f684c42b4";
+
+test("M39: hmacHex_ del .gs pasa Utilities.Charset.UTF_8 EXPLICITO a computeHmacSha256Signature", () => {
+  const { sandbox, charsetsUsados } = construirSandbox(SECRETO);
+  sandbox.hmacHex_(
+    sandbox.cadenaCanonica_(VECTOR_M39.ts, VECTOR_M39.nonce, VECTOR_M39.para, VECTOR_M39.asunto, VECTOR_M39.texto),
+    "secreto-de-prueba"
+  );
+  assert.deepEqual(charsetsUsados, ["UTF-8"], "hmacHex_ debe mandar Utilities.Charset.UTF_8 como 3er argumento");
+});
+
+test("M39 (runTestHmac): el vector con tildes y ñ ('Confirmación de compra — Año ñandú ×2') da el valor fijado en avisos-relay.gs", () => {
+  const { sandbox } = construirSandbox(SECRETO);
+  const cadena = sandbox.cadenaCanonica_(VECTOR_M39.ts, VECTOR_M39.nonce, VECTOR_M39.para, VECTOR_M39.asunto, VECTOR_M39.texto);
+  const hashGs = sandbox.hmacHex_(cadena, "secreto-de-prueba");
+
+  assert.equal(hashGs, HASH_M39_ESPERADO, "debe coincidir con el valor escrito en runTestHmac() de avisos-relay.gs");
+
+  // Mismo valor del lado TypeScript (server/avisos.ts), con la MISMA cadena canonica — por eso una
+  // peticion firmada por el backend real (texto con tildes/ñ) la acepta este .gs real.
+  const hashTs = firmarHmac(
+    cadenaCanonicaAviso(VECTOR_M39.ts, VECTOR_M39.nonce, VECTOR_M39.para, VECTOR_M39.asunto, VECTOR_M39.texto),
+    "secreto-de-prueba"
+  );
+  assert.equal(hashGs, hashTs, "el .gs (con charset UTF-8 explicito) y server/avisos.ts deben calcular EXACTAMENTE el mismo HMAC para texto con tildes/ñ");
+});
+
+test("M39: una peticion firmada por server/avisos.ts con asunto/texto en español (tildes/ñ) es aceptada por el doPost real del .gs", () => {
+  const { sandbox, correosEnviados } = construirSandbox(SECRETO);
+  const cuerpo = cuerpoFirmadoReal(SECRETO, {
+    ts: Math.floor(Date.now() / 1000),
+    nonce: randomUUID(),
+    para: "comprador@test.com",
+    asunto: "Confirmación de tu compra en CertiSend Pro — Paquete — $49.102 COP",
+    texto: "Hola:\n\nRecibimos y confirmamos tu pago. Año ñandú ×2 — café, señal, corazón.",
+  });
+
+  const respuesta = doPost(sandbox, cuerpo);
+
+  assert.equal(respuesta.ok, true);
+  assert.equal(correosEnviados.length, 1);
+  assert.equal(correosEnviados[0].subject, "Confirmación de tu compra en CertiSend Pro — Paquete — $49.102 COP");
+  assert.equal(correosEnviados[0].body, "Hola:\n\nRecibimos y confirmamos tu pago. Año ñandú ×2 — café, señal, corazón.");
 });

@@ -31,6 +31,7 @@ import {
   liberarReclamoCorreo as liberarReclamoCorreoReal,
   obtenerAceptacion as obtenerAceptacionReal,
   revertirPagoSiNoRevertido as revertirPagoSiNoRevertidoReal,
+  obtenerEstadoCorreoComprador as obtenerEstadoCorreoCompradorReal,
   type DestinatarioCorreo,
   type Idioma,
   type ResultadoReversion,
@@ -58,7 +59,10 @@ export interface DatosNotificarActivacion {
 }
 
 export interface NotificarActivacionDeps {
-  reclamarEnvioCorreo(paymentId: string, destinatario: DestinatarioCorreo): Promise<boolean>;
+  /** `ahora` (M37, corrige vuelta 28): opcional — para fijar la hora del reclamo en pruebas y
+   * para que `reintentarAcusePendiente` pueda reclamar "acuse20h" con la misma hora que usa para
+   * decidir si ya pasaron 20 horas. Sin el, usa la hora real del servidor (igual que antes). */
+  reclamarEnvioCorreo(paymentId: string, destinatario: DestinatarioCorreo, ahora?: Date): Promise<boolean>;
   marcarCorreoEnviado(paymentId: string, destinatario: DestinatarioCorreo): Promise<void>;
   liberarReclamoCorreo(paymentId: string, destinatario: DestinatarioCorreo): Promise<void>;
   obtenerAceptacion(id: string): Promise<{ email: string | null; idioma: Idioma } | null>;
@@ -254,5 +258,117 @@ export async function avisarReembolsoPaquete(
   } catch (error: any) {
     // El aviso a Leonardo es best-effort: la reversion (lo que de verdad importa) YA tuvo exito.
     console.error(`[NOTIFICACIONES] fallo al avisar el reembolso a Leonardo (la reversión SÍ quedó). paymentId=${datos.paymentId}:`, error?.message || error);
+  }
+}
+
+// ── M37 (corrige vuelta 28, "reclamo atascado y sin reintento", 2026-10-05) ─────────────────────
+// Reintento del acuse de compra, sin Cloud Scheduler (su API no esta habilitada en este proyecto):
+// dos disparadores en server.ts llaman a `reintentarAcusePendiente` por cada pago candidato que
+// encuentran (GET /api/cuenta, por uid; el barrido del webhook, de cualquier uid) — ver
+// server/cuentas.ts `listarPagosPendientesDeAcuse`/`listarPagosParaBarridoGlobal`.
+//
+// Reconstruye los MISMOS datos que uso la entrega original del webhook a partir de lo que
+// `activarPaqueteSiNoProcesadoTx` ya guardo en `pagosProcesados/{paymentId}` (M37) y vuelve a
+// llamar a `notificarActivacionPaquete` — que YA es idempotente POR DESTINATARIO (M35): si
+// Leonardo ya tiene su correo, no se reenvia; si el comprador ya lo tiene, tampoco. Nunca vuelve a
+// consultar Mercado Pago ni toca el saldo/plan del usuario — el pago YA esta activado, esto es
+// solo el correo.
+
+/** La ley exige el acuse a mas tardar el dia siguiente al pago (docs/legal/plantilla-confirmacion-
+ * compra.md). 20h (no 24h) da margen para que el reintento automatico lo resuelva solo antes de
+ * escalar a una persona, sin acercarse tanto al plazo legal que el aviso llegue demasiado tarde
+ * para que Leonardo pueda hacer algo con el. */
+const VEINTE_HORAS_MS = 20 * 3600_000;
+
+function construirAvisoAcuse20hLeonardo(datos: { uid: string; paymentId: string }): {
+  asunto: string;
+  texto: string;
+} {
+  return {
+    asunto: `[CertiSend] Acuse de compra SIN ENVIAR 20 horas despues del pago`,
+    texto:
+      `El acuse de compra del pago ${datos.paymentId} (uid ${datos.uid}) todavia no se ha enviado ` +
+      `al comprador 20 horas despues del pago. La ley exige enviarlo a mas tardar el dia siguiente ` +
+      `al pago (docs/legal/plantilla-confirmacion-compra.md). El reintento automatico (GET /api/cuenta ` +
+      `del usuario, o el barrido del webhook) ya lo intento sin exito — revisa AVISOS_RELAY_URL/` +
+      `AVISOS_RELAY_SECRET y los logs de Cloud Run, y si hace falta manda el acuse a mano. ` +
+      `Este aviso no se repite para este pago.`,
+  };
+}
+
+export interface DatosReintentoAcusePendiente {
+  paymentId: string;
+  uid: string;
+  /** `null` si el pago se activo antes de M37 (sin estos datos guardados): en ese caso no hay con
+   * que reconstruir el aviso de forma segura y no se reintenta nada automaticamente. */
+  referenciaId: string | null;
+  cop: number;
+  trm: number;
+  fechaTrm: string | null;
+  /** Fecha DEL PAGO (nunca de cuando se detecto el pendiente). */
+  fecha: Date;
+  /** Fecha de vencimiento del Paquete activado por ESTE pago. */
+  vence: Date;
+}
+
+export interface ReintentarAcuseDeps extends NotificarActivacionDeps {
+  obtenerEstadoCorreoComprador(paymentId: string): Promise<string | null>;
+}
+
+const depsReintentarAcuseReales: ReintentarAcuseDeps = {
+  ...depsNotificarActivacionReales,
+  obtenerEstadoCorreoComprador: obtenerEstadoCorreoCompradorReal,
+};
+
+/**
+ * M37: reintenta el acuse de UN pago que todavia no tiene `correoComprador="enviado"`. Nunca
+ * lanza (defensa en profundidad: la llama server.ts en segundo plano, sin bloquear ninguna
+ * respuesta HTTP). Tras reintentar, si han pasado 20h o mas desde el pago Y el acuse SIGUE sin
+ * salir, avisa a Leonardo UNA sola vez (mismo mecanismo de reclamo que los demas destinatarios de
+ * correo, destinatario "acuse20h" — ver server/cuentas.ts).
+ */
+export async function reintentarAcusePendiente(
+  datos: DatosReintentoAcusePendiente,
+  ahora: Date = new Date(),
+  deps: ReintentarAcuseDeps = depsReintentarAcuseReales
+): Promise<void> {
+  try {
+    if (!datos.referenciaId || !datos.fechaTrm) {
+      // Pago de antes de M37 (activado sin estos datos) o con datos incompletos: no hay con que
+      // reconstruir el correo con seguridad. Queda igual que antes — atendible a mano, sin
+      // reintento automatico (mismo patron ya aceptado en este proyecto para otros "pendiente").
+      console.warn(`[NOTIFICACIONES] M37: pago ${datos.paymentId} sin referenciaId/fechaTrm guardados; no se puede reintentar el acuse automaticamente.`);
+      return;
+    }
+
+    await notificarActivacionPaquete(
+      {
+        uid: datos.uid,
+        paymentId: datos.paymentId,
+        referenciaId: datos.referenciaId,
+        cop: datos.cop,
+        trm: datos.trm,
+        fechaTrm: datos.fechaTrm,
+        fechaPago: datos.fecha,
+        fechaVencimiento: datos.vence,
+      },
+      deps
+    );
+
+    if (ahora.getTime() - datos.fecha.getTime() < VEINTE_HORAS_MS) return;
+
+    // Se relee el estado DESPUES del reintento de arriba (pudo acabar de enviarse justo ahora).
+    const estadoActual = await deps.obtenerEstadoCorreoComprador(datos.paymentId);
+    if (estadoActual === "enviado") return;
+
+    const reclamado = await deps.reclamarEnvioCorreo(datos.paymentId, "acuse20h", ahora);
+    if (!reclamado) return; // ya se aviso antes por esta misma racha, o alguien lo esta avisando ahora.
+
+    const { asunto, texto } = construirAvisoAcuse20hLeonardo({ uid: datos.uid, paymentId: datos.paymentId });
+    const ok = await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto });
+    if (ok) await deps.marcarCorreoEnviado(datos.paymentId, "acuse20h");
+    else await deps.liberarReclamoCorreo(datos.paymentId, "acuse20h");
+  } catch (error: any) {
+    console.error(`[NOTIFICACIONES] fallo el reintento del acuse pendiente. paymentId=${datos.paymentId}:`, error?.message || error);
   }
 }

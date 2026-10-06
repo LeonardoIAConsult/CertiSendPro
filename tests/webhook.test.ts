@@ -61,11 +61,15 @@ function preferenciaBase(parcial: Partial<PreferenciaGuardada> = {}): Preferenci
 /** Activa de verdad contra un FirestoreFalso (no un mock): misma funcion transaccional que
  * produccion (server/cuentas.ts), para que "una sola activacion" sea una prueba real. */
 function activarPaqueteConFake(db: FirestoreFalso) {
-  return async (uid: string, paymentId: string, datos: { cop: number; trm: number; fecha: Timestamp }) => {
+  return async (
+    uid: string,
+    paymentId: string,
+    datos: { cop: number; trm: number; fecha: Timestamp; referenciaId?: string; fechaTrm?: string }
+  ) => {
     const pagoRef = db.doc(`pagosProcesados/${paymentId}`);
     const cuentaRef = db.doc(`cuentas/${uid}`);
     return db.runTransaction((tx) =>
-      activarPaqueteSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, ...datos })
+      activarPaqueteSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, uid, ...datos })
     );
   };
 }
