@@ -320,29 +320,72 @@ export async function activarPaqueteSiNoProcesado(
   );
 }
 
-// ── Correo de confirmacion: idempotencia separada de la activacion (Tarea 5, 2026-10-05) ───────
-// `activarPaqueteSiNoProcesadoTx` ya marca `pagosProcesados/{paymentId}` para no activar dos
-// veces; el correo usa el MISMO documento con un campo aparte (`correoEnviado`) en vez de abrir
-// una coleccion nueva, pero es deliberadamente una escritura SEPARADA de la transaccion de
-// activacion: el correo se manda DESPUES de que esa transaccion ya termino bien (requisito de la
-// Tarea 5) y, si el relay esta caido, una entrega posterior del MISMO webhook (Mercado Pago
-// reintenta un aviso que respondio 500, o el propio reintento manual) debe poder volver a
-// intentar el correo sin volver a activar nada — por eso NO comparte transaccion con
-// `activarPaqueteSiNoProcesadoTx`.
+// ── Correo de confirmacion: reclamo transaccional POR DESTINATARIO (M35, corrige vuelta 27) ─────
+// ANTES, la idempotencia del correo era UN solo campo (`correoEnviado`) para TODO el pago: dos
+// avisos del webhook casi simultaneos para el MISMO pago (p. ej. Mercado Pago reintentando un
+// 200 que se perdio en la red, o dos entregas distintas del mismo evento) podian los dos leer
+// "no enviado" ANTES de que cualquiera alcanzara a marcarlo, y los dos mandar el correo — exactamente
+// el mismo tipo de carrera que M23 (Tarea 3) ya habia encontrado para el saldo del Paquete. Y, al
+// ser un solo campo para los DOS destinatarios, si fallaba el envio a Leonardo pero el del
+// comprador ya habia salido, no habia forma de reintentar solo el de Leonardo sin arriesgar un
+// reenvio al comprador.
+//
+// Ahora cada destinatario tiene su PROPIO campo en el MISMO documento `pagosProcesados/{id}`
+// (`correoComprador`, `correoLeonardo`, y `avisoBloqueoProveedor` para el aviso de M36(2)), con
+// dos estados: "reclamado" (alguien ya empezo a intentar enviarlo: nadie mas debe intentarlo) y
+// "enviado" (ya salio con exito: nunca reintentar). `reclamarEnvioCorreoTx` es TRANSACCIONAL
+// (lee+escribe en una sola transaccion de Firestore, igual que `reservarEnvioTx` de la Tarea 3):
+// de dos llamadas casi simultaneas para el mismo destinatario, Firestore reintenta la que pierde
+// la carrera con el estado ya actualizado, y esa segunda lectura ve "reclamado"/"enviado" y
+// devuelve `false` — solo UNA de las dos manda el correo. Si el envio falla, quien llamo debe
+// `liberarReclamoCorreo` para volver el campo a `null` y permitir que una entrega FUTURA reintente
+// SOLO ese destinatario (nunca el otro, que puede ya estar en "enviado").
+export type DestinatarioCorreo = "comprador" | "leonardo" | "bloqueoProveedor";
 
-/** true si YA se envio (con exito) el correo de este pago. `false` tambien si el pago nunca se
- * activo aqui (documento inexistente): no es a esta funcion a la que le toca decidir si hay algo
- * que notificar, solo si ya se noto. */
-export async function correoYaEnviado(paymentId: string): Promise<boolean> {
-  const snap = await db().collection("pagosProcesados").doc(String(paymentId)).get();
-  return snap.exists && snap.data()?.correoEnviado === true;
+function campoCorreoDestinatario(destinatario: DestinatarioCorreo): string {
+  if (destinatario === "comprador") return "correoComprador";
+  if (destinatario === "leonardo") return "correoLeonardo";
+  return "avisoBloqueoProveedor";
 }
 
-/** Marca `correoEnviado=true` en `pagosProcesados/{paymentId}` tras enviar (con exito) el correo
- * de confirmacion + el aviso de venta a Leonardo. `update` (no `set`): conserva `procesadoEn` sin
- * reescribirlo. */
-export async function marcarCorreoEnviado(paymentId: string): Promise<void> {
-  await db().collection("pagosProcesados").doc(String(paymentId)).update({ correoEnviado: true });
+/** Cuerpo transaccional del reclamo (M35): si `pagosProcesados/{paymentId}.<campo>` ya tiene un
+ * valor (otra entrega ya lo reclamo o ya lo envio), no reclama — devuelve `false`. Si esta libre
+ * (`null`/ausente), lo marca "reclamado" y devuelve `true`: quien recibe `true` es el UNICO
+ * responsable de, despues, marcarlo "enviado" (exito) o liberarlo de vuelta a `null` (fallo). */
+export async function reclamarEnvioCorreoTx(
+  tx: TransaccionLike,
+  pagoRef: any,
+  destinatario: DestinatarioCorreo
+): Promise<boolean> {
+  const campo = campoCorreoDestinatario(destinatario);
+  const snap = await tx.get(pagoRef);
+  const datos = snap.exists ? snap.data() : undefined;
+  if (datos?.[campo]) return false;
+  tx.update(pagoRef, { [campo]: "reclamado" });
+  return true;
+}
+
+/** Envoltorio real: abre la transaccion de Firestore y le pasa la referencia real. */
+export async function reclamarEnvioCorreo(paymentId: string, destinatario: DestinatarioCorreo): Promise<boolean> {
+  const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
+  return db().runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, destinatario));
+}
+
+/** Marca `<campo>="enviado"` tras enviar (con exito) el correo de ESE destinatario. */
+export async function marcarCorreoEnviado(paymentId: string, destinatario: DestinatarioCorreo): Promise<void> {
+  await db()
+    .collection("pagosProcesados")
+    .doc(String(paymentId))
+    .update({ [campoCorreoDestinatario(destinatario)]: "enviado" });
+}
+
+/** Libera el reclamo (vuelve `<campo>` a `null`) cuando el envio a ESE destinatario fallo, para
+ * que una entrega futura pueda reintentar SOLO ese destinatario sin reenviar al otro. */
+export async function liberarReclamoCorreo(paymentId: string, destinatario: DestinatarioCorreo): Promise<void> {
+  await db()
+    .collection("pagosProcesados")
+    .doc(String(paymentId))
+    .update({ [campoCorreoDestinatario(destinatario)]: null });
 }
 
 // ── Reversion por contracargo o reembolso (Tarea 9, cobro real con planes, 2026-10-05) ─────────

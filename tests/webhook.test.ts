@@ -13,7 +13,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Timestamp } from "firebase-admin/firestore";
-import { procesarWebhookMP, type RespuestaPagoMP } from "../server/webhook";
+import { procesarWebhookMP, registrarResultadoWebhook, type RespuestaPagoMP } from "../server/webhook";
 import {
   activarPaqueteSiNoProcesadoTx,
   type Cuenta,
@@ -382,6 +382,33 @@ test("webhook: la preferencia guardada no coincide en cop -> no activa (defensa 
   assert.equal(db.leer("cuentas/uid-1"), undefined);
 });
 
+// ── M34: el 500 de una reversion fallida CUENTA para el aviso de "3 fallos seguidos" a Leonardo ──
+// (server.ts `avisarSiFallaRepetido` guarda el httpStatus devuelto por procesarWebhookMP en
+// `registrarResultadoWebhook`, la misma funcion pura probada en tests/registrarResultadoWebhook.test.ts;
+// esta prueba encadena las dos piezas para demostrar la integracion completa: 3 reversiones
+// fallidas seguidas del MISMO paymentId SI deben disparar `debeAvisar`).
+
+test("webhook (M34): 3 reversiones fallidas seguidas del mismo paymentId alcanzan el umbral de aviso a Leonardo", async () => {
+  let estado: ReturnType<typeof registrarResultadoWebhook>["estado"] | undefined;
+  let debeAvisarFinal = false;
+  for (let intento = 1; intento <= 3; intento++) {
+    const resultado = await procesarWebhookMP(
+      construirOpts({
+        obtenerPago: async () => pagoOk({ status: "refunded" }),
+        procesarReembolso: async () => {
+          throw new Error("Firestore sin red");
+        },
+      })
+    );
+    assert.equal(resultado.httpStatus, 500, `intento ${intento} debe responder 500`);
+    const r = registrarResultadoWebhook(estado, resultado.httpStatus);
+    estado = r.estado;
+    debeAvisarFinal = r.debeAvisar;
+  }
+  assert.equal(estado?.fallos, 3);
+  assert.equal(debeAvisarFinal, true, "el 3er fallo SEGUIDO debe disparar el aviso a Leonardo");
+});
+
 test("webhook: id de pago inventado (sin preferencia guardada) -> no activa", async () => {
   const db = new FirestoreFalso();
   const obtenerPreferencia = obtenerPreferenciaConFake(db, {}); // nunca se sembro "ref-1"
@@ -545,7 +572,7 @@ test("webhook: un reembolso de un plan que no es paquete (pro, Tarea 8) no llama
   assert.equal(llamadasProcesarReembolso.length, 0);
 });
 
-test("webhook: si procesarReembolso LANZA, el webhook responde 200 igual", async () => {
+test('webhook (M34, corrige vuelta 27): si procesarReembolso LANZA, el webhook responde 500 (la reversion es idempotente, que Mercado Pago reintente)', async () => {
   const resultado = await procesarWebhookMP(
     construirOpts({
       obtenerPago: async () => pagoOk({ status: "refunded" }),
@@ -554,5 +581,5 @@ test("webhook: si procesarReembolso LANZA, el webhook responde 200 igual", async
       },
     })
   );
-  assert.equal(resultado.httpStatus, 200);
+  assert.equal(resultado.httpStatus, 500);
 });

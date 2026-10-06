@@ -9,20 +9,29 @@
 // probable con node:test, sin red real, inyectando `fetchLike`. `enviarCorreo` es la UNICA funcion
 // que hace la llamada HTTP; todo lo demas en este archivo (construir el texto de cada correo, la
 // firma HMAC, sumar dias habiles) es PURO.
-import { createHmac } from "crypto";
+import { createHmac, randomUUID } from "crypto";
+import { esFestivoColombia } from "./festivosColombia";
 
 // ── Firma HMAC del relay ─────────────────────────────────────────────────────────────────────
 // El cuerpo se firma sobre una cadena canonica simple (nunca sobre `JSON.stringify`, cuyo orden de
-// claves no esta garantizado entre Node y Apps Script): `${ts}\n${para}\n${asunto}\n${texto}`. El
-// relay (docs/relay/avisos-relay.gs) reconstruye la MISMA cadena con los campos que recibio y
-// compara la firma — nunca confia en una `firma` sin volver a calcularla con el secreto que solo
-// conocen el servidor y el relay.
+// claves no esta garantizado entre Node y Apps Script):
+// `${ts}\n${nonce}\n${para}\n${asunto}\n${texto}`. El relay (docs/relay/avisos-relay.gs)
+// reconstruye la MISMA cadena con los campos que recibio y compara la firma EN TIEMPO CONSTANTE
+// (M33, corrige vuelta 27) — nunca confia en una `firma` sin volver a calcularla con el secreto
+// que solo conocen el servidor y el relay.
+//
+// `nonce` (M33): valor aleatorio generado AQUI en cada llamada (nunca reutilizado) y firmado junto
+// con el resto del cuerpo. El relay guarda cada nonce que ya vio en CacheService durante 10
+// minutos (`docs/relay/avisos-relay.gs`, funcion `nonceNuevo_`): una peticion con una firma VALIDA
+// pero un nonce ya visto (alguien capturo e intento repetir una peticion firmada real) se rechaza
+// igual que una firma invalida — sin este campo, una firma capturada seguiria siendo valida
+// durante toda su ventana de antiguedad (5 min) y se podria reenviar el mismo correo varias veces.
 
 /** Cadena canonica que se firma — EXPORTADA para que la prueba de HMAC (tests/avisos.test.ts) y
  * el relay (docs/relay/avisos-relay.gs, funcion `cadenaCanonica_`) construyan exactamente la misma
  * cadena a partir de los mismos campos. */
-export function cadenaCanonicaAviso(ts: number, para: string, asunto: string, texto: string): string {
-  return `${ts}\n${para}\n${asunto}\n${texto}`;
+export function cadenaCanonicaAviso(ts: number, nonce: string, para: string, asunto: string, texto: string): string {
+  return `${ts}\n${nonce}\n${para}\n${asunto}\n${texto}`;
 }
 
 /** HMAC-SHA256 en hexadecimal de `cuerpo` con `secreto`. Funcion PURA (sin red, sin Date.now):
@@ -56,6 +65,8 @@ export interface EnviarCorreoDeps {
   relaySecret?: string;
   fetchLike?: FetchLike;
   ahora?: () => Date;
+  /** SOLO PARA PRUEBAS: fija el nonce en vez de generarlo aleatorio (M33). */
+  generarNonce?: () => string;
   timeoutMs?: number;
   /** Log minimo, nunca con el secreto ni el cuerpo completo del correo (solo metadatos:
    * destinatario, estado HTTP). Por defecto, `console.warn`/`console.error`. */
@@ -85,7 +96,11 @@ export async function enviarCorreo(datos: DatosCorreo, deps: EnviarCorreoDeps = 
   const fetchFn: FetchLike = deps.fetchLike ?? (globalThis.fetch as unknown as FetchLike);
   const ahora = (deps.ahora ?? (() => new Date()))();
   const ts = Math.floor(ahora.getTime() / 1000);
-  const firma = firmarHmac(cadenaCanonicaAviso(ts, datos.para, datos.asunto, datos.texto), relaySecret);
+  // M33: nonce aleatorio, nuevo en cada llamada, firmado junto con el resto del cuerpo — ver
+  // comentario de `cadenaCanonicaAviso` arriba. `deps.generarNonce` solo existe para que las
+  // pruebas puedan fijar un nonce determinista; en produccion siempre es `randomUUID()`.
+  const nonce = (deps.generarNonce ?? randomUUID)();
+  const firma = firmarHmac(cadenaCanonicaAviso(ts, nonce, datos.para, datos.asunto, datos.texto), relaySecret);
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), deps.timeoutMs ?? TIMEOUT_MS_DEFECTO);
@@ -93,7 +108,7 @@ export async function enviarCorreo(datos: DatosCorreo, deps: EnviarCorreoDeps = 
     const respuesta = await fetchFn(relayUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ para: datos.para, asunto: datos.asunto, texto: datos.texto, ts, firma }),
+      body: JSON.stringify({ para: datos.para, asunto: datos.asunto, texto: datos.texto, ts, nonce, firma }),
       signal: controller.signal,
     });
     if (!respuesta.ok) {
@@ -113,11 +128,12 @@ export async function enviarCorreo(datos: DatosCorreo, deps: EnviarCorreoDeps = 
 
 // ── Dias habiles (para la fecha limite de devolucion del Paquete, plantilla-confirmacion-compra
 // v1.2) ──────────────────────────────────────────────────────────────────────────────────────
-// Igual nivel de simplificacion que el resto del proyecto (Ley 1480 habla de "dias habiles"; esta
-// funcion cuenta de lunes a viernes, sin calendario de festivos colombianos — anadir festivos es
-// trabajo aparte, fuera de alcance de esta tarea, y se deja dicho aqui para no inventar que ya se
-// cubre). Fecha en la zona de Bogota (mismo patron de `Intl` que server/cuentas.ts, nunca los
-// getters UTC/locales de `Date`, que dependen de la zona del proceso).
+// M36(3) (corrige vuelta 27): "dia habil" ahora excluye tambien los festivos de Colombia
+// (server/festivosColombia.ts), no solo sabado/domingo — antes esta funcion solo saltaba fin de
+// semana, asi que un plazo que cruzara, por ejemplo, Jueves/Viernes Santo contaba esos dos dias
+// como habiles cuando no lo son. Fecha en la zona de Bogota (mismo patron de `Intl` que
+// server/cuentas.ts/server/trm.ts, nunca los getters UTC/locales de `Date`, que dependen de la
+// zona del proceso).
 function diaDeSemanaBogota(fecha: Date): number {
   // 0=domingo … 6=sabado, igual que Date#getDay pero en la zona de Bogota.
   const nombre = new Intl.DateTimeFormat("en-US", { timeZone: "America/Bogota", weekday: "short" }).format(fecha);
@@ -125,15 +141,24 @@ function diaDeSemanaBogota(fecha: Date): number {
   return indice[nombre] ?? 0;
 }
 
-/** Suma `dias` dias HABILES (lunes a viernes) a `fecha`, en la zona de Bogota. Usada para la
- * fecha limite de devolucion del Paquete (5 dias habiles tras el pago, Terminos sec. 8.4). */
+/** Fecha de Bogota como `yyyy-mm-dd` (mismo patron que `hoyBogota` de server/trm.ts) — formato que
+ * usa `esFestivoColombia`. */
+function fechaBogotaYYYYMMDD(fecha: Date): string {
+  return fecha.toLocaleDateString("en-CA", { timeZone: "America/Bogota" });
+}
+
+/** Suma `dias` dias HABILES (lunes a viernes, sin festivos colombianos) a `fecha`, en la zona de
+ * Bogota. Usada para la fecha limite de devolucion del Paquete (5 dias habiles tras el pago,
+ * Terminos sec. 8.4). */
 export function sumarDiasHabiles(fecha: Date, dias: number): Date {
   let resultado = new Date(fecha.getTime());
   let restantes = dias;
   while (restantes > 0) {
     resultado = new Date(resultado.getTime() + 24 * 3600_000);
     const diaSemana = diaDeSemanaBogota(resultado);
-    if (diaSemana !== 0 && diaSemana !== 6) restantes--;
+    const esFinDeSemana = diaSemana === 0 || diaSemana === 6;
+    const esFestivo = !esFinDeSemana && esFestivoColombia(fechaBogotaYYYYMMDD(resultado));
+    if (!esFinDeSemana && !esFestivo) restantes--;
   }
   return resultado;
 }
@@ -157,14 +182,55 @@ function formatearCop(cop: number): string {
   return cop.toLocaleString("es-CO");
 }
 
+// ── Identidad del proveedor en el pie del acuse (M36(1), corrige vuelta 27) ─────────────────────
+// Plantilla v1.2 (docs/legal/plantilla-confirmacion-compra.md) exige nombre, documento, direccion,
+// telefono y correo del proveedor en el pie. Constantes de configuracion: lo que SI se conoce hoy
+// (nombre, telefono, correo — ver la plantilla y docs/legal/textos-checkout.md) queda fijo; lo que
+// falta (documento/NIT, direccion de notificacion — pendientes del contador/abogado colegiado,
+// Tarea 0/13 del plan) se deja como el literal "[PENDIENTE]", NUNCA inventado. Cambiar estos
+// valores cuando Leonardo los confirme es el UNICO paso que desbloquea el envio del acuse
+// (ver `tienePlaceholderPendiente` y M36(2) abajo).
+export const PROVEEDOR_NOMBRE = "LEONARDO ANTOLINEZ P.";
+export const PROVEEDOR_DOCUMENTO = "[PENDIENTE]";
+export const PROVEEDOR_DIRECCION = "[PENDIENTE]";
+export const PROVEEDOR_TELEFONO = "[TELEFONO-REDACTADO]";
+export const PROVEEDOR_CORREO = "contacto@leonardoantolinez.com";
+const PROVEEDOR_WEB = "https://certisendpro.online";
+
+function pieProveedor(idioma: "es" | "en"): string {
+  if (idioma === "en") {
+    return (
+      `—\n` +
+      `Provider: ${PROVEEDOR_NOMBRE} · Tax ID: ${PROVEEDOR_DOCUMENTO} · Address: ${PROVEEDOR_DIRECCION} · ` +
+      `Phone: ${PROVEEDOR_TELEFONO} · ${PROVEEDOR_CORREO} · ${PROVEEDOR_WEB}`
+    );
+  }
+  return (
+    `—\n` +
+    `Proveedor: ${PROVEEDOR_NOMBRE} · Documento: ${PROVEEDOR_DOCUMENTO} · Dirección: ${PROVEEDOR_DIRECCION} · ` +
+    `Tel. ${PROVEEDOR_TELEFONO} · ${PROVEEDOR_CORREO} · ${PROVEEDOR_WEB}`
+  );
+}
+
+// ── M36(2): bloqueo del acuse mientras falte un dato (nunca enviar un acuse a medio llenar) ─────
+// Si el texto final (pie de proveedor, o cualquier otro placeholder que siga pendiente — p. ej. la
+// confirmacion del IVA, Tarea 0/13) todavia contiene un marcador de "falta este dato", el acuse NO
+// se manda al comprador (server/notificaciones.ts lo comprueba antes de enviar, M35/M36). Se
+// comprueban las DOS grafias porque el correo EN usa "[PENDING" como su propio marcador (traduccion
+// fiel del mismo concepto) — revisar solo "[PENDIENTE" dejaria sin esta proteccion al correo en
+// ingles, que hoy tambien trae sus propios placeholders (Tax ID, IVA).
+export function tienePlaceholderPendiente(texto: string): boolean {
+  return texto.includes("[PENDIENTE") || texto.includes("[PENDING");
+}
+
 // ── Correo de confirmacion de compra al comprador (plantilla-confirmacion-compra.md v1.2) ──────
 // ES es traduccion fiel de docs/legal/plantilla-confirmacion-compra.md v1.2 (texto plano, no
 // HTML: `enviarCorreo` solo manda `{para, asunto, texto}`). EN es traduccion de cortesia, mismo
 // nivel de fidelidad que las traducciones EN ya existentes de T4/T5 (docs/legal/textos-checkout.md
-// v1.2). Los campos [PENDIENTE: ...] de la plantilla original (NIT, direccion de notificacion, IVA
-// discriminado, obligacion de facturacion DIAN) siguen pendientes de que el contador y el abogado
-// colegiado los confirmen (Tarea 0/13 del plan) — se mantienen como placeholders literales, igual
-// que ya hace la plantilla, en vez de inventar un dato que el Brain no tiene.
+// v1.2). El campo [PENDIENTE: ...] de IVA/facturacion DIAN sigue pendiente de que el contador lo
+// confirme (Tarea 0/13 del plan) — se mantiene como placeholder literal, igual que ya hace la
+// plantilla, en vez de inventar un dato que el Brain no tiene; mientras siga ahi, este correo
+// nunca sale al comprador (M36(2), ver `tienePlaceholderPendiente` arriba).
 
 export interface DatosConfirmacionCompra {
   paraEmail: string;
@@ -206,8 +272,7 @@ export function construirCorreoConfirmacionCompra(
         `If you make no successful send with this Bundle, you can request a full refund of this payment until ${fechaLimiteDevolucion} (five business days after payment) by writing to contacto@leonardoantolinez.com with reference ${datos.refMp} (Terms, section 8.4).\n\n` +
         `Something wrong? If you don't recognize this charge or the plan doesn't appear active, write to contacto@leonardoantolinez.com with the reference above.\n\n` +
         `Terms and Conditions: ${datos.enlaceTerminos}\n\n` +
-        `—\n` +
-        `Provider: LEONARDO ANTOLINEZ P. · Tax ID: [PENDING] · Bogota, Colombia · contacto@leonardoantolinez.com · https://certisendpro.online`,
+        pieProveedor("en"),
     };
   }
 
@@ -230,8 +295,7 @@ export function construirCorreoConfirmacionCompra(
       `Si no haces ningún envío con éxito con este Paquete, puedes pedir la devolución completa de este pago hasta el ${fechaLimiteDevolucion} (cinco días hábiles después del pago) escribiendo a contacto@leonardoantolinez.com con la referencia ${datos.refMp} (Términos, sección 8.4).\n\n` +
       `¿Algo no está bien? Si no reconoces este cobro o el plan no aparece activo, escríbenos a contacto@leonardoantolinez.com con la referencia anterior.\n\n` +
       `Términos y Condiciones: ${datos.enlaceTerminos}\n\n` +
-      `—\n` +
-      `Proveedor: LEONARDO ANTOLINEZ P. · Documento: [PENDIENTE] · Bogotá, Colombia · contacto@leonardoantolinez.com · https://certisendpro.online`,
+      pieProveedor("es"),
   };
 }
 
@@ -265,6 +329,25 @@ export function construirAvisoReembolsoLeonardo(datos: {
   return {
     asunto: `[CertiSend] ${datos.status === "charged_back" ? "Contracargo" : "Reembolso"} — uid ${datos.uid}`,
     texto: `Mercado Pago reportó status="${datos.status}" para el pago ${datos.paymentId} del usuario ${datos.uid}.\n${accion}`,
+  };
+}
+
+/** M36(2): aviso a Leonardo cuando un acuse de compra se BLOQUEA porque el pie del proveedor (o
+ * cualquier otro dato del correo) todavia tiene un placeholder pendiente. El pago YA esta
+ * activado — esto es solo el correo del comprador, no la activacion — asi que el texto deja claro
+ * que no hay urgencia de reembolso, solo de completar `PROVEEDOR_DOCUMENTO`/`PROVEEDOR_DIRECCION`
+ * (server/avisos.ts) y, si aplica, la confirmacion de IVA del contador. */
+export function construirAvisoBloqueoProveedorLeonardo(datos: { uid: string; paymentId: string }): {
+  asunto: string;
+  texto: string;
+} {
+  return {
+    asunto: `[CertiSend] Acuse de compra BLOQUEADO — faltan datos del proveedor`,
+    texto:
+      `El acuse de compra del pago ${datos.paymentId} (uid ${datos.uid}) NO se envió al comprador porque ` +
+      `el correo todavía tiene un dato marcado como pendiente (revisa PROVEEDOR_DOCUMENTO/PROVEEDOR_DIRECCION ` +
+      `en server/avisos.ts, y la confirmación de IVA del contador). El pago YA está activado: solo falta ` +
+      `completar esos datos para que el próximo acuse salga bien. Este aviso no se repite para este pago.`,
   };
 }
 

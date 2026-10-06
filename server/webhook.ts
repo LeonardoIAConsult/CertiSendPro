@@ -222,10 +222,15 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
   // `status_detail` equivalente) sobre un pago que YA activo algo aqui: revertir si era el pago
   // activo, avisar a Leonardo siempre. Esto va ANTES del chequeo de "approved" de abajo porque un
   // pago revertido ya NO esta "approved" la mayoria de las veces (MP lo deja en "refunded"), asi
-  // que si se mirara despues nunca se alcanzaria esta rama. Nunca lanza: un fallo aqui (el relay
-  // de avisos caido, por ejemplo) no debe hacer que Mercado Pago reintente un evento que, en el
-  // peor caso, solo dejo de avisar a Leonardo — jamas vuelve a cobrar ni a tocar la cuenta dos
-  // veces (idempotencia real en `revertirPagoSiNoRevertidoTx`, no en este try/catch).
+  // que si se mirara despues nunca se alcanzaria esta rama.
+  //
+  // M34 (corrige vuelta 27): si la REVERSION misma falla (`opts.procesarReembolso` lanza — p. ej.
+  // Firestore sin red al intentar `revertirPagoSiNoRevertidoTx`), este webhook responde 500 para
+  // que Mercado Pago reintente el aviso completo: la reversion ya es idempotente (gate en
+  // `revertido`, server/cuentas.ts), asi que reintentarla es seguro, y un 200 aqui arriesgaria
+  // perder para siempre un evento cuya cuenta nunca llego a revertirse. Ese 500 tambien CUENTA
+  // para el aviso de "3 fallos seguidos" a Leonardo (server.ts `avisarSiFallaRepetido`, que mira
+  // el `httpStatus` que esta funcion devuelve) — no hace falta logica aparte para eso.
   const statusDetailCrudo = String(pago?.status_detail || "");
   const esReembolsoOContracargo =
     status === "refunded" ||
@@ -236,7 +241,8 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
     try {
       await opts.procesarReembolso({ uid: referencia.uid, paymentId, status: status || statusDetailCrudo });
     } catch (error: any) {
-      opts.log(`[MP WEBHOOK] fallo al procesar reembolso/contracargo (no se reintenta). paymentId=${paymentId}: ${error?.message || error}`);
+      opts.log(`[MP WEBHOOK] fallo al revertir el pago (se reintenta, la reversion es idempotente). paymentId=${paymentId}: ${error?.message || error}`);
+      return { httpStatus: 500, razon: "fallo al procesar reembolso/contracargo" };
     }
     return { httpStatus: 200, razon: `reembolso/contracargo procesado (status=${status || statusDetailCrudo})` };
   }
@@ -279,7 +285,8 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
 
   // Tarea 5 (2026-10-05): se intenta en los DOS casos ("activado" fresco o "repetido") — la propia
   // funcion inyectada decide si ya se notifico este `paymentId` (idempotencia real en
-  // `server/cuentas.ts` correoYaEnviado/marcarCorreoEnviado). Esto es lo que permite que una
+  // `server/cuentas.ts` reclamarEnvioCorreo/marcarCorreoEnviado, POR destinatario desde M35).
+  // Esto es lo que permite que una
   // entrega anterior con el relay caido se recupere en una entrega posterior del mismo
   // `paymentId`, sin volver a activar nada ni mandar un correo de mas. Try/catch defensivo: nunca
   // debe convertir un pago ya activado en un 500 (oraculo "el relay falla -> la activacion queda

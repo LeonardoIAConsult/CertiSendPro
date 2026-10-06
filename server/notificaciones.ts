@@ -1,10 +1,13 @@
-// Composicion de avisos (Tareas 5 y 9, cobro real con planes, 2026-10-05): une el canal generico
-// de correo (server/avisos.ts, HMAC + relay) con la lectura/escritura de Firestore (server/cuentas.ts)
-// para dar las DOS funciones que `server/webhook.ts` necesita inyectadas:
+// Composicion de avisos (Tareas 5 y 9, cobro real con planes, 2026-10-05; M34/M35/M36 corrigen la
+// vuelta 27): une el canal generico de correo (server/avisos.ts, HMAC + relay) con la lectura/
+// escritura de Firestore (server/cuentas.ts) para dar las DOS funciones que `server/webhook.ts`
+// necesita inyectadas:
 //   - `notificarActivacionPaquete`: correo de confirmacion al comprador + aviso de venta a
-//     Leonardo, exactamente una vez por pago (Tarea 5).
+//     Leonardo, exactamente una vez POR DESTINATARIO (M35), con el acuse BLOQUEADO si el texto
+//     todavia tiene un dato pendiente (M36(2)).
 //   - `avisarReembolsoPaquete`: revierte la cuenta a Gratis si el pago era el activo y avisa a
-//     Leonardo, exactamente una vez por evento de reembolso/contracargo (Tarea 9).
+//     Leonardo, exactamente una vez por evento de reembolso/contracargo (Tarea 9); si la
+//     REVERSION misma falla, se propaga (M34) para que el webhook responda 500.
 //
 // Las dependencias de Firestore y del envio de correo son PARAMETROS con un valor por defecto
 // (las funciones reales de server/cuentas.ts y server/avisos.ts) — mismo motivo que
@@ -17,13 +20,18 @@ import {
   construirCorreoConfirmacionCompra,
   construirAvisoVentaLeonardo,
   construirAvisoReembolsoLeonardo,
+  construirAvisoBloqueoProveedorLeonardo,
+  tienePlaceholderPendiente,
   type DatosCorreo,
+  type DatosConfirmacionCompra,
 } from "./avisos";
 import {
-  correoYaEnviado as correoYaEnviadoReal,
+  reclamarEnvioCorreo as reclamarEnvioCorreoReal,
   marcarCorreoEnviado as marcarCorreoEnviadoReal,
+  liberarReclamoCorreo as liberarReclamoCorreoReal,
   obtenerAceptacion as obtenerAceptacionReal,
   revertirPagoSiNoRevertido as revertirPagoSiNoRevertidoReal,
+  type DestinatarioCorreo,
   type Idioma,
   type ResultadoReversion,
 } from "./cuentas";
@@ -50,44 +58,76 @@ export interface DatosNotificarActivacion {
 }
 
 export interface NotificarActivacionDeps {
-  correoYaEnviado(paymentId: string): Promise<boolean>;
-  marcarCorreoEnviado(paymentId: string): Promise<void>;
+  reclamarEnvioCorreo(paymentId: string, destinatario: DestinatarioCorreo): Promise<boolean>;
+  marcarCorreoEnviado(paymentId: string, destinatario: DestinatarioCorreo): Promise<void>;
+  liberarReclamoCorreo(paymentId: string, destinatario: DestinatarioCorreo): Promise<void>;
   obtenerAceptacion(id: string): Promise<{ email: string | null; idioma: Idioma } | null>;
   enviarCorreo(datos: DatosCorreo): Promise<boolean>;
+  /** Compone el correo de confirmacion al comprador — inyectable (por defecto,
+   * `construirCorreoConfirmacionCompra` real) para poder probar el reclamo transaccional (M35) y
+   * el bloqueo por dato pendiente (M36(2)) por separado, sin que uno dependa del contenido real
+   * del otro. */
+  construirCorreoComprador(datos: DatosConfirmacionCompra): { asunto: string; texto: string };
 }
 
 const depsNotificarActivacionReales: NotificarActivacionDeps = {
-  correoYaEnviado: correoYaEnviadoReal,
+  reclamarEnvioCorreo: reclamarEnvioCorreoReal,
   marcarCorreoEnviado: marcarCorreoEnviadoReal,
+  liberarReclamoCorreo: liberarReclamoCorreoReal,
   obtenerAceptacion: obtenerAceptacionReal,
   enviarCorreo: enviarCorreoReal,
+  construirCorreoComprador: construirCorreoConfirmacionCompra,
 };
 
 /**
- * Tarea 5: envia el correo de confirmacion de compra al comprador + el aviso de venta a Leonardo,
- * una sola vez por `paymentId` (idempotencia real via `correoYaEnviado`/`marcarCorreoEnviado` en
- * `pagosProcesados/{paymentId}`, NUNCA un contador en memoria). Nunca lanza: cualquier fallo
- * (relay caido, Firestore sin red) queda en un log y la funcion resuelve igual — el llamador
- * (`procesarWebhookMP`) ya la envuelve en su propio try/catch como defensa en profundidad, pero
- * esta funcion no depende de eso para ser segura.
+ * M35 (corrige vuelta 27): reclama el envio a `destinatario` de forma TRANSACCIONAL ANTES de
+ * mandar nada (`reclamarEnvioCorreo`, ver server/cuentas.ts `reclamarEnvioCorreoTx`). Si otra
+ * entrega (casi simultanea, o una anterior) ya se quedo con este destinatario, no hace nada — por
+ * eso dos avisos casi simultaneos del mismo pago producen UN solo correo por destinatario. Si el
+ * envio falla, LIBERA el reclamo (vuelve a `null`) para que una entrega futura pueda reintentar
+ * SOLO este destinatario, sin reenviar al otro.
+ */
+async function intentarEnviarUnDestinatario(
+  paymentId: string,
+  deps: NotificarActivacionDeps,
+  destinatario: DestinatarioCorreo,
+  correo: DatosCorreo
+): Promise<void> {
+  const reclamado = await deps.reclamarEnvioCorreo(paymentId, destinatario);
+  if (!reclamado) return; // ya reclamado o ya enviado por otra entrega.
+
+  const ok = await deps.enviarCorreo(correo);
+  if (ok) {
+    await deps.marcarCorreoEnviado(paymentId, destinatario);
+  } else {
+    await deps.liberarReclamoCorreo(paymentId, destinatario);
+  }
+}
+
+/**
+ * Tarea 5: envia el correo de confirmacion de compra al comprador + el aviso de venta a Leonardo.
+ * Nunca lanza: cualquier fallo (relay caido, Firestore sin red) queda en un log y la funcion
+ * resuelve igual — el llamador (`procesarWebhookMP`) ya la envuelve en su propio try/catch como
+ * defensa en profundidad, pero esta funcion no depende de eso para ser segura.
  *
- * Solo se marca `correoEnviado` si AMBOS correos (comprador + Leonardo) salieron bien: si el
- * comprador no tiene correo guardado (no deberia pasar — `obtenerAceptacion` siempre deberia
- * tener uno, salvo un token de Firebase sin `email`), se trata ese lado como "no aplica" y no
- * bloquea el aviso a Leonardo ni la marca de enviado.
+ * Los DOS destinatarios se reclaman/envian de forma INDEPENDIENTE (M35): si falla el de Leonardo,
+ * el del comprador (si ya salio) nunca se reenvia, y viceversa — cada uno tiene su propio campo en
+ * `pagosProcesados/{paymentId}` (ver server/cuentas.ts).
+ *
+ * M36(2): si el correo del comprador, ya compuesto, todavia contiene un dato marcado como
+ * pendiente (el pie del proveedor, o cualquier otro placeholder — ver `tienePlaceholderPendiente`
+ * en server/avisos.ts), NUNCA se manda al comprador: se registra el bloqueo (log) y se avisa a
+ * Leonardo UNA SOLA VEZ por pago (mismo mecanismo de reclamo, destinatario "bloqueoProveedor").
  */
 export async function notificarActivacionPaquete(
   datos: DatosNotificarActivacion,
   deps: NotificarActivacionDeps = depsNotificarActivacionReales
 ): Promise<void> {
   try {
-    if (await deps.correoYaEnviado(datos.paymentId)) return;
-
     const aceptacion = await deps.obtenerAceptacion(datos.referenciaId);
 
-    let okComprador = true;
     if (aceptacion?.email) {
-      const { asunto, texto } = construirCorreoConfirmacionCompra({
+      const correoComprador = deps.construirCorreoComprador({
         paraEmail: aceptacion.email,
         idioma: aceptacion.idioma,
         cop: datos.cop,
@@ -98,22 +138,33 @@ export async function notificarActivacionPaquete(
         refMp: datos.paymentId,
         enlaceTerminos: enlaceTerminos(),
       });
-      okComprador = await deps.enviarCorreo({ para: aceptacion.email, asunto, texto });
+
+      if (tienePlaceholderPendiente(correoComprador.texto)) {
+        console.error(
+          `[NOTIFICACIONES] acuse de compra BLOQUEADO (dato pendiente en el correo). paymentId=${datos.paymentId}`
+        );
+        const avisoBloqueo = construirAvisoBloqueoProveedorLeonardo({ uid: datos.uid, paymentId: datos.paymentId });
+        await intentarEnviarUnDestinatario(datos.paymentId, deps, "bloqueoProveedor", {
+          para: CORREO_LEONARDO,
+          ...avisoBloqueo,
+        });
+      } else {
+        await intentarEnviarUnDestinatario(datos.paymentId, deps, "comprador", {
+          para: aceptacion.email,
+          ...correoComprador,
+        });
+      }
     } else {
       console.warn(`[NOTIFICACIONES] sin correo de comprador para paymentId=${datos.paymentId} (aceptacion ausente o sin email).`);
     }
 
-    const { asunto: asuntoVenta, texto: textoVenta } = construirAvisoVentaLeonardo({
+    const avisoVenta = construirAvisoVentaLeonardo({
       uid: datos.uid,
       paymentId: datos.paymentId,
       cop: datos.cop,
       plan: "paquete",
     });
-    const okLeonardo = await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto: asuntoVenta, texto: textoVenta });
-
-    if (okComprador && okLeonardo) {
-      await deps.marcarCorreoEnviado(datos.paymentId);
-    }
+    await intentarEnviarUnDestinatario(datos.paymentId, deps, "leonardo", { para: CORREO_LEONARDO, ...avisoVenta });
   } catch (error: any) {
     console.error(`[NOTIFICACIONES] fallo al notificar la activacion. paymentId=${datos.paymentId}:`, error?.message || error);
   }
@@ -133,24 +184,34 @@ const depsAvisarReembolsoReales: AvisarReembolsoDeps = {
  * Tarea 9: ante un reembolso/contracargo, revierte la cuenta a Gratis SI el pago era el activo
  * (ver `revertirPagoSiNoRevertido`, idempotente por su cuenta) y avisa a Leonardo — en los DOS
  * casos (activo o no), salvo que el evento ya se hubiera procesado antes o el pago nunca fuera
- * nuestro. Nunca lanza.
+ * nuestro.
+ *
+ * M34 (corrige vuelta 27): a diferencia de `notificarActivacionPaquete` (que traga CUALQUIER
+ * error, porque el pago ya quedo activado y no hay nada que reintentar sin riesgo), aqui un fallo
+ * de `revertirPago` (Firestore sin red, por ejemplo) se DEJA PROPAGAR a proposito: `revertirPago`
+ * es idempotente (gate en `revertido`, server/cuentas.ts), asi que es seguro que
+ * `server/webhook.ts` responda 500 y Mercado Pago reintente el aviso completo, en vez de tragar el
+ * error y arriesgarse a que una cuenta que debia revertirse se quede en Paquete/Pro. El aviso a
+ * Leonardo (una vez que la reversion YA tuvo exito) si es best-effort: nunca debe tumbar una
+ * reversion que ya se aplico.
  */
 export async function avisarReembolsoPaquete(
   datos: { uid: string; paymentId: string; status: string },
   deps: AvisarReembolsoDeps = depsAvisarReembolsoReales
 ): Promise<void> {
-  try {
-    const resultado = await deps.revertirPago(datos.paymentId, datos.uid);
-    if (resultado === "ya_procesado" || resultado === "ignorado") return;
+  const resultado = await deps.revertirPago(datos.paymentId, datos.uid);
+  if (resultado === "ya_procesado" || resultado === "ignorado") return;
 
-    const { asunto, texto } = construirAvisoReembolsoLeonardo({
-      uid: datos.uid,
-      paymentId: datos.paymentId,
-      status: datos.status,
-      cuentaRevertida: resultado === "revertido",
-    });
+  const { asunto, texto } = construirAvisoReembolsoLeonardo({
+    uid: datos.uid,
+    paymentId: datos.paymentId,
+    status: datos.status,
+    cuentaRevertida: resultado === "revertido",
+  });
+  try {
     await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto });
   } catch (error: any) {
-    console.error(`[NOTIFICACIONES] fallo al procesar el reembolso/contracargo. paymentId=${datos.paymentId}:`, error?.message || error);
+    // El aviso a Leonardo es best-effort: la reversion (lo que de verdad importa) YA tuvo exito.
+    console.error(`[NOTIFICACIONES] fallo al avisar el reembolso a Leonardo (la reversión SÍ quedó). paymentId=${datos.paymentId}:`, error?.message || error);
   }
 }
