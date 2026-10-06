@@ -395,7 +395,7 @@ export async function activarPaqueteSiNoProcesado(
 // vez de bloquear para siempre. Un reclamo "reclamado" FRESCO (dentro del umbral) sigue bloqueando
 // igual que antes: dos intentos simultaneos de recuperar un reclamo atascado solo dejan ganar a
 // uno (ver tests/reintentoAcuse.test.ts).
-export type DestinatarioCorreo = "comprador" | "leonardo" | "bloqueoProveedor" | "acuse20h";
+export type DestinatarioCorreo = "comprador" | "leonardo" | "bloqueoProveedor" | "acuse20h" | "acuse48h";
 
 /** M37: un reclamo "reclamado" de AL MENOS 10 minutos se trata como libre (B3, corrige vuelta 30:
  * antes el borde exacto de los 10 minutos NO se consideraba atascado por usar `>` en vez de `>=`).
@@ -408,6 +408,7 @@ function campoCorreoDestinatario(destinatario: DestinatarioCorreo): string {
   if (destinatario === "comprador") return "correoComprador";
   if (destinatario === "leonardo") return "correoLeonardo";
   if (destinatario === "acuse20h") return "avisoAcuse20h";
+  if (destinatario === "acuse48h") return "avisoAcuse48h";
   return "avisoBloqueoProveedor";
 }
 
@@ -458,38 +459,91 @@ export async function reclamarEnvioCorreo(
   return db().runTransaction((tx) => reclamarEnvioCorreoTx(tx, pagoRef, destinatario, ahora));
 }
 
-/** Marca `<campo>="enviado"` tras enviar (con exito) el correo de ESE destinatario. Limpia tambien
- * `<campo>ReclamadoEn` (M37): un correo ya enviado no necesita recordar cuando se reclamo. */
-export async function marcarCorreoEnviado(paymentId: string, destinatario: DestinatarioCorreo): Promise<void> {
-  await db()
-    .collection("pagosProcesados")
-    .doc(String(paymentId))
-    .update({ [campoCorreoDestinatario(destinatario)]: "enviado", [campoReclamadoEnDestinatario(destinatario)]: null });
+/**
+ * Simplificacion 2026-10-06 (decision del Brain, tras el NO-GO de la vuelta 32: dejar de parchear
+ * el reintento de acuses y simplificar su mecanica en vez de agregarle otra capa): cerrar un
+ * reclamo (marcarlo "enviado" o liberarlo a `null`) SOLO si `<campo>ReclamadoEn` sigue siendo
+ * EXACTAMENTE el que puso ESTE mismo intento (comparacion TRANSACCIONAL del timestamp recibido en
+ * `reclamadoEn` contra el guardado ahora mismo en Firestore). Antes, `marcarCorreoEnviado`/
+ * `liberarReclamoCorreo` escribian a ciegas sin comprobar que el reclamo siguiera siendo suyo: un
+ * cierre TARDIO (p. ej. la instancia que reclamo quedo colgada mas de
+ * `UMBRAL_RECLAMO_ATASCADO_MS`, otra entrega ya liberó el reclamo atascado y volvio a reclamarlo, y
+ * SOLO DESPUES la instancia vieja por fin intenta cerrar el suyo) podia pisar el reclamo AJENO mas
+ * nuevo — marcarlo "enviado" sin haber mandado nada, o liberarlo a mitad de un envio en curso. Si
+ * el reclamo ya no es el mismo, esta funcion no hace nada (el reclamo ajeno sigue su curso normal).
+ */
+export async function marcarCorreoEnviadoTx(
+  tx: TransaccionLike,
+  pagoRef: any,
+  destinatario: DestinatarioCorreo,
+  reclamadoEn: Date
+): Promise<void> {
+  const campo = campoCorreoDestinatario(destinatario);
+  const campoFecha = campoReclamadoEnDestinatario(destinatario);
+  const snap = await tx.get(pagoRef);
+  const datos = snap.exists ? snap.data() : undefined;
+  const actual = datos?.[campoFecha];
+  const actualMs = actual && typeof actual.toMillis === "function" ? actual.toMillis() : null;
+  if (actualMs !== reclamadoEn.getTime()) return; // ya no es el dueño de este reclamo: no tocar.
+  tx.update(pagoRef, { [campo]: "enviado", [campoFecha]: null });
 }
 
-/** Libera el reclamo (vuelve `<campo>` a `null`) cuando el envio a ESE destinatario fallo, para
- * que una entrega futura pueda reintentar SOLO ese destinatario sin reenviar al otro. Limpia
- * tambien `<campo>ReclamadoEn` (M37). */
-export async function liberarReclamoCorreo(paymentId: string, destinatario: DestinatarioCorreo): Promise<void> {
-  await db()
-    .collection("pagosProcesados")
-    .doc(String(paymentId))
-    .update({ [campoCorreoDestinatario(destinatario)]: null, [campoReclamadoEnDestinatario(destinatario)]: null });
+/** Envoltorio real: abre la transaccion de Firestore y le pasa la referencia real. `reclamadoEn`
+ * es el `ahora` que devolvio `reclamarEnvioCorreo` al reclamar — quien llama debe guardarlo y
+ * reenviarlo aqui tal cual. */
+export async function marcarCorreoEnviado(
+  paymentId: string,
+  destinatario: DestinatarioCorreo,
+  reclamadoEn: Date
+): Promise<void> {
+  const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
+  await db().runTransaction((tx) => marcarCorreoEnviadoTx(tx, pagoRef, destinatario, reclamadoEn));
 }
 
-// ── M37: lectura/consulta de pagosProcesados para el reintento del acuse SIN Cloud Scheduler ────
-// Sin la API de Cloud Scheduler habilitada en este proyecto, la unica forma de recuperar un acuse
-// de compra que quedo sin enviar es que algo que YA se ejecuta por otra razon lo revise de paso:
-// (1) el propio comprador consultando GET /api/cuenta justo despues de pagar (server.ts), y (2)
-// cada aviso que llega al webhook de Mercado Pago (server.ts). Las dos rutas usan las funciones de
-// abajo para encontrar candidatos; la decision de "cuales SI reintentar" es PURA
-// (`seleccionarPagosParaBarrido`) para poder probarla con node:test sin Firestore real.
-//
-// Deliberado: nunca se consulta Firestore con `where("correoComprador", "!=", "enviado")` — esa
-// clase de filtro EXCLUYE los documentos donde el campo es `null`/esta ausente (el caso mas comun:
-// un pago cuyo primer intento de correo nunca se reclamo), asi que ni siquiera verificaria lo que
-// se necesita. En su lugar, se consulta por un campo de IGUALDAD simple (`uid`, o ningun filtro
-// mas que el orden) y se filtra en memoria.
+/** Mismo chequeo de dueño que `marcarCorreoEnviadoTx` (ver el comentario de arriba), para cuando el
+ * envio a ESE destinatario fallo: libera el reclamo (vuelve `<campo>` a `null`) solo si sigue
+ * siendo el reclamo que puso esta llamada, para que una entrega futura pueda reintentar SOLO ese
+ * destinatario sin pisar un reclamo ajeno mas nuevo. */
+export async function liberarReclamoCorreoTx(
+  tx: TransaccionLike,
+  pagoRef: any,
+  destinatario: DestinatarioCorreo,
+  reclamadoEn: Date
+): Promise<void> {
+  const campo = campoCorreoDestinatario(destinatario);
+  const campoFecha = campoReclamadoEnDestinatario(destinatario);
+  const snap = await tx.get(pagoRef);
+  const datos = snap.exists ? snap.data() : undefined;
+  const actual = datos?.[campoFecha];
+  const actualMs = actual && typeof actual.toMillis === "function" ? actual.toMillis() : null;
+  if (actualMs !== reclamadoEn.getTime()) return;
+  tx.update(pagoRef, { [campo]: null, [campoFecha]: null });
+}
+
+/** Envoltorio real: abre la transaccion de Firestore y le pasa la referencia real. */
+export async function liberarReclamoCorreo(
+  paymentId: string,
+  destinatario: DestinatarioCorreo,
+  reclamadoEn: Date
+): Promise<void> {
+  const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
+  await db().runTransaction((tx) => liberarReclamoCorreoTx(tx, pagoRef, destinatario, reclamadoEn));
+}
+
+// ── Lectura de pagosProcesados para el UNICO mecanismo de reintento del acuse (simplificacion
+// 2026-10-06, decision del Brain tras el NO-GO de la vuelta 32 sobre 3 vueltas previas de parches:
+// SIMPLIFICAR, no parchear) ──────────────────────────────────────────────────────────────────────
+// El webhook de Mercado Pago (server/webhook.ts) manda el acuse de compra EN LINEA, con `await`
+// dentro de la propia peticion, al activar un pago; si falla, el acuse queda pendiente. El UNICO
+// mecanismo de reintento es `POST /api/tareas/barrido-acuses` (Cloud Scheduler cada 30 min, ver
+// server/tareasFondo.ts): recorre TODOS los `pagosProcesados` paginados y reintenta cada uno cuyo
+// acuse no se mando y que no este revertido — `reintentarAcusePendiente` (server/notificaciones.ts)
+// decide, segun la antiguedad del pago, si reintenta, alerta a Leonardo a las 20h o abandona (deja
+// de reintentar) a las 48h. Ya no existen ni el reintento desde GET /api/cuenta ni el barrido
+// disparado por el propio webhook (ambos quedaron redundantes con el barrido programado) ni el
+// tope de intentos con espera creciente (`MAX_INTENTOS_ACUSE`/backoff exponencial): sin un techo de
+// tiempo real (48h) que de verdad detenga el reintento, un tope de INTENTOS era una capa de mas que
+// no cambiaba el resultado observable.
 
 export interface PagoProcesadoAcuse {
   paymentId: string;
@@ -509,9 +563,17 @@ export interface PagoProcesadoAcuse {
    * (`revertirPagoSiNoRevertidoTx` ya lo marco). Un pago revertido nunca debe reintentar su acuse
    * de compra — el comprador ya no tiene nada que confirmar. */
   revertido: boolean;
+  /** "enviado" | "reclamado" | null — si ya se avisó a Leonardo (log + mejor esfuerzo por correo)
+   * de que este acuse lleva >=20h sin salir. */
+  avisoAcuse20h: string | null;
+  /** "enviado" | "reclamado" | null — si ya se avisó a Leonardo de que este acuse lleva >=48h sin
+   * salir y se DEJO de reintentar (estado terminal). */
+  avisoAcuse48h: string | null;
 }
 
-function pagoProcesadoAcuseDesdeDoc(id: string, data: Record<string, any>): PagoProcesadoAcuse {
+/** EXPORTADA (antes privada): `server/tareasFondo.ts` la necesita para convertir cada documento
+ * crudo de una pagina de `paginaPagosProcesados` en `PagoProcesadoAcuse` antes de reintentar. */
+export function pagoProcesadoAcuseDesdeDoc(id: string, data: Record<string, any>): PagoProcesadoAcuse {
   return {
     paymentId: id,
     uid: data.uid ?? null,
@@ -523,6 +585,8 @@ function pagoProcesadoAcuseDesdeDoc(id: string, data: Record<string, any>): Pago
     vence: data.vence,
     correoComprador: data.correoComprador ?? null,
     revertido: data.revertido === true,
+    avisoAcuse20h: data.avisoAcuse20h ?? null,
+    avisoAcuse48h: data.avisoAcuse48h ?? null,
   };
 }
 
@@ -534,150 +598,15 @@ export async function obtenerEstadoCorreoComprador(paymentId: string): Promise<s
   return snap.exists ? (snap.data()?.correoComprador ?? null) : null;
 }
 
-// ── Tope de intentos con espera creciente (M2, correccion NO-GO vuelta 30, 2026-10-05) ──────────
-// Antes, nada limitaba cuantas veces se podia reintentar el acuse de un mismo pago: cada disparo
-// (GET /api/cuenta, el barrido del webhook, o el barrido completo de G2) lo volvia a intentar sin
-// ninguna espera entre intentos ni un techo. Ahora `pagosProcesados/{id}` guarda `intentosAcuse`
-// (cuantas veces se intento) y `ultimoIntentoAcuseEn` (Timestamp DEL SERVIDOR del ultimo intento);
-// la espera antes del siguiente intento crece exponencialmente (2^intentosAcuse minutos: 2, 4, 8,
-// 16... min) y al llegar a `MAX_INTENTOS_ACUSE` el pago se marca `estadoAcuse="agotado"` (estado
-// TERMINAL, M3) y ya no se vuelve a reintentar automaticamente — se emite el log
-// `ALERTA_ACUSE_ATRASADO` para que una alerta de Cloud Logging lo capture.
-export const MAX_INTENTOS_ACUSE = 10;
-
-/** Minutos (en ms) que hay que esperar desde `ultimoIntentoAcuseEn` antes del intento
- * `intentosPrevios + 1`. PURA, exportada para poder probarla sin Firestore. */
-export function calcularEsperaBackoffMs(intentosPrevios: number): number {
-  return Math.pow(2, intentosPrevios) * 60_000;
-}
-
 /**
- * Cuerpo transaccional de "registrar un intento mas" (M2): si `intentosAcuse` ya alcanzo
- * `MAX_INTENTOS_ACUSE`, NO cuenta un intento nuevo — marca `estadoAcuse="agotado"` (si no lo
- * estaba ya) y devuelve `agotado:true` para que quien llama (reintentarAcusePendiente) ni
- * siquiera intente enviar el correo esta vez. En caso contrario, incrementa `intentosAcuse` y
- * guarda `ultimoIntentoAcuseEn=ahora` en la MISMA escritura.
- */
-export async function registrarIntentoAcuseTx(
-  tx: TransaccionLike,
-  pagoRef: any,
-  ahora: Date
-): Promise<{ intentos: number; agotado: boolean }> {
-  const snap = await tx.get(pagoRef);
-  const datos = snap.exists ? snap.data() : undefined;
-  const intentosPrevios = datos?.intentosAcuse ?? 0;
-
-  if (intentosPrevios >= MAX_INTENTOS_ACUSE) {
-    if (datos?.estadoAcuse !== "agotado") tx.update(pagoRef, { estadoAcuse: "agotado" });
-    return { intentos: intentosPrevios, agotado: true };
-  }
-
-  const intentos = intentosPrevios + 1;
-  tx.update(pagoRef, { intentosAcuse: intentos, ultimoIntentoAcuseEn: Timestamp.fromDate(ahora) });
-  return { intentos, agotado: false };
-}
-
-/** Envoltorio real: abre la transaccion de Firestore y le pasa la referencia real. */
-export async function registrarIntentoAcuse(
-  paymentId: string,
-  ahora: Date = new Date()
-): Promise<{ intentos: number; agotado: boolean }> {
-  const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
-  return db().runTransaction((tx) => registrarIntentoAcuseTx(tx, pagoRef, ahora));
-}
-
-/**
- * Criterios de ELEGIBILIDAD compartidos por las TRES vias de reintento del acuse de compra (GET
- * /api/cuenta por uid, el barrido parcial del webhook, y el barrido COMPLETO paginado del
- * endpoint de tareas protegido, G2): nunca un pago ya revertido (G3, defensa en profundidad —
- * `reintentarAcusePendiente` en server/notificaciones.ts tambien comprueba esto por su cuenta),
- * nunca un estado TERMINAL (M3: "agotado" de M2, el aviso de bloqueo de proveedor ya enviado, o el
- * aviso de 20h ya enviado — reintentar automaticamente mas alla de esos tres puntos no aporta
- * nada, son casos que ya esperan atencion humana), y nunca mientras la espera creciente de M2
- * siga corriendo. PURA, para poder probarla con node:test sin Firestore real.
- */
-export function elegibleParaReintentoAcuse(data: Record<string, any>, ahora: Date): boolean {
-  if ((data.correoComprador ?? null) === "enviado") return false;
-  if (data.revertido === true) return false; // G3
-  if (data.estadoAcuse === "agotado") return false; // M2/M3
-  if ((data.avisoBloqueoProveedor ?? null) === "enviado") return false; // M3
-  if ((data.avisoAcuse20h ?? null) === "enviado") return false; // M3
-
-  const intentosPrevios = data.intentosAcuse ?? 0;
-  if (intentosPrevios > 0) {
-    const ultimo = data.ultimoIntentoAcuseEn;
-    const ms = ultimo && typeof ultimo.toMillis === "function" ? ultimo.toMillis() : 0;
-    if (ahora.getTime() - ms < calcularEsperaBackoffMs(intentosPrevios)) return false; // M2
-  }
-  return true;
-}
-
-/** Candidatos de UN `uid` para reintentar el acuse (M37, path (1): GET /api/cuenta). Hasta
- * `limite` pagos de ESTE usuario elegibles (ver `elegibleParaReintentoAcuse`) — consulta por `uid`
- * (indice de un solo campo, automatico en Firestore) y filtro en memoria. Sin tope de antiguedad
- * (`antiguedadMinMs=0`): es el propio comprador consultando su cuenta, no un barrido oportunista. */
-export async function listarPagosPendientesDeAcuse(uid: string, limite = 5): Promise<PagoProcesadoAcuse[]> {
-  const snap = await db().collection("pagosProcesados").where("uid", "==", uid).limit(20).get();
-  const candidatos = snap.docs.map((d) => ({ id: d.id, data: d.data() }));
-  return seleccionarPagosParaBarrido(candidatos, new Date(), 0, limite);
-}
-
-/** PURA (M37; G3/M2/M3 unifican el criterio con `elegibleParaReintentoAcuse`): de una tanda de
- * `pagosProcesados` (id + datos crudos del documento), elige hasta `limite` candidatos elegibles
- * con `uid` guardado (sin `uid` — un pago de antes de M37 — no hay con que reconstruir el aviso) y
- * `procesadoEn` con al menos `antiguedadMinMs` de antiguedad respecto a `ahora` (no tiene sentido
- * perseguir un pago que `notificarActivacionPaquete` todavia esta procesando en SU primera
- * entrega, hace unos segundos). */
-export function seleccionarPagosParaBarrido(
-  candidatos: Array<{ id: string; data: Record<string, any> }>,
-  ahora: Date,
-  antiguedadMinMs: number,
-  limite: number
-): PagoProcesadoAcuse[] {
-  const seleccionados: PagoProcesadoAcuse[] = [];
-  for (const { id, data } of candidatos) {
-    if (seleccionados.length >= limite) break;
-    if (!elegibleParaReintentoAcuse(data, ahora)) continue;
-    if (!data.uid) continue;
-    const procesadoEn = data.procesadoEn;
-    const ms = procesadoEn && typeof procesadoEn.toMillis === "function" ? procesadoEn.toMillis() : 0;
-    if (ahora.getTime() - ms < antiguedadMinMs) continue;
-    seleccionados.push(pagoProcesadoAcuseDesdeDoc(id, data));
-  }
-  return seleccionados;
-}
-
-/** Envoltorio real de `seleccionarPagosParaBarrido`: mira los `TAMANO_VENTANA_BARRIDO` pagos
- * procesados MAS RECIENTES (sin filtro de Firestore sobre `correoComprador`, ver la nota de
- * arriba) y filtra/ordena en memoria. Barato a la escala actual de CertiSend (cero clientes de
- * pago en 2026-10-05); si el volumen crece mucho, esto puede necesitar un indice compuesto por
- * `correoComprador`+`procesadoEn` — no hoy. */
-const TAMANO_VENTANA_BARRIDO = 50;
-
-export async function listarPagosParaBarridoGlobal(
-  ahora: Date,
-  antiguedadMinMs = 5 * 60_000,
-  limite = 5
-): Promise<PagoProcesadoAcuse[]> {
-  const snap = await db()
-    .collection("pagosProcesados")
-    .orderBy("procesadoEn", "desc")
-    .limit(TAMANO_VENTANA_BARRIDO)
-    .get();
-  const candidatos = snap.docs.map((d) => ({ id: d.id, data: d.data() }));
-  return seleccionarPagosParaBarrido(candidatos, ahora, antiguedadMinMs, limite);
-}
-
-/**
- * M3 (correccion NO-GO vuelta 30, 2026-10-05): una PAGINA de `pagosProcesados`, ordenada por
- * `procesadoEn` descendente, para el barrido COMPLETO que dispara el endpoint de tareas protegido
- * (G2, `POST /api/tareas/barrido-acuses`) — a diferencia de `listarPagosParaBarridoGlobal`
- * (ventana fija de `TAMANO_VENTANA_BARRIDO` para el disparo oportunista del webhook), este recorre
- * TODOS los pendientes paginando con `startAfter`. `cursor` es el cursor de Firestore devuelto por
- * la pagina anterior (`cursorSiguiente`, el ultimo `QueryDocumentSnapshot` de esa pagina) o `null`
- * para la primera pagina — se tipa `unknown` porque quien orquesta el recorrido completo
- * (`server/tareasFondo.ts`, `barrerTodosLosPagosPendientes`) nunca necesita conocer su forma real,
- * solo reenviarlo tal cual a la siguiente llamada.
+ * Una PAGINA de `pagosProcesados`, ordenada por `procesadoEn` descendente, para el barrido
+ * COMPLETO que dispara el endpoint de tareas protegido (`POST /api/tareas/barrido-acuses`,
+ * `server/tareasFondo.ts` `barrerTodosLosPagosPendientes`) — el UNICO mecanismo de reintento del
+ * acuse de compra (simplificacion 2026-10-06). Recorre TODOS los pendientes paginando con
+ * `startAfter`. `cursor` es el cursor de Firestore devuelto por la pagina anterior
+ * (`cursorSiguiente`, el ultimo `QueryDocumentSnapshot` de esa pagina) o `null` para la primera
+ * pagina — se tipa `unknown` porque quien orquesta el recorrido completo nunca necesita conocer
+ * su forma real, solo reenviarlo tal cual a la siguiente llamada.
  */
 export async function paginaPagosProcesados(
   cursor: unknown,

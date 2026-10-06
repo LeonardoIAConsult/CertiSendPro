@@ -31,14 +31,7 @@ import { crearCobroPaquete } from "./server/cobroPaquete";
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
 import { enviarCorreo, construirAvisoFalloWebhookLeonardo } from "./server/avisos";
 import { notificarActivacionPaquete, avisarReembolsoPaquete, CORREO_LEONARDO } from "./server/notificaciones";
-import {
-  ejecutarBarridoWebhookConTope,
-  ejecutarReintentoCuentaConTope,
-  reintentarAcusesDeUid,
-  barrerAcusesPendientesGlobal,
-  manejarBarridoAcusesTarea,
-  type EstadoBarridoWebhook,
-} from "./server/tareasFondo";
+import { manejarBarridoAcusesTarea } from "./server/tareasFondo";
 
 const app = express();
 // Cloud Run inyecta PORT; en local sigue siendo 3000.
@@ -923,25 +916,6 @@ async function avisarSiFallaRepetido(paymentId: string, httpStatus: number): Pro
   }
 }
 
-// ── M37 (corrige vuelta 28) + G1/B1 (correccion NO-GO vuelta 30, 2026-10-05): reintento del acuse
-// de compra SIN Cloud Scheduler para el disparo oportunista de abajo (el barrido COMPLETO
-// programado vive en /api/tareas/barrido-acuses, mas abajo, con Cloud Scheduler) ────────────────
-// G1 (hallazgo central de la vuelta 30): en Cloud Run SIN minScale, el CPU se congela justo
-// despues de responder — el `.catch()` sin `await` que este codigo usaba ANTES para "no demorar
-// la respuesta" en realidad significaba que ese trabajo casi nunca llegaba a correr. Ahora los dos
-// disparadores se ESPERAN (`await`) ANTES de responder, con un tope de tiempo explicito
-// (`conTope`/`ejecutar...ConTope`, server/tareasFondo.ts): lo que no alcance a tiempo queda para
-// el PROXIMO disparo. Nunca mas "en segundo plano" de verdad.
-//   (1) cada GET /api/cuenta de un usuario autenticado revisa SUS pagosProcesados pendientes
-//       (maximo 1 intento cada 2 min por uid — `ultimoReintentoAcusePorUid`, mismo patron de Map
-//       en memoria que `visitas`/`fallosWebhookPorPago`; tope de tiempo 3s).
-//   (2) cada aviso del webhook con httpStatus=200 barre hasta 5 pagos pendientes de CUALQUIER
-//       usuario con mas de 5 min de antiguedad, como mucho 1 vez por minuto GLOBAL (B1,
-//       `debeCorrerBarridoWebhook`); tope de tiempo 4s.
-const ULTIMO_REINTENTO_ACUSE_POR_UID_MS = 2 * 60_000;
-const ultimoReintentoAcusePorUid = new Map<string, number>();
-let estadoBarridoWebhookGlobal: EstadoBarridoWebhook | null = null;
-
 app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
   let paymentIdInterno = "";
   try {
@@ -982,17 +956,6 @@ app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
 
     await avisarSiFallaRepetido(paymentId, resultado.httpStatus);
 
-    // G1 + B1: el barrido parcial se ESPERA (tope 4s) ANTES de responder a Mercado Pago, y solo
-    // corre si este aviso resolvio con 200 Y ha pasado al menos 1 minuto desde la ultima vez
-    // (`debeCorrerBarridoWebhook`, server/tareasFondo.ts) — nunca fire-and-forget.
-    const resultadoBarrido = await ejecutarBarridoWebhookConTope(
-      resultado.httpStatus,
-      Date.now(),
-      estadoBarridoWebhookGlobal,
-      { barrer: () => barrerAcusesPendientesGlobal() }
-    );
-    estadoBarridoWebhookGlobal = resultadoBarrido.nuevoEstado;
-
     res.status(resultado.httpStatus).json({ recibido: resultado.httpStatus === 200 });
   } catch (error: any) {
     // Error inesperado: 500 para que Mercado Pago reintente en vez de perder el aviso en silencio.
@@ -1002,18 +965,21 @@ app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
   }
 });
 
-// ── G2 (correccion NO-GO vuelta 30, 2026-10-05): barrido COMPLETO programado de acuses, SIN
-// pasar por el relay del webhook ────────────────────────────────────────────────────────────────
-// Disparado por un job de Cloud Scheduler (cada 30 min, ver docs/ops.md para los comandos
-// `gcloud` de alta — no ejecutados por esta orden). Protegido con un token de identidad OIDC: el
+// ── Barrido programado de acuses pendientes — UNICO mecanismo de reintento (simplificacion
+// 2026-10-06, decision del Brain tras el NO-GO de la revision externa vuelta 32) ────────────────
+// El webhook de arriba manda el acuse de compra EN LINEA (await) al activar un pago; si falla,
+// queda pendiente. Este endpoint es el UNICO que lo reintenta — ya no hay reintento desde
+// GET /api/cuenta ni un barrido disparado por el propio webhook. Disparado por un job de Cloud
+// Scheduler (cada 30 min, ver docs/ops.md). Protegido con un token de identidad OIDC: el
 // verificador (server/schedulerAuth.ts) exige que el token lo haya firmado Google para la cuenta
 // de servicio `SCHEDULER_SA_EMAIL`, con audiencia `SCHEDULER_AUDIENCE` (la URL de este servicio en
 // Cloud Run). Sin token -> 401; token de otra cuenta/audiencia -> 403; token valido -> ejecuta
 // `barrerTodosLosPagosPendientes` (server/tareasFondo.ts, paginado, con tope de paginas) y
-// responde 200 con las estadisticas. El aviso de 20h a Leonardo (server/notificaciones.ts) sigue
-// siendo el canal principal ante un acuse atascado; `ALERTA_ACUSE_ATRASADO` (log con marcador
-// fijo, emitido cuando M2 agota el tope de intentos) es el canal ADICIONAL para que una alerta de
-// Cloud Logging lo capture — ver docs/ops.md para los comandos de alta.
+// responde 200 con las estadisticas (o 500 con log estructurado si el barrido mismo falla). La
+// decision de alertar a Leonardo es por ANTIGUEDAD del pago (server/notificaciones.ts,
+// `reintentarAcusePendiente`): a las 20h, `ALERTA_ACUSE_ATRASADO` (sigue reintentando); a las 48h,
+// `ALERTA_ACUSE_ABANDONADO` (deja de reintentar) — los dos son logs estructurados grepables para
+// la alerta de Cloud Logging, ver docs/ops.md.
 app.post("/api/tareas/barrido-acuses", async (req, res) => {
   const resultado = await manejarBarridoAcusesTarea(req.headers.authorization);
   res.status(resultado.status).json(resultado.body);
@@ -1058,21 +1024,10 @@ app.get("/api/cuenta", exigirAuth, async (req, res) => {
   try {
     const cuenta = await obtenerCuenta(req.uid!);
 
-    // G1 (correccion NO-GO vuelta 30): el reintento del acuse de compra (M37 (1)) se ESPERA
-    // (tope 3s, `ejecutarReintentoCuentaConTope`) ANTES de responder — en Cloud Run sin minScale,
-    // el `.catch()` sin `await` que este codigo usaba antes casi nunca llegaba a correr, porque el
-    // CPU se congela justo despues de que la respuesta sale. Maximo 1 intento cada 2 min por uid
-    // (`ultimoReintentoAcusePorUid`, mismo patron de Map en memoria que `visitas`).
-    const ahora = Date.now();
-    const ultimo = ultimoReintentoAcusePorUid.get(req.uid!);
-    if (!ultimo || ahora - ultimo >= ULTIMO_REINTENTO_ACUSE_POR_UID_MS) {
-      ultimoReintentoAcusePorUid.set(req.uid!, ahora);
-      if (ultimoReintentoAcusePorUid.size > 5000) {
-        for (const [k, v] of ultimoReintentoAcusePorUid) if (ahora - v > ULTIMO_REINTENTO_ACUSE_POR_UID_MS) ultimoReintentoAcusePorUid.delete(k);
-      }
-      await ejecutarReintentoCuentaConTope(req.uid!, { reintentar: (uid) => reintentarAcusesDeUid(uid) });
-    }
-
+    // Simplificacion 2026-10-06: GET /api/cuenta ya NO reintenta el acuse de compra. El UNICO
+    // mecanismo de reintento es POST /api/tareas/barrido-acuses (Cloud Scheduler cada 30 min, ver
+    // server/tareasFondo.ts) — ver docs/plan/2026-10-05-cobro-real-con-planes.md, decision del
+    // Brain tras el NO-GO de la vuelta 32.
     res.json({
       plan: cuenta.plan,
       enviosRestantes: cuenta.enviosRestantes,
