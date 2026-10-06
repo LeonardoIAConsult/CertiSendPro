@@ -3,12 +3,17 @@
 // src/utils/plan.ts y server/trm.ts. El panel vive en LandingPage.tsx (no en App.tsx): el Paquete
 // se puede comprar con solo el ID token de Firebase (exigirAuth en el servidor), sin el access
 // token de Gmail que decide `needsAuth` en App.tsx — ver su comentario en App.tsx sobre G5.
+import {
+  TERMINOS_VERSION,
+  textoCasillaTerminos,
+  textoCasillaRetracto,
+} from "../../shared/textosCasillas";
 
 /** Version de los Terminos y Condiciones citada en la casilla T4 (`docs/legal/textos-checkout.md`
- * v1.2). DUPLICADA de `TERMINOS_VERSION` en server/cuentas.ts a proposito: ese modulo usa
- * firebase-admin (solo Node), asi que el bundle del cliente (Vite) no puede importarlo. Si se
- * publica una version nueva de los Terminos, actualizar las DOS constantes. */
-export const TERMINOS_VERSION = "1.2";
+ * v1.2). Re-exportada por compatibilidad: lo que antes era una constante duplicada a mano con
+ * `TERMINOS_VERSION` de server/cuentas.ts ahora viene de la MISMA fuente que el servidor,
+ * `shared/textosCasillas.ts` (M31, corrige vuelta 26 — ver `tests/textosCasillas.test.ts`). */
+export { TERMINOS_VERSION };
 
 /** "Pagar" solo se habilita con las DOS casillas marcadas (T4 Terminos, T5 retracto) — R1 de
  * `textos-checkout.md`: el silencio no vale, hace falta aceptacion expresa de cada una. */
@@ -17,40 +22,41 @@ export function puedePagar(aceptaTerminos: boolean, aceptaRetracto: boolean): bo
 }
 
 /** Texto de la casilla T4 en el idioma pedido, con el monto ya formateado (regla R7: puntos/comas
- * de miles). Debe coincidir con `textoCasillaTerminos` de server/cuentas.ts (duplicado por la
- * misma razon que `TERMINOS_VERSION`, arriba) — si uno cambia, cambia el otro. */
+ * de miles). Delegado a `shared/textosCasillas.ts` (M31): antes esta funcion tenia el texto
+ * copiado a mano por separado del servidor; ahora los dos leen de la misma fuente, asi que ya no
+ * pueden desviarse en silencio. Nombre conservado (`textoTerminos`, no `textoCasillaTerminos`)
+ * para no tocar a quien ya la importa (LandingPage.tsx, tests/checkout.test.ts). */
 export function textoTerminos(montoCop: number, idioma: "es" | "en"): string {
-  if (idioma === "en") {
-    return (
-      `I have read and accept the Terms and Conditions of Sale and Subscription (version ${TERMINOS_VERSION}) ` +
-      `and the Privacy Policy. I understand I will pay COP $${montoCop.toLocaleString("en-US")} today.`
-    );
-  }
-  return (
-    `He leído y acepto los Términos y Condiciones de Venta y Suscripción (versión ${TERMINOS_VERSION}) ` +
-    `y la Política de Privacidad. Entiendo que pagaré $${montoCop.toLocaleString("es-CO")} COP hoy.`
-  );
+  return textoCasillaTerminos(montoCop, idioma);
 }
 
-/** Texto de la casilla T5 (retracto) en el idioma pedido — literal de `textos-checkout.md` v1.2,
- * EN es la traduccion de cortesia que el mismo documento ya trae (no hubo que traducir a mano). */
+/** Texto de la casilla T5 (retracto) en el idioma pedido. Delegado a `shared/textosCasillas.ts`
+ * (M31), misma razon que `textoTerminos` arriba. */
 export function textoRetracto(idioma: "es" | "en"): string {
-  if (idioma === "en") {
-    return (
-      "I want the service to start immediately once my payment is confirmed. I understand that, for " +
-      "this reason, the 5-business-day right of withdrawal does not apply (Colombian Law 1480 of 2011, " +
-      "article 47, item 1). I can cancel renewals at any time, I keep the refunds and payment reversal " +
-      "rights the law grants me, and, for a Bundle with no sends used, I can request a full refund " +
-      "within 5 business days after payment."
-    );
-  }
-  return (
-    "Quiero que el servicio empiece de inmediato al confirmarse mi pago. Sé que, por eso, no procede " +
-    "el derecho de retracto de 5 días hábiles (Ley 1480 de 2011, artículo 47, numeral 1). Puedo " +
-    "cancelar las renovaciones cuando quiera, conservo los reembolsos y la reversión del pago que la " +
-    "ley me reconoce y, si es un Paquete y no hago ningún envío con él, puedo pedir su devolución " +
-    "completa dentro de los 5 días hábiles siguientes al pago."
-  );
+  return textoCasillaRetracto(idioma);
+}
+
+// ── Validacion del dominio de `initPoint` antes de redirigir (Bajo, cobro real con planes,
+// 2026-10-05) ────────────────────────────────────────────────────────────────────────────────
+// `create-preference` devuelve `init_point` tal como lo manda Mercado Pago (server/cobroPaquete.ts
+// solo reenvia `data.init_point`); el servidor NUNCA lo valida. Si alguien comprometiera la
+// respuesta en transito, o un bug/cambio de API devolviera cualquier otra URL, LandingPage.tsx
+// haria `window.location.href = <lo que sea>` sin ninguna comprobacion — un open-redirect de
+// pantalla completa (el navegador entero navega a esa URL, no un link). Esta funcion es la unica
+// puerta antes de esa redireccion: PURA (no toca `window`, no hace fetch), para poder probarla
+// con node:test.
+//
+// Acepta produccion (`mercadopago.com` o `mercadopago.com.<tld>`, con o sin `www.`) y el entorno
+// sandbox que usa el mismo patron con el subdominio `sandbox.` (Checkout Pro en modo prueba
+// devuelve `sandbox_init_point` bajo `sandbox.mercadopago.com.<tld>`). Cualquier otro origen
+// (dominio distinto, protocolo distinto de https, o un valor que no es ni siquiera una URL) es
+// invalido.
+const INIT_POINT_MP_REGEX = /^https:\/\/(www\.)?(sandbox\.)?mercadopago\.com(\.[a-z]{2})?\//i;
+
+/** true si `url` es una URL de Mercado Pago (produccion o sandbox) a la que es seguro redirigir
+ * con `window.location.href`. Nunca lanza con una entrada rara (undefined, no-string, vacio). */
+export function esInitPointMercadoPagoValido(url: unknown): boolean {
+  return typeof url === "string" && INIT_POINT_MP_REGEX.test(url);
 }
 
 /** Forma minima de lo que devuelve POST /api/mercadopago/create-preference que esta logica

@@ -4,6 +4,24 @@
 // nunca toca estas colecciones directamente (ver firestore.rules).
 import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
 import { obtenerFirebaseApp } from "./firebaseAdmin";
+import {
+  TERMINOS_VERSION,
+  normalizarIdioma,
+  textoCasillaRetracto,
+  textoCasillaTerminos,
+  TEXTO_CASILLA_RETRACTO,
+  TEXTO_CASILLA_RETRACTO_EN,
+  type Idioma,
+} from "../shared/textosCasillas";
+
+// M31 (corrige vuelta 26): los textos de las casillas T4/T5 y su idioma YA NO viven aqui — se
+// movieron a `shared/textosCasillas.ts` (sin firebase-admin, importable tambien por el cliente) y
+// se re-exportan debajo para no romper a quien ya importaba estos nombres desde este modulo
+// (server/cobroPaquete.ts, server.ts, tests existentes). Antes este archivo y
+// `src/utils/checkout.ts` tenian el MISMO texto copiado a mano en dos sitios; ahora los dos
+// importan de la misma fuente (`tests/textosCasillas.test.ts` prueba que coincidan).
+export { TERMINOS_VERSION, normalizarIdioma, textoCasillaRetracto, textoCasillaTerminos, TEXTO_CASILLA_RETRACTO, TEXTO_CASILLA_RETRACTO_EN };
+export type { Idioma };
 
 // Base de datos NOMBRADA de Firestore (us-west1), ya existente. NUNCA la "(default)".
 const FIRESTORE_DATABASE_ID = "ai-studio-distribuidordece-740c63fd-b7de-43a7-92b2-a00fc7f81a8a";
@@ -151,63 +169,9 @@ export async function obtenerPreferencia(id: string): Promise<PreferenciaGuardad
 // Cuando llegue la Tarea 7, quien construya el texto de una renovable debe completar ese
 // marcador en vez de omitirlo.
 
-export const TERMINOS_VERSION = "1.2";
-
-/** Idioma de la UI en el momento del cobro (M28, corrige vuelta 24): el checkout acepta "es" o
- * "en"; cualquier otro valor (ausente, invalido) se trata como "es" — ver `normalizarIdioma`. */
-export type Idioma = "es" | "en";
-
 /** Modalidad de pago del Paquete. Hoy `create-preference` solo ofrece "unico" (Tarea 6); la
  * "renovable" es la Tarea 7, todavia no existe que activar en el webhook para esa modalidad. */
 export type Modalidad = "unico" | "renovable";
-
-/** Texto EXACTO de la casilla T4 (`textos-checkout.md` v1.2) para un pago UNICO: sin la clausula
- * de renovacion. `montoCop` se formatea con puntos/comas de miles segun el idioma (regla R7 del
- * mismo documento). `idioma` (M28, 2026-10-05): el checkout tambien se ofrece en ingles — el
- * texto que se guarda como prueba de aceptacion (`guardarAceptacion`) debe ser el MISMO idioma
- * que vio el usuario al marcar la casilla, nunca siempre español. */
-export function textoCasillaTerminos(montoCop: number, idioma: Idioma = "es"): string {
-  if (idioma === "en") {
-    return (
-      `I have read and accept the Terms and Conditions of Sale and Subscription (version ${TERMINOS_VERSION}) ` +
-      `and the Privacy Policy. I understand I will pay COP $${montoCop.toLocaleString("en-US")} today.`
-    );
-  }
-  return (
-    `He leído y acepto los Términos y Condiciones de Venta y Suscripción (versión ${TERMINOS_VERSION}) ` +
-    `y la Política de Privacidad. Entiendo que pagaré $${montoCop.toLocaleString("es-CO")} COP hoy.`
-  );
-}
-
-/** Texto EXACTO de la casilla T5 (`textos-checkout.md` v1.2, ES) — nombre sin sufijo de idioma
- * por compatibilidad con el codigo/pruebas existentes de la Tarea 14 (siempre fue español). No
- * depende del plan ni del monto, siempre es el mismo. */
-export const TEXTO_CASILLA_RETRACTO =
-  "Quiero que el servicio empiece de inmediato al confirmarse mi pago. Sé que, por eso, no procede " +
-  "el derecho de retracto de 5 días hábiles (Ley 1480 de 2011, artículo 47, numeral 1). Puedo " +
-  "cancelar las renovaciones cuando quiera, conservo los reembolsos y la reversión del pago que la " +
-  "ley me reconoce y, si es un Paquete y no hago ningún envío con él, puedo pedir su devolución " +
-  "completa dentro de los 5 días hábiles siguientes al pago.";
-
-/** Traduccion fiel de `TEXTO_CASILLA_RETRACTO` (T5 EN, `textos-checkout.md` v1.2 — la version en
- * ingles YA existe en ese documento, no fue necesario traducir a mano desde cero). */
-export const TEXTO_CASILLA_RETRACTO_EN =
-  "I want the service to start immediately once my payment is confirmed. I understand that, for this " +
-  "reason, the 5-business-day right of withdrawal does not apply (Colombian Law 1480 of 2011, article " +
-  "47, item 1). I can cancel renewals at any time, I keep the refunds and payment reversal rights the " +
-  "law grants me, and, for a Bundle with no sends used, I can request a full refund within 5 business " +
-  "days after payment.";
-
-/** Texto EXACTO de la casilla T5 en el idioma pedido (M28). */
-export function textoCasillaRetracto(idioma: Idioma = "es"): string {
-  return idioma === "en" ? TEXTO_CASILLA_RETRACTO_EN : TEXTO_CASILLA_RETRACTO;
-}
-
-/** Normaliza cualquier valor que mande el navegador a un `Idioma` valido: solo "en" exacto da
- * ingles, cualquier otra cosa (ausente, "es", invalido) da español — nunca lanza. */
-export function normalizarIdioma(valor: unknown): Idioma {
-  return valor === "en" ? "en" : "es";
-}
 
 export interface AceptacionGuardada {
   uid: string;
@@ -242,6 +206,14 @@ export async function guardarAceptacion(
     .collection("aceptaciones")
     .doc(String(id))
     .set({ ...datos, fecha: Timestamp.now() });
+}
+
+/** Lee `aceptaciones/{id}`; `null` si no existe. Usada por el webhook (Tarea 5, 2026-10-05) para
+ * saber el correo real del comprador (`req.email` al momento del checkout) y el idioma en el que
+ * debe ir el correo de confirmacion de compra — ninguno de los dos vive en `preferencias/{id}`. */
+export async function obtenerAceptacion(id: string): Promise<AceptacionGuardada | null> {
+  const snap = await db().collection("aceptaciones").doc(String(id)).get();
+  return snap.exists ? (snap.data() as AceptacionGuardada) : null;
 }
 
 export const ENVIOS_PAQUETE = 150;
@@ -346,6 +318,75 @@ export async function activarPaqueteSiNoProcesado(
   return db().runTransaction((tx) =>
     activarPaqueteSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, ...datos })
   );
+}
+
+// ── Correo de confirmacion: idempotencia separada de la activacion (Tarea 5, 2026-10-05) ───────
+// `activarPaqueteSiNoProcesadoTx` ya marca `pagosProcesados/{paymentId}` para no activar dos
+// veces; el correo usa el MISMO documento con un campo aparte (`correoEnviado`) en vez de abrir
+// una coleccion nueva, pero es deliberadamente una escritura SEPARADA de la transaccion de
+// activacion: el correo se manda DESPUES de que esa transaccion ya termino bien (requisito de la
+// Tarea 5) y, si el relay esta caido, una entrega posterior del MISMO webhook (Mercado Pago
+// reintenta un aviso que respondio 500, o el propio reintento manual) debe poder volver a
+// intentar el correo sin volver a activar nada — por eso NO comparte transaccion con
+// `activarPaqueteSiNoProcesadoTx`.
+
+/** true si YA se envio (con exito) el correo de este pago. `false` tambien si el pago nunca se
+ * activo aqui (documento inexistente): no es a esta funcion a la que le toca decidir si hay algo
+ * que notificar, solo si ya se noto. */
+export async function correoYaEnviado(paymentId: string): Promise<boolean> {
+  const snap = await db().collection("pagosProcesados").doc(String(paymentId)).get();
+  return snap.exists && snap.data()?.correoEnviado === true;
+}
+
+/** Marca `correoEnviado=true` en `pagosProcesados/{paymentId}` tras enviar (con exito) el correo
+ * de confirmacion + el aviso de venta a Leonardo. `update` (no `set`): conserva `procesadoEn` sin
+ * reescribirlo. */
+export async function marcarCorreoEnviado(paymentId: string): Promise<void> {
+  await db().collection("pagosProcesados").doc(String(paymentId)).update({ correoEnviado: true });
+}
+
+// ── Reversion por contracargo o reembolso (Tarea 9, cobro real con planes, 2026-10-05) ─────────
+// Mercado Pago puede avisar `status=refunded`/`charged_back` sobre un pago que YA activo un
+// Paquete (su `pagosProcesados/{paymentId}` ya existe, escrito por `activarPaqueteSiNoProcesadoTx`
+// arriba). Regla: si ese pago es el `ultimoPago` ACTIVO de la cuenta, la cuenta vuelve a Gratis
+// (plan, saldo y vencimiento — "revierte" significa volver exactamente a `CUENTA_GRATIS_BASE`,
+// nunca restar 150 a un numero que podria ya estar mezclado con una compra posterior); si no es
+// el pago activo (el usuario ya compro o renovo de nuevo desde entonces), la cuenta NO SE TOCA.
+// Idempotente: `revertido` en el MISMO documento de `pagosProcesados/{paymentId}` evita procesar
+// dos veces el mismo evento de reembolso (Mercado Pago puede reintentar el aviso).
+export type ResultadoReversion = "revertido" | "no_activo" | "ya_procesado" | "ignorado";
+
+export async function revertirPagoSiNoRevertidoTx(
+  tx: TransaccionLike,
+  pagoRef: any,
+  cuentaRef: any,
+  paymentId: string
+): Promise<ResultadoReversion> {
+  const pagoSnap = await tx.get(pagoRef);
+  if (!pagoSnap.exists) {
+    // Este pago nunca activo nada aqui (id invalido, o un pago que nunca llego a "approved" en
+    // nuestro webhook): no hay cuenta que revertir ni evento propio que recordar.
+    return "ignorado";
+  }
+  if (pagoSnap.data()?.revertido === true) return "ya_procesado";
+
+  const cuentaSnap = await tx.get(cuentaRef);
+  const cuenta = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
+  const esPagoActivo = (cuenta?.ultimoPago?.id ?? null) === paymentId;
+
+  tx.update(pagoRef, { revertido: true });
+  if (esPagoActivo) {
+    tx.set(cuentaRef, { ...CUENTA_GRATIS_BASE, actualizado: Timestamp.now() });
+    return "revertido";
+  }
+  return "no_activo";
+}
+
+/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
+export async function revertirPagoSiNoRevertido(paymentId: string, uid: string): Promise<ResultadoReversion> {
+  const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
+  const cuentaRef = db().collection("cuentas").doc(uid);
+  return db().runTransaction((tx) => revertirPagoSiNoRevertidoTx(tx, pagoRef, cuentaRef, paymentId));
 }
 
 // ── Limites de lotes de envio en el servidor (Tarea 3, 2026-10-05) ──────────────────────────

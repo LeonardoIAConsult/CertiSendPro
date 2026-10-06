@@ -21,9 +21,11 @@ import {
   guardarAceptacion,
 } from "./server/cuentas";
 import { trmHoy, copDesdeUsd } from "./server/trm";
-import { procesarWebhookMP, extraerAvisoWebhookMP } from "./server/webhook";
+import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete } from "./server/cobroPaquete";
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
+import { enviarCorreo, construirAvisoFalloWebhookLeonardo } from "./server/avisos";
+import { notificarActivacionPaquete, avisarReembolsoPaquete, CORREO_LEONARDO } from "./server/notificaciones";
 
 const app = express();
 // Cloud Run inyecta PORT; en local sigue siendo 3000.
@@ -874,17 +876,44 @@ const limitarWebhookMP: express.RequestHandler = (req, res, next) => {
   next();
 };
 
+// ── Aviso a Leonardo ante fallos repetidos del webhook (Tarea 5, requisito "vuelta 22",
+// 2026-10-05) ────────────────────────────────────────────────────────────────────────────────
+// `registrarResultadoWebhook` (server/webhook.ts, PURA) decide si, con el httpStatus que este
+// webhook acaba de responder para un `paymentId`, hay que avisar a Leonardo (3 fallos SEGUIDOS
+// del MISMO paymentId, una sola vez por racha). El Map en memoria es el mismo patron que
+// `visitas`/`visitasWebhook` de arriba: se limpia solo para no crecer sin fin.
+const fallosWebhookPorPago = new Map<string, EstadoFallosWebhook>();
+async function avisarSiFallaRepetido(paymentId: string, httpStatus: number): Promise<void> {
+  const clave = paymentId || "sin-id";
+  const { estado, debeAvisar } = registrarResultadoWebhook(fallosWebhookPorPago.get(clave), httpStatus);
+  if (estado.fallos === 0) {
+    fallosWebhookPorPago.delete(clave); // exito: la racha se resetea, no hace falta guardar nada.
+  } else {
+    fallosWebhookPorPago.set(clave, estado);
+  }
+  if (fallosWebhookPorPago.size > 5000) {
+    for (const [k, v] of fallosWebhookPorPago) if (v.fallos === 0) fallosWebhookPorPago.delete(k);
+  }
+  if (debeAvisar) {
+    const { asunto, texto } = construirAvisoFalloWebhookLeonardo({ paymentId, fallosConsecutivos: estado.fallos });
+    await enviarCorreo({ para: CORREO_LEONARDO, asunto, texto });
+  }
+}
+
 app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
+  let paymentIdInterno = "";
   try {
     // Mercado Pago manda el tipo/id por query (`type`/`topic` + `data.id`/`id`, formato nuevo o
     // IPN viejo) o, a veces, tambien en el body. Se acepta cualquiera de las dos fuentes, pero
     // solo para encontrar el id: lo que decide todo lo demas es la respuesta de la API (abajo).
     // Extraccion en funcion PURA (server/webhook.ts) para poder probarla con node:test.
     const { tipo, paymentId } = extraerAvisoWebhookMP({ query: req.query, body: req.body });
+    paymentIdInterno = paymentId;
 
     const mpAccessToken = process.env.MERCADO_PAGO_ACCESS_TOKEN;
     if (!mpAccessToken) {
       console.error("[MP WEBHOOK] MERCADO_PAGO_ACCESS_TOKEN no configurado.");
+      await avisarSiFallaRepetido(paymentId, 500);
       return res.status(500).end(); // configuracion incompleta: tratar como transitorio, que MP reintente.
     }
 
@@ -901,12 +930,20 @@ app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
       activarPaquete: activarPaqueteSiNoProcesado,
       timestampDesdeFecha: (fecha) => Timestamp.fromDate(fecha),
       log: (linea) => console.log(linea),
+      // Tarea 5: correo de confirmacion al comprador + aviso de venta a Leonardo (idempotente,
+      // nunca lanza — ver server/notificaciones.ts).
+      notificarActivacion: notificarActivacionPaquete,
+      // Tarea 9: reembolso/contracargo -> revierte a Gratis si era el pago activo + avisa a
+      // Leonardo (idempotente, nunca lanza).
+      procesarReembolso: avisarReembolsoPaquete,
     });
 
+    await avisarSiFallaRepetido(paymentId, resultado.httpStatus);
     res.status(resultado.httpStatus).json({ recibido: resultado.httpStatus === 200 });
   } catch (error: any) {
     // Error inesperado: 500 para que Mercado Pago reintente en vez de perder el aviso en silencio.
     console.error("[MP WEBHOOK] error inesperado:", error?.message || error);
+    await avisarSiFallaRepetido(paymentIdInterno, 500);
     res.status(500).end();
   }
 });

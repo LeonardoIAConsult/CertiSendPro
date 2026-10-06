@@ -23,7 +23,13 @@ import {
 import { LogoMark, AnimatedGlyph } from "./BrandLogo";
 import { translations, TranslationDict } from "../utils/translations";
 import { getIdToken } from "../firebaseAuth";
-import { puedePagar, interpretarRespuestaCobro, textoTerminos, textoRetracto } from "../utils/checkout";
+import {
+  puedePagar,
+  interpretarRespuestaCobro,
+  textoTerminos,
+  textoRetracto,
+  esInitPointMercadoPagoValido,
+} from "../utils/checkout";
 
 /** Lo que necesita el panel de checkout del Paquete, de GET /api/precios (M30, corrige vuelta
  * 24): `pagosActivos` es lo UNICO que le dice al cliente si create-preference esta encendido —
@@ -139,6 +145,15 @@ export default function LandingPage({
       const body = await res.json().catch(() => ({}));
       const resultado = interpretarRespuestaCobro(res.status, body);
       if (resultado.tipo === "ok") {
+        // Bajo (cobro real con planes, 2026-10-05): nunca redirigir el navegador entero a una URL
+        // que no sea de verdad de Mercado Pago (produccion o sandbox) — ver el comentario de
+        // `esInitPointMercadoPagoValido` en src/utils/checkout.ts.
+        if (!esInitPointMercadoPagoValido(resultado.initPoint)) {
+          console.error("[CHECKOUT] initPoint fuera de dominio, no se redirige:", resultado.initPoint);
+          setPanelError(t.checkoutErrorGenerico);
+          setPagando(false);
+          return;
+        }
         window.location.href = resultado.initPoint;
         return;
       }

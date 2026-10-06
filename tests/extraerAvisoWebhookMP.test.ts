@@ -36,6 +36,8 @@ test("extraerAvisoWebhookMP: tipo=merchant_order, llevado a procesarWebhookMP, s
     activarPaquete: async () => "activado",
     timestampDesdeFecha: (f: Date) => Timestamp.fromDate(f),
     log: () => {},
+    notificarActivacion: async () => {},
+    procesarReembolso: async () => {},
   });
   assert.equal(resultado.httpStatus, 200);
   assert.equal(obtenerPagoLlamado, false, "merchant_order nunca debe consultar la API de pagos");

@@ -86,6 +86,13 @@ function logMudo(linea: string) {
   logsCapturados.push(linea);
 }
 
+/** Llamadas a `notificarActivacion`/`procesarReembolso` capturadas por el ultimo `construirOpts`
+ * (reseteadas en cada llamada): las pruebas de Tareas 5/9 a nivel de webhook (que inyectan un
+ * stub, no la composicion real de server/notificaciones.ts — esa se prueba aparte en
+ * tests/notificaciones.test.ts) solo necesitan confirmar CUANTAS veces y con que datos se llamo. */
+export const llamadasNotificarActivacion: any[] = [];
+export const llamadasProcesarReembolso: any[] = [];
+
 function construirOpts(overrides: Partial<{
   tipo: string;
   paymentId: string;
@@ -96,6 +103,8 @@ function construirOpts(overrides: Partial<{
     paymentId: string,
     datos: { cop: number; trm: number; fecha: Timestamp }
   ) => Promise<"activado" | "repetido">;
+  notificarActivacion: (datos: any) => Promise<void>;
+  procesarReembolso: (datos: any) => Promise<void>;
 }>) {
   return {
     tipo: "payment",
@@ -105,6 +114,12 @@ function construirOpts(overrides: Partial<{
     activarPaquete: async () => "activado" as const,
     timestampDesdeFecha: (fecha: Date) => Timestamp.fromDate(fecha),
     log: logMudo,
+    notificarActivacion: async (datos: any) => {
+      llamadasNotificarActivacion.push(datos);
+    },
+    procesarReembolso: async (datos: any) => {
+      llamadasProcesarReembolso.push(datos);
+    },
     ...overrides,
   };
 }
@@ -398,4 +413,146 @@ test("webhook: el log incluye paymentId/uid/status y nunca datos del pagador", a
   for (const l of logsCapturados) {
     assert.ok(!/@|payer|email|tarjeta|card/i.test(l), "el log nunca debe incluir datos del pagador");
   }
+});
+
+// ── Tarea 5 (2026-10-05): notificarActivacion se llama tras una activacion (fresca o repetida) ──
+
+test("webhook: notificarActivacion se llama DESPUES de que activarPaquete ya resolvio (nunca antes de la transaccion de activacion)", async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const orden: string[] = [];
+  const activarPaqueteReal = activarPaqueteConFake(db);
+
+  await procesarWebhookMP(
+    construirOpts({
+      obtenerPago: async () => pagoOk({}),
+      obtenerPreferencia,
+      activarPaquete: async (...args) => {
+        orden.push("activarPaquete");
+        return activarPaqueteReal(...args);
+      },
+      notificarActivacion: async () => {
+        orden.push("notificarActivacion");
+      },
+    })
+  );
+
+  assert.deepEqual(orden, ["activarPaquete", "notificarActivacion"]);
+});
+
+test("webhook: tras activar (fresco), se llama notificarActivacion exactamente 1 vez con los datos del pago", async () => {
+  llamadasNotificarActivacion.length = 0;
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const activarPaquete = activarPaqueteConFake(db);
+
+  await procesarWebhookMP(construirOpts({ obtenerPago: async () => pagoOk({}), obtenerPreferencia, activarPaquete }));
+
+  assert.equal(llamadasNotificarActivacion.length, 1);
+  assert.equal(llamadasNotificarActivacion[0].uid, "uid-1");
+  assert.equal(llamadasNotificarActivacion[0].paymentId, "pago-1");
+  assert.equal(llamadasNotificarActivacion[0].referenciaId, "ref-1");
+  assert.equal(llamadasNotificarActivacion[0].cop, 49102);
+});
+
+test("webhook: tambien se llama notificarActivacion en una entrega REPETIDA del mismo pago (deja que la propia funcion decida si ya se noto)", async () => {
+  llamadasNotificarActivacion.length = 0;
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const activarPaquete = activarPaqueteConFake(db);
+  const opts = construirOpts({ obtenerPago: async () => pagoOk({}), obtenerPreferencia, activarPaquete });
+
+  await procesarWebhookMP(opts);
+  await procesarWebhookMP(opts);
+
+  assert.equal(llamadasNotificarActivacion.length, 2, "se llama las 2 veces; la idempotencia de NO mandar 2 correos vive en notificarActivacion, no aqui");
+});
+
+test('webhook: si notificarActivacion LANZA, el webhook responde 200 igual (oraculo "el relay falla -> sigue respondiendo 200")', async () => {
+  const db = new FirestoreFalso();
+  const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+  const activarPaquete = activarPaqueteConFake(db);
+
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      obtenerPago: async () => pagoOk({}),
+      obtenerPreferencia,
+      activarPaquete,
+      notificarActivacion: async () => {
+        throw new Error("el relay de avisos esta caido");
+      },
+    })
+  );
+
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(resultado.razon, "activado");
+  const cuenta = db.leer("cuentas/uid-1");
+  assert.ok(cuenta, "la activacion debe quedar aunque el aviso falle");
+});
+
+test("webhook: tipo distinto de payment NUNCA llama a notificarActivacion ni a procesarReembolso", async () => {
+  llamadasNotificarActivacion.length = 0;
+  llamadasProcesarReembolso.length = 0;
+  await procesarWebhookMP(construirOpts({ tipo: "merchant_order" }));
+  assert.equal(llamadasNotificarActivacion.length, 0);
+  assert.equal(llamadasProcesarReembolso.length, 0);
+});
+
+// ── Tarea 9 (2026-10-05): refunded/charged_back -> procesarReembolso, nunca activarPaquete ─────
+
+for (const status of ["refunded", "charged_back"]) {
+  test(`webhook: status="${status}" llama a procesarReembolso con uid/paymentId/status y NUNCA a activarPaquete`, async () => {
+    llamadasProcesarReembolso.length = 0;
+    const db = new FirestoreFalso();
+    const obtenerPreferencia = obtenerPreferenciaConFake(db, { "ref-1": preferenciaBase() });
+    let activarPaqueteLlamado = false;
+
+    const resultado = await procesarWebhookMP(
+      construirOpts({
+        obtenerPago: async () => pagoOk({ status }),
+        obtenerPreferencia,
+        activarPaquete: async () => {
+          activarPaqueteLlamado = true;
+          return "activado" as const;
+        },
+      })
+    );
+
+    assert.equal(resultado.httpStatus, 200);
+    assert.equal(activarPaqueteLlamado, false, `un pago "${status}" nunca debe intentar activar nada`);
+    assert.equal(llamadasProcesarReembolso.length, 1);
+    assert.deepEqual(llamadasProcesarReembolso[0], { uid: "uid-1", paymentId: "pago-1", status });
+  });
+}
+
+test('webhook: status_detail="charged_back" (sin status top-level) tambien dispara procesarReembolso', async () => {
+  llamadasProcesarReembolso.length = 0;
+  const resultado = await procesarWebhookMP(
+    construirOpts({ obtenerPago: async () => pagoOk({ status: "", status_detail: "charged_back" }) })
+  );
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(llamadasProcesarReembolso.length, 1);
+});
+
+test("webhook: un reembolso de un plan que no es paquete (pro, Tarea 8) no llama a procesarReembolso (se ignora antes)", async () => {
+  llamadasProcesarReembolso.length = 0;
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      obtenerPago: async () => pagoOk({ status: "refunded", external_reference: "CERTISEND|uid-1|pro|94931|ref-pro" }),
+    })
+  );
+  assert.equal(resultado.httpStatus, 200);
+  assert.equal(llamadasProcesarReembolso.length, 0);
+});
+
+test("webhook: si procesarReembolso LANZA, el webhook responde 200 igual", async () => {
+  const resultado = await procesarWebhookMP(
+    construirOpts({
+      obtenerPago: async () => pagoOk({ status: "refunded" }),
+      procesarReembolso: async () => {
+        throw new Error("fallo inesperado");
+      },
+    })
+  );
+  assert.equal(resultado.httpStatus, 200);
 });

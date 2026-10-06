@@ -218,7 +218,9 @@ export const translations: Record<Lang, TranslationDict> = {
 
     pagoConfirmando: "Estamos confirmando tu pago…",
     pagoActivo: "¡Pago confirmado! Tu plan ya está activo.",
-    pagoRevision: "Tu pago está en revisión; te avisamos por correo.",
+    // M32 (corrige vuelta 26): mientras no haya relay de avisos configurado en produccion (Tarea
+    // 5, docs/relay/README.md), este texto NO puede prometer un correo que todavia no sale.
+    pagoRevision: "Si ya pagaste, tu plan se activará en unos minutos; recarga o escríbenos a contacto@leonardoantolinez.com.",
     pagoRechazado: "No se realizó ningún cobro.",
     pagoSinSesion: "Inicia sesión para ver el estado de tu pago.",
 
@@ -323,7 +325,8 @@ export const translations: Record<Lang, TranslationDict> = {
 
     pagoConfirmando: "We're confirming your payment…",
     pagoActivo: "Payment confirmed! Your plan is now active.",
-    pagoRevision: "Your payment is under review; we'll email you.",
+    // M32 (corrige vuelta 26): same reason as the ES string above.
+    pagoRevision: "If you already paid, your plan will activate in a few minutes; refresh or email us at contacto@leonardoantolinez.com.",
     pagoRechazado: "No charge was made.",
     pagoSinSesion: "Sign in to see your payment status.",
 

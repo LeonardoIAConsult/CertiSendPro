@@ -2,7 +2,13 @@
 // corrige vuelta 24). Mismo patron que tests/plan.test.ts: node:test, sin React ni red.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { puedePagar, interpretarRespuestaCobro, textoTerminos, textoRetracto } from "../src/utils/checkout";
+import {
+  puedePagar,
+  interpretarRespuestaCobro,
+  textoTerminos,
+  textoRetracto,
+  esInitPointMercadoPagoValido,
+} from "../src/utils/checkout";
 
 // ── puedePagar: oraculo #3 — "Pagar" NUNCA se habilita con una sola casilla ─────────────────────
 
@@ -68,4 +74,36 @@ test("textoRetracto: es/en nunca se mezclan", () => {
   assert.match(textoRetracto("es"), /derecho de retracto/);
   assert.match(textoRetracto("en"), /right of withdrawal/);
   assert.doesNotMatch(textoRetracto("en"), /retracto/);
+});
+
+test("esInitPointMercadoPagoValido: produccion mercadopago.com -> true", () => {
+  assert.equal(esInitPointMercadoPagoValido("https://www.mercadopago.com/mco/checkout/v1/redirect"), true);
+  assert.equal(esInitPointMercadoPagoValido("https://mercadopago.com/checkout/v1/redirect"), true);
+});
+
+test("esInitPointMercadoPagoValido: produccion con TLD de pais (mercadopago.com.co) -> true", () => {
+  assert.equal(esInitPointMercadoPagoValido("https://www.mercadopago.com.co/checkout/v1/redirect?pref_id=1"), true);
+});
+
+test("esInitPointMercadoPagoValido: sandbox (sandbox.mercadopago.com.co) -> true", () => {
+  assert.equal(esInitPointMercadoPagoValido("https://sandbox.mercadopago.com.co/checkout/v1/redirect?pref_id=1"), true);
+  assert.equal(esInitPointMercadoPagoValido("https://www.sandbox.mercadopago.com/checkout/v1/redirect"), true);
+});
+
+test("esInitPointMercadoPagoValido: dominio distinto -> false", () => {
+  assert.equal(esInitPointMercadoPagoValido("https://mercadopago.com.otrositio.net/checkout"), false);
+  assert.equal(esInitPointMercadoPagoValido("https://otrositio.net/mercadopago.com/checkout"), false);
+  assert.equal(esInitPointMercadoPagoValido("https://notmercadopago.com/checkout"), false);
+});
+
+test("esInitPointMercadoPagoValido: protocolo distinto de https -> false", () => {
+  assert.equal(esInitPointMercadoPagoValido("http://mercadopago.com/checkout"), false);
+  assert.equal(esInitPointMercadoPagoValido("ftp://mercadopago.com/checkout"), false);
+});
+
+test("esInitPointMercadoPagoValido: entradas raras (vacio, undefined, no-string) -> false, nunca lanza", () => {
+  assert.equal(esInitPointMercadoPagoValido(""), false);
+  assert.equal(esInitPointMercadoPagoValido(undefined), false);
+  assert.equal(esInitPointMercadoPagoValido(null), false);
+  assert.equal(esInitPointMercadoPagoValido(12345), false);
 });
