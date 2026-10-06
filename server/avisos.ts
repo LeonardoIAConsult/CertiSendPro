@@ -106,6 +106,24 @@ export interface EnviarCorreoDeps {
 // defensa (dedup del lado del relay) para el caso en que, aun con 20s, el relay siga tardando mas.
 const TIMEOUT_MS_DEFECTO = 20_000;
 
+/** Medio 2 (vuelta 35): si el relay de avisos esta configurado (`AVISOS_RELAY_URL` +
+ * `AVISOS_RELAY_SECRET`), SIN revelar ninguno de los dos valores — mismo patron que
+ * `huellaConfigurada` (server/huellaLote.ts). La usa `GET /api/health` (la reporta como booleano)
+ * y, internamente, `enviarCorreo` para no duplicar el chequeo. PURA sobre un mapa de variables de
+ * entorno (por defecto `process.env`), para poder probarla con node:test sin mutar el entorno
+ * real del proceso. */
+export function relayConfigurado(env: Record<string, string | undefined> = process.env): boolean {
+  return Boolean(env.AVISOS_RELAY_URL && env.AVISOS_RELAY_URL.trim() && env.AVISOS_RELAY_SECRET && env.AVISOS_RELAY_SECRET.trim());
+}
+
+/** Medio 2 (vuelta 35): si `PROVEEDOR_NOMBRE` es un valor real (no vacio ni el marcador
+ * `"[PENDIENTE]"`), SIN revelar el nombre — mismo patron que `relayConfigurado`/
+ * `huellaConfigurada`. La usa `GET /api/health`. */
+export function proveedorConfigurado(nombre: string = PROVEEDOR_NOMBRE): boolean {
+  const limpio = nombre.trim();
+  return Boolean(limpio) && limpio !== "[PENDIENTE]";
+}
+
 /**
  * Envia un correo a traves del relay de Apps Script, firmado con HMAC-SHA256. Nunca lanza: si
  * faltan las variables de entorno, si el relay no responde a tiempo (timeout `timeoutMs`, 20 s por
@@ -335,6 +353,41 @@ export function construirCorreoConfirmacionCompra(
   };
 }
 
+// ── Aviso de reversion al COMPRADOR (Medio 1, vuelta 35) ────────────────────────────────────────
+// Terminos sec. 9.2 exige que, ante un reembolso/contracargo reportado por Mercado Pago, se
+// informe al comprador — la via mas simple que cumple la seccion es mandarlo DIRECTO al correo de
+// su cuenta (el mismo que ya recibio el acuse de compra), en vez de que Leonardo tenga que
+// escribirlo a mano cada vez. Texto minimo a proposito: no es un tramite de devolucion (eso ya lo
+// decidio Mercado Pago/el banco antes de que este correo salga), solo la confirmacion de que la
+// reversion quedo registrada.
+export function construirAvisoReversionComprador(datos: { idioma: "es" | "en"; paymentId: string }): {
+  asunto: string;
+  texto: string;
+} {
+  if (datos.idioma === "en") {
+    return {
+      asunto: `CertiSend — Your payment ${datos.paymentId} was reversed`,
+      texto:
+        `Hello:\n\n` +
+        `We're writing to let you know that your payment ${datos.paymentId} with CertiSend was reversed ` +
+        `(refund or chargeback reported by Mercado Pago). We inform you at your account's email, as our ` +
+        `Terms of Service (sec. 9.2) require.\n\n` +
+        `If you have any questions, write to ${PROVEEDOR_CORREO}.\n\n` +
+        pieProveedor("en"),
+    };
+  }
+  return {
+    asunto: `CertiSend — Tu pago ${datos.paymentId} fue revertido`,
+    texto:
+      `Hola:\n\n` +
+      `Te escribimos para informarte que tu pago ${datos.paymentId} con CertiSend fue revertido ` +
+      `(reembolso o contracargo reportado por Mercado Pago). Te lo informamos al correo de tu cuenta, ` +
+      `como exigen nuestros Términos y Condiciones (sección 9.2).\n\n` +
+      `Si tienes alguna pregunta, escríbenos a ${PROVEEDOR_CORREO}.\n\n` +
+      pieProveedor("es"),
+  };
+}
+
 // ── Avisos a Leonardo ───────────────────────────────────────────────────────────────────────
 
 export function construirAvisoVentaLeonardo(datos: {
@@ -353,26 +406,41 @@ export function construirAvisoVentaLeonardo(datos: {
   };
 }
 
+/** Medio 1 (vuelta 35): `correoComprador` (leido de `aceptaciones/{referenciaId}.email`, nunca
+ * inventado — `null` si no se encontro) se incluye para que Leonardo tenga el dato a mano si hace
+ * falta escribirle a mano; `avisoCompradorEnviado` dice si el aviso automatico al comprador
+ * (`construirAvisoReversionComprador`, mismo mecanismo de reclamo) ya salio, para que Leonardo
+ * sepa si todavia tiene que escribirle el (Términos sec. 9.2) o si ya quedo cubierto. */
 export function construirAvisoReembolsoLeonardo(datos: {
   uid: string;
   paymentId: string;
   status: string;
   cuentaRevertida: boolean;
+  correoComprador: string | null;
+  avisoCompradorEnviado: boolean;
 }): { asunto: string; texto: string } {
   const accion = datos.cuentaRevertida
     ? "Se revirtió la cuenta a Gratis (era el pago activo)."
     : "La cuenta NO se tocó (este pago ya no era el activo).";
+  const avisoComprador = datos.avisoCompradorEnviado
+    ? `El comprador (${datos.correoComprador ?? "correo no encontrado"}) YA fue notificado automáticamente (Términos sec. 9.2).`
+    : `El comprador (${datos.correoComprador ?? "correo no encontrado"}) todavía NO fue notificado — ` +
+      `escríbele informando la reversión (Términos sec. 9.2).`;
   return {
     asunto: `[CertiSend] ${datos.status === "charged_back" ? "Contracargo" : "Reembolso"} — uid ${datos.uid}`,
-    texto: `Mercado Pago reportó status="${datos.status}" para el pago ${datos.paymentId} del usuario ${datos.uid}.\n${accion}`,
+    texto:
+      `Mercado Pago reportó status="${datos.status}" para el pago ${datos.paymentId} del usuario ${datos.uid}.\n` +
+      `${accion}\n${avisoComprador}`,
   };
 }
 
 /** M36(2): aviso a Leonardo cuando un acuse de compra se BLOQUEA porque el pie del proveedor (o
  * cualquier otro dato del correo) todavia tiene un placeholder pendiente. El pago YA esta
  * activado — esto es solo el correo del comprador, no la activacion — asi que el texto deja claro
- * que no hay urgencia de reembolso, solo de completar `PROVEEDOR_DOCUMENTO`/`PROVEEDOR_DIRECCION`
- * (server/avisos.ts) y, si aplica, la confirmacion de IVA del contador. */
+ * que no hay urgencia de reembolso, solo de completar las variables de entorno `PROVEEDOR_DOC`/
+ * `PROVEEDOR_DIR` (Cloud Run/Secret Manager — unifica aqui el nombre REAL de la variable, no el
+ * de la constante interna `PROVEEDOR_DOCUMENTO`/`PROVEEDOR_DIRECCION` de server/avisos.ts, que es
+ * lo que de verdad hay que configurar) y, si aplica, la confirmacion de IVA del contador. */
 export function construirAvisoBloqueoProveedorLeonardo(datos: { uid: string; paymentId: string }): {
   asunto: string;
   texto: string;
@@ -381,8 +449,8 @@ export function construirAvisoBloqueoProveedorLeonardo(datos: { uid: string; pay
     asunto: `[CertiSend] Acuse de compra BLOQUEADO — faltan datos del proveedor`,
     texto:
       `El acuse de compra del pago ${datos.paymentId} (uid ${datos.uid}) NO se envió al comprador porque ` +
-      `el correo todavía tiene un dato marcado como pendiente (revisa PROVEEDOR_DOCUMENTO/PROVEEDOR_DIRECCION ` +
-      `en server/avisos.ts, y la confirmación de IVA del contador). El pago YA está activado: solo falta ` +
+      `el correo todavía tiene un dato marcado como pendiente (revisa las variables de entorno ` +
+      `PROVEEDOR_DOC/PROVEEDOR_DIR en Cloud Run, y la confirmación de IVA del contador). El pago YA está activado: solo falta ` +
       `completar esos datos para que el próximo acuse salga bien. Este aviso no se repite para este pago.`,
   };
 }

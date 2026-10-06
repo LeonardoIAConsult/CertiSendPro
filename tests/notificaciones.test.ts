@@ -93,6 +93,11 @@ test("notificarActivacionPaquete: activacion manda exactamente 1 correo al compr
   assert.match(paraComprador[0].texto, /sin ningún dato pendiente/);
   assert.match(paraLeonardo[0].texto, /pago-1/);
   assert.match(paraLeonardo[0].texto, /49\.102/);
+  // M-3 (vuelta 36): `idEnvio` es la dedup del lado del relay (docs/relay/avisos-relay.gs) — sin
+  // el, una entrega que Node da por fallida (timeout) pero que Apps Script SI alcanzo a mandar
+  // produce un correo duplicado de verdad. Debe ser `${paymentId}:${destinatario}` exacto.
+  assert.equal(paraComprador[0].idEnvio, "pago-1:comprador");
+  assert.equal(paraLeonardo[0].idEnvio, "pago-1:leonardo");
 });
 
 test("notificarActivacionPaquete: llamar dos veces (deps en memoria, idempotencia simple) no manda correos extra", async () => {
@@ -381,11 +386,26 @@ function depsReembolsoFalsas(overrides: Partial<AvisarReembolsoDeps> = {}): {
   correosEnviados: DatosCorreo[];
 } {
   const correosEnviados: DatosCorreo[] = [];
+  const reclamos = new Set<string>();
   const deps: AvisarReembolsoDeps = {
     revertirPago: async () => "revertido",
     enviarCorreo: async (datos) => {
       correosEnviados.push(datos);
       return true;
+    },
+    // Por defecto SIN correo del comprador (como un pago de antes de que esto existiera): la
+    // mayoria de las pruebas de este bloque solo le importa el aviso a Leonardo. Las pruebas del
+    // Medio 1 (aviso al comprador) pasan `obtenerAceptacion` explicito.
+    obtenerAceptacion: async () => null,
+    reclamarEnvioCorreo: async (paymentId, destinatario) => {
+      const clave = `${paymentId}:${destinatario}`;
+      if (reclamos.has(clave)) return false;
+      reclamos.add(clave);
+      return true;
+    },
+    marcarCorreoEnviado: async () => {},
+    liberarReclamoCorreo: async (paymentId, destinatario) => {
+      reclamos.delete(`${paymentId}:${destinatario}`);
     },
     ...overrides,
   };
@@ -394,33 +414,33 @@ function depsReembolsoFalsas(overrides: Partial<AvisarReembolsoDeps> = {}): {
 
 test("avisarReembolsoPaquete: pago activo revertido -> 1 aviso a Leonardo", async () => {
   const { deps, correosEnviados } = depsReembolsoFalsas({ revertirPago: async () => "revertido" });
-  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back" }, deps);
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps);
   assert.equal(correosEnviados.length, 1);
   assert.equal(correosEnviados[0].para, CORREO_LEONARDO);
 });
 
 test("avisarReembolsoPaquete: pago no activo -> igual avisa a Leonardo (informativo)", async () => {
   const { deps, correosEnviados } = depsReembolsoFalsas({ revertirPago: async () => "no_activo" });
-  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded" }, deps);
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded", referenciaId: "ref-1" }, deps);
   assert.equal(correosEnviados.length, 1);
 });
 
 test("avisarReembolsoPaquete: evento ya procesado antes -> 0 avisos extra (antirrepeticion)", async () => {
   const { deps, correosEnviados } = depsReembolsoFalsas({ revertirPago: async () => "ya_procesado" });
-  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded" }, deps);
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded", referenciaId: "ref-1" }, deps);
   assert.equal(correosEnviados.length, 0);
 });
 
 test("avisarReembolsoPaquete: pago que nunca fue nuestro -> ignorado, 0 avisos", async () => {
   const { deps, correosEnviados } = depsReembolsoFalsas({ revertirPago: async () => "ignorado" });
-  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded" }, deps);
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded", referenciaId: "ref-1" }, deps);
   assert.equal(correosEnviados.length, 0);
 });
 
 test("avisarReembolsoPaquete: si enviarCorreo (el aviso a Leonardo) falla, la funcion no lanza — la reversion YA tuvo exito", async () => {
   const { deps } = depsReembolsoFalsas({ enviarCorreo: async () => false });
   await assert.doesNotReject(
-    avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back" }, deps)
+    avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps)
   );
 });
 
@@ -435,9 +455,41 @@ test("avisarReembolsoPaquete (M34): si revertirPago lanza (Firestore sin red), l
     },
   });
   await assert.rejects(
-    avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back" }, deps),
+    avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps),
     /red caida/
   );
+});
+
+// ── Medio 1 (vuelta 35): aviso de reversion al COMPRADOR (Terminos sec. 9.2) ────────────────────
+
+test("Medio 1: con email en aceptaciones/{referenciaId}, se avisa al comprador (ademas de a Leonardo)", async () => {
+  const { deps, correosEnviados } = depsReembolsoFalsas({
+    obtenerAceptacion: async () => ({ email: "comprador@test.com", idioma: "es" }),
+  });
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps);
+  const alComprador = correosEnviados.filter((c) => c.para === "comprador@test.com");
+  assert.equal(alComprador.length, 1);
+  assert.equal(alComprador[0].idEnvio, "pago-1:reversionComprador");
+  const aLeonardo = correosEnviados.find((c) => c.para === CORREO_LEONARDO);
+  assert.match(aLeonardo!.texto, /comprador@test\.com/);
+  assert.match(aLeonardo!.texto, /YA fue notificado/);
+});
+
+test("Medio 1: sin email en aceptaciones (null) -> 0 avisos al comprador, Leonardo sabe que falta escribirle", async () => {
+  const { deps, correosEnviados } = depsReembolsoFalsas({ obtenerAceptacion: async () => null });
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded", referenciaId: "ref-1" }, deps);
+  assert.equal(correosEnviados.filter((c) => c.para !== CORREO_LEONARDO).length, 0);
+  const aLeonardo = correosEnviados.find((c) => c.para === CORREO_LEONARDO);
+  assert.match(aLeonardo!.texto, /todavía NO fue notificado/);
+});
+
+test("Medio 1: dos avisos casi simultaneos del mismo pago -> 1 solo correo al comprador (reclamo transaccional)", async () => {
+  const { deps, correosEnviados } = depsReembolsoFalsas({
+    obtenerAceptacion: async () => ({ email: "comprador@test.com", idioma: "es" }),
+  });
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps);
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "charged_back", referenciaId: "ref-1" }, deps);
+  assert.equal(correosEnviados.filter((c) => c.para === "comprador@test.com").length, 1);
 });
 
 // ── Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): aviso a Leonardo ──
@@ -466,11 +518,9 @@ test("avisarPagoDobleRequiereReembolso: manda exactamente 1 correo a Leonardo co
   assert.match(correosEnviados[0].texto, /uid-1/);
 });
 
-// Correccion de fusion (vuelta 35, merge con wip/acuses-simple): el log pasa de un string suelto
-// a JSON estructurado con `severity:"ERROR"` — mismo formato que las alertas de acuses
-// (`emitirAlertaTiempoUnaVez`, mas abajo) y que `TAREA_BARRIDO_RECHAZADA`/`BARRIDO_ACUSES_FALLO`
-// (server/tareasFondo.ts), para que la misma metrica de Cloud Logging (docs/ops.md §4) los
-// capture a todos con un solo filtro. Nunca el uid (dato personal).
+// Medio 1 (vuelta 35): mismo formato de log estructurado JSON que las alertas de acuses
+// (`emitirAlertaTiempoUnaVez`, server/notificaciones.ts) — `severity:"ERROR"` + `message` fijo,
+// NUNCA el uid (dato personal), grepable para la misma metrica de Cloud Logging (docs/ops.md §4).
 test("avisarPagoDobleRequiereReembolso: emite el log ALERTA_REEMBOLSO_REQUERIDO en JSON con severity ERROR", async () => {
   const { deps } = depsPagoDobleFalsas();
   const original = console.error;

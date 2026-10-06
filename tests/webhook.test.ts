@@ -643,7 +643,7 @@ for (const status of ["refunded", "charged_back"]) {
     assert.equal(resultado.httpStatus, 200);
     assert.equal(activarPaqueteLlamado, false, `un pago "${status}" nunca debe intentar activar nada`);
     assert.equal(llamadasProcesarReembolso.length, 1);
-    assert.deepEqual(llamadasProcesarReembolso[0], { uid: "uid-1", paymentId: "pago-1", status });
+    assert.deepEqual(llamadasProcesarReembolso[0], { uid: "uid-1", paymentId: "pago-1", status, referenciaId: "ref-1" });
   });
 }
 

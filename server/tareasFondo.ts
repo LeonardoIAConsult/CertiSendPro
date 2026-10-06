@@ -77,6 +77,12 @@ export interface ResultadoBarridoCompleto {
   paginas: number;
   revisados: number;
   reintentados: number;
+  /** M-2 (corrige vuelta 36 del REVISOR_EXTERNO): true si el barrido se CORTO por agotar
+   * `presupuestoMs` antes de terminar todas las paginas — el resto queda para la siguiente
+   * corrida del Scheduler (30 min despues), nunca se pierde ni se trata como error. Opcional
+   * (no todas las implementaciones/dobles de `DepsBarridoTarea.barrer` lo devuelven, ver
+   * tests/tareasFondo.test.ts) para no romper los que simulan la respuesta completa a mano. */
+  detenidoPorTiempo?: boolean;
 }
 
 const TAMANO_PAGINA_DEFECTO = 100;
@@ -85,28 +91,48 @@ const TAMANO_PAGINA_DEFECTO = 100;
 // sin fin si algo queda mal configurado.
 const MAX_PAGINAS_DEFECTO = 50;
 
+// M-2 (corrige vuelta 36 del REVISOR_EXTERNO): el barrido manda cada acuse EN SERIE (nunca en
+// paralelo) y cada envio de correo puede tardar hasta 20s (`TIMEOUT_MS_DEFECTO`,
+// server/avisos.ts) — con varias decenas de pagos pendientes, un disparo del Scheduler puede
+// tardar mucho mas que el viejo `--attempt-deadline=30s` (ver docs/ops.md §3, ahora 600s). 540s
+// (9 min) deja margen bajo esos 600s para que el barrido se corte A SI MISMO y responda ANTES de
+// que Cloud Scheduler lo corte de un timeout — un 200 con `detenidoPorTiempo:true` es mucho mejor
+// que un timeout que ni siquiera deja saber cuanto se alcanzo a procesar.
+const PRESUPUESTO_MS_DEFECTO = 540_000;
+
 /**
  * Recorre TODOS los `pagosProcesados` en paginas (via `deps.obtenerPagina`, cursor de Firestore
  * real o uno sintetico en pruebas), reintentando el acuse de cada candidato elegible
- * (`esCandidatoBarridoAcuse`). Se detiene al llegar a una pagina vacia, sin cursor siguiente, o al
- * tope de `maxPaginas`.
+ * (`esCandidatoBarridoAcuse`). Se detiene al llegar a una pagina vacia, sin cursor siguiente, al
+ * tope de `maxPaginas`, o al agotar `presupuestoMs` de tiempo total (M-2) — en los cuatro casos
+ * devuelve lo que alcanzo a procesar; el resto (si lo hay) lo recoge la siguiente corrida.
+ * `ahoraMs` es inyectable (por defecto `Date.now`) para poder probar el corte por tiempo con un
+ * reloj FIJO, sin depender de temporizadores reales (mismo patron ya aceptado en este proyecto).
  */
 export async function barrerTodosLosPagosPendientes(
   deps: DepsBarridoCompleto = depsBarridoCompletoReales,
   tamanoPagina = TAMANO_PAGINA_DEFECTO,
-  maxPaginas = MAX_PAGINAS_DEFECTO
+  maxPaginas = MAX_PAGINAS_DEFECTO,
+  presupuestoMs = PRESUPUESTO_MS_DEFECTO,
+  ahoraMs: () => number = Date.now
 ): Promise<ResultadoBarridoCompleto> {
+  const inicioMs = ahoraMs();
   let cursor: unknown = null;
   let paginas = 0;
   let revisados = 0;
   let reintentados = 0;
+  let detenidoPorTiempo = false;
 
-  while (paginas < maxPaginas) {
+  recorrido: while (paginas < maxPaginas) {
     const pagina = await deps.obtenerPagina(cursor, tamanoPagina);
     paginas++;
     revisados += pagina.docs.length;
 
     for (const doc of pagina.docs) {
+      if (ahoraMs() - inicioMs >= presupuestoMs) {
+        detenidoPorTiempo = true;
+        break recorrido;
+      }
       if (!esCandidatoBarridoAcuse(doc.data)) continue;
       if (!doc.data.uid) continue; // pago sin uid guardado: nada que reconstruir.
       const pago = pagoProcesadoAcuseDesdeDoc(doc.id, doc.data);
@@ -118,7 +144,7 @@ export async function barrerTodosLosPagosPendientes(
     cursor = pagina.cursorSiguiente;
   }
 
-  return { paginas, revisados, reintentados };
+  return { paginas, revisados, reintentados, detenidoPorTiempo };
 }
 
 // ── Handler del endpoint protegido POST /api/tareas/barrido-acuses ─────────────────────────────

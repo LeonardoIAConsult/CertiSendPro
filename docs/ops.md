@@ -107,7 +107,7 @@ gcloud scheduler jobs create http certisend-barrido-acuses \
   --http-method=POST \
   --oidc-service-account-email="certisend-scheduler@clever-spirit-436820-t7.iam.gserviceaccount.com" \
   --oidc-token-audience="https://certisend-api-522374745014.us-central1.run.app" \
-  --attempt-deadline=30s \
+  --attempt-deadline=600s \
   --max-retry-attempts=1
 ```
 
@@ -118,6 +118,13 @@ Notas:
 - `--max-retry-attempts=1`: un reintento basta — el endpoint es idempotente (el reclamo
   transaccional de `server/cuentas.ts` ya evita reintentar de más) y el siguiente disparo (30 min
   después) vuelve a cubrir cualquier pendiente.
+- M-2 (corrige vuelta 36 del REVISOR_EXTERNO): `--attempt-deadline` sube de 30s a 600s — el
+  barrido manda cada acuse EN SERIE (nunca en paralelo) y cada envío puede tardar hasta 20s
+  (`TIMEOUT_MS_DEFECTO`, `server/avisos.ts`); con decenas de pagos pendientes, 30s se agotaba
+  mucho antes de terminar una sola página. `barrerTodosLosPagosPendientes`
+  (`server/tareasFondo.ts`) se acota a su vez a 540s de presupuesto total (menos que los 600s del
+  job, con margen) — si se agota a mitad de un barrido, corta ahí y devuelve lo que alcanzó a
+  procesar; el resto queda para la siguiente corrida (30 min después), nunca se pierde.
 
 Verificar que el job quedó bien dado de alta:
 
@@ -156,6 +163,12 @@ estructurado (`severity:"ERROR"`, nunca uid), cuando un pago aprobado NO se acti
 un Paquete vigente de OTRO pago (pago doble con 2 preferencias); la devolución del dinero en sí
 (Tarea 9) sigue siendo manual, ver el plan.
 
+B-2 (corrige vuelta 36 del REVISOR_EXTERNO): el filtro también incluye `RUTA_TAREAS_NO_REGISTRADA`
+— `server/tareasFondo.ts` (`verificarRutaTareasRegistrada`, §1) ya lo emite al arrancar, mismo
+formato de log estructurado, si `registrarRutasTareas` dejara de registrar la ruta del barrido (p.
+ej. un refactor que borre esa línea sin querer): sin esta alerta, el barrido completo deja de
+existir y nadie se entera hasta que un acuse lleva días pendiente.
+
 Crear la métrica basada en logs (nunca cambiar el texto de estos marcadores sin actualizar
 también este filtro):
 
@@ -165,7 +178,7 @@ gcloud logging metrics create certisend_alertas_acuse \
   --description="Acuses de compra atrasados/abandonados, fallos del barrido y reembolsos que requieren accion manual" \
   --log-filter='resource.type="cloud_run_revision"
 resource.labels.service_name="certisend-api"
-jsonPayload.message=~"ALERTA_ACUSE_(ATRASADO|ABANDONADO)|ALERTA_REEMBOLSO_REQUERIDO|BARRIDO_ACUSES_FALLO"'
+jsonPayload.message=~"ALERTA_ACUSE_(ATRASADO|ABANDONADO)|ALERTA_REEMBOLSO_REQUERIDO|BARRIDO_ACUSES_FALLO|RUTA_TAREAS_NO_REGISTRADA"'
 ```
 
 Crear la política de alerta (notifica por correo a `contacto@leonardoantolinez.com` — crear antes
@@ -178,12 +191,18 @@ gcloud alpha monitoring policies create \
   --display-name="CertiSend: acuse atrasado/abandonado o reembolso pendiente" \
   --condition-display-name="Al menos 1 ocurrencia en 15 minutos" \
   --condition-filter='metric.type="logging.googleapis.com/user/certisend_alertas_acuse" AND resource.type="cloud_run_revision"' \
-  --condition-threshold-value=0 \
-  --condition-threshold-comparison=COMPARISON_GT \
-  --condition-threshold-duration=0s \
-  --condition-aggregations='[{"alignmentPeriod":"900s","perSeriesAligner":"ALIGN_COUNT"}]' \
+  --aggregation='{"alignmentPeriod":"900s","perSeriesAligner":"ALIGN_COUNT"}' \
+  --if='> 0' \
+  --duration=0s \
   --notification-channels="NOTIFICATION_CHANNEL_ID"
 ```
+
+M-1 (corrige vuelta 36 del REVISOR_EXTERNO): el comando de arriba usaba flags que `gcloud alpha
+monitoring policies create` no tiene (`--condition-threshold-value`, `--condition-threshold-comparison`,
+`--condition-threshold-duration`, `--condition-aggregations`) — nunca se habría podido ejecutar.
+Los flags reales (confirmados con `gcloud alpha monitoring policies create --help`, solo lectura)
+son `--aggregation` (un solo objeto JSON, no un arreglo), `--if` (`"> 0"`, no un valor+comparador
+separados) y `--duration`.
 
 Nota: la sintaxis exacta de `gcloud alpha monitoring policies create` puede variar según la
 versión del SDK instalado; si falla, crear la política equivalente desde la consola (Cloud
@@ -195,7 +214,7 @@ el correo `contacto@leonardoantolinez.com`).
 
 La alerta de §4 lee los logs que escribe LA APLICACIÓN (`resource.type="cloud_run_revision"`) —
 nunca ve un fallo que ocurre ANTES de que la aplicación llegue a loguear nada: un `401`/`403`
-sostenido por un token OIDC mal configurado, un timeout del `--attempt-deadline` (30s, §3), o
+sostenido por un token OIDC mal configurado, un timeout del `--attempt-deadline` (600s, §3), o
 cualquier respuesta no-2xx que Cloud Scheduler reporte en SU PROPIO log de ejecución
 (`resource.type="cloud_scheduler_job"`). Esta segunda alerta cubre esa capa, independiente de §4 —
 si el job deja de poder disparar el barrido, esto avisa aunque la aplicación nunca llegue a
@@ -218,10 +237,9 @@ gcloud alpha monitoring policies create \
   --display-name="CertiSend: fallo del job de Cloud Scheduler certisend-barrido-acuses" \
   --condition-display-name="Al menos 1 ocurrencia en 15 minutos" \
   --condition-filter='metric.type="logging.googleapis.com/user/certisend_barrido_job_fallos" AND resource.type="cloud_scheduler_job"' \
-  --condition-threshold-value=0 \
-  --condition-threshold-comparison=COMPARISON_GT \
-  --condition-threshold-duration=0s \
-  --condition-aggregations='[{"alignmentPeriod":"900s","perSeriesAligner":"ALIGN_COUNT"}]' \
+  --aggregation='{"alignmentPeriod":"900s","perSeriesAligner":"ALIGN_COUNT"}' \
+  --if='> 0' \
+  --duration=0s \
   --notification-channels="NOTIFICATION_CHANNEL_ID"
 ```
 
@@ -250,21 +268,26 @@ escribir esta orden** — mismo guardarraíl que el resto de este documento):
 
 ```bash
 echo -n "EL_VALOR_GENERADO_ARRIBA" | gcloud secrets create huella-lote-secret \
-  --project=TU_PROYECTO \
+  --project=clever-spirit-436820-t7 \
   --data-file=- \
   --replication-policy="automatic"
 
-gcloud run services update certisendpro \
-  --project=TU_PROYECTO \
-  --region=TU_REGION \
+gcloud run services update certisend-api \
+  --project=clever-spirit-436820-t7 \
+  --region=us-central1 \
   --update-secrets=HUELLA_LOTE_SECRET=huella-lote-secret:latest
 ```
+
+B-3 (corrige vuelta 36 del REVISOR_EXTERNO): los tres comandos de esta sección decían
+`--project=TU_PROYECTO`/`--region=TU_REGION` (placeholders genericos) y el segundo apuntaba al
+servicio `certisendpro` — que no es el nombre real (`certisend-api`, ver §0). Se reemplazan por
+los valores reales del proyecto, igual que el resto de esta página.
 
 Verificar que quedó encendido, sin revelar el valor:
 
 ```bash
-curl -s https://TU_SERVICIO.run.app/api/health
-# {"ok":true,"huella":true}
+curl -s https://certisend-api-522374745014.us-central1.run.app/api/health
+# {"ok":true,"huella":true,"proveedor":true,"relay":true}
 ```
 
 Rotar el secreto (crear una nueva versión, sin publicarla hasta estar listo):

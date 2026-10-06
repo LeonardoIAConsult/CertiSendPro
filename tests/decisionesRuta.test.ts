@@ -1,54 +1,137 @@
-// Cableado de rutas (correccion vuelta 33, 2026-10-06): la decision del send-email (huella ->
-// 409, sin secreto -> 503) y la decision de autorizacion por version en /api/lote/iniciar se
-// extrajeron a funciones PURAS con dependencias inyectadas (`decidirEnvioConHuella` en
-// server/huellaLote.ts, `decidirAutorizacionLote` en server/cuentas.ts) — probadas por su cuenta
-// en tests/huellaLote.test.ts y tests/autorizacionDatos.test.ts.
+// Correccion vuelta 35/36 (orden del Brain, 2026-10-06): esta prueba antes solo greppeaba el
+// TEXTO FUENTE de server.ts (confirmaba que la palabra "decidirEnvioConHuella"/
+// "decidirAutorizacionLote" aparecia cerca de la ruta, nunca que la decision fuera correcta — una
+// prueba que no prueba nada). Ahora `server.ts` delega las dos decisiones en funciones extraidas
+// con dependencias inyectadas (`server/decisionesRuta.ts`) y esta prueba ejercita esa logica real.
 //
-// Esta prueba cubre lo que esas dos pruebas NO pueden cubrir por si solas: que la RUTA de verdad
-// (server.ts) delega en esas funciones en vez de reimplementar la logica inline. server.ts
-// importa `firebase-admin`/`vite` y arranca un servidor real al importarse (`startServer()` al
-// final del modulo) — no se puede importar aqui sin montar Express/Firestore reales (mismo
-// patron ya aceptado en este proyecto para "M1" de tests/tareasFondo.test.ts: "nada prueba que la
-// LINEA siga presente DENTRO de server.ts" se acepto como limite declarado). En vez de eso, se lee
-// el CODIGO FUENTE de server.ts como texto y se confirma que las dos rutas llaman literalmente a
-// las funciones ya probadas — si alguien quita esa llamada (mutacion pedida por la orden: "si se
-// quita la llamada en la ruta, debe caer una prueba"), esta prueba cae.
+// Mutaciones pedidas por la orden (las dos deben hacer caer una prueba):
+//   1. "ignora el resultado" — si `decidirEnvioSendEmail` dejara de propagar `decision.ok===false`
+//      de `decidirEnvioConHuella` (p. ej. devolviera `{ok:true}` siempre), un correo cuya huella
+//      NO coincide se aceptaria igual.
+//   2. "usa el correo crudo" — si se llamara a `decidirEnvioConHuella` con `String(entrada.to)` en
+//      vez del correo YA saneado (`sanitizarCorreo`), un correo con un caracter invisible/espacio
+//      interno (saneado SI coincide con la huella guardada) se rechazaria con 409 por error.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import path from "node:path";
+import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta } from "../server/decisionesRuta";
+import { huellaPar } from "../server/huellaLote";
+import type { AutorizacionDatos } from "../server/cuentas";
+import { Timestamp } from "firebase-admin/firestore";
 
-const FUENTE_SERVER = fs.readFileSync(path.join(process.cwd(), "server.ts"), "utf8");
+const SECRETO = "secreto-de-pruebas-bien-largo";
+const LOTE_ID = "lote-1";
 
-test("server.ts importa decidirEnvioConHuella desde server/huellaLote", () => {
-  assert.match(FUENTE_SERVER, /import\s*\{[^}]*\bdecidirEnvioConHuella\b[^}]*\}\s*from\s*"\.\/server\/huellaLote"/);
+// ── decidirEnvioSendEmail ────────────────────────────────────────────────────────────────────
+
+test("decidirEnvioSendEmail: correo con formato invalido -> 400, nunca llega a mirar la huella", async () => {
+  let llamadoObtenerHuellas = false;
+  const resultado = await decidirEnvioSendEmail(
+    LOTE_ID,
+    { to: "no-es-un-correo", fila: 1, pageIndex: 1 },
+    { obtenerHuellasLote: async () => { llamadoObtenerHuellas = true; return null; }, secretoHuella: SECRETO }
+  );
+  assert.equal(resultado.ok, false);
+  if (resultado.ok === false) assert.equal(resultado.httpStatus, 400);
+  assert.equal(llamadoObtenerHuellas, false);
 });
 
-test("server.ts: la ruta /api/send-email llama a decidirEnvioConHuella (no reimplementa la decision inline)", () => {
-  const idx = FUENTE_SERVER.indexOf('app.post("/api/send-email"');
-  assert.ok(idx >= 0, "no se encontro la ruta /api/send-email en server.ts");
-  const bloque = FUENTE_SERVER.slice(idx, idx + 6000);
-  assert.match(bloque, /decidirEnvioConHuella\(/, "la ruta /api/send-email ya no llama a decidirEnvioConHuella");
+test("decidirEnvioSendEmail: pageIndex/fila no numericos -> 400", async () => {
+  const resultado = await decidirEnvioSendEmail(
+    LOTE_ID,
+    { to: "ok@test.com", fila: "no-numero", pageIndex: 1 },
+    { obtenerHuellasLote: async () => null, secretoHuella: SECRETO }
+  );
+  assert.equal(resultado.ok, false);
+  if (resultado.ok === false) assert.equal(resultado.httpStatus, 400);
 });
 
-test("server.ts importa decidirAutorizacionLote desde server/cuentas", () => {
-  assert.match(FUENTE_SERVER, /import\s*\{[^}]*\bdecidirAutorizacionLote\b[^}]*\}\s*from\s*"\.\/server\/cuentas"/);
+test("decidirEnvioSendEmail: sin HUELLA_LOTE_SECRET -> 503 (falla cerrado)", async () => {
+  const resultado = await decidirEnvioSendEmail(
+    LOTE_ID,
+    { to: "ok@test.com", fila: 1, pageIndex: 1 },
+    { obtenerHuellasLote: async () => null, secretoHuella: undefined }
+  );
+  assert.equal(resultado.ok, false);
+  if (resultado.ok === false) assert.equal(resultado.httpStatus, 503);
 });
 
-test("server.ts: la ruta /api/lote/iniciar llama a decidirAutorizacionLote (no reimplementa la comparacion de version inline)", () => {
-  const idx = FUENTE_SERVER.indexOf('app.post("/api/lote/iniciar"');
-  assert.ok(idx >= 0, "no se encontro la ruta /api/lote/iniciar en server.ts");
-  const bloque = FUENTE_SERVER.slice(idx, idx + 6000);
-  assert.match(bloque, /decidirAutorizacionLote\(/, "la ruta /api/lote/iniciar ya no llama a decidirAutorizacionLote");
+test("decidirEnvioSendEmail: huella que SI coincide -> ok:true con el correo saneado", async () => {
+  const huella = huellaPar({ pagina: 1, fila: 1, correo: "ok@test.com" }, SECRETO);
+  const resultado = await decidirEnvioSendEmail(
+    LOTE_ID,
+    { to: "ok@test.com", fila: 1, pageIndex: 1 },
+    { obtenerHuellasLote: async () => [huella], secretoHuella: SECRETO }
+  );
+  assert.equal(resultado.ok, true);
+  if (resultado.ok === true) assert.equal(resultado.correo, "ok@test.com");
 });
 
-test("server.ts importa decidirRegistroAutorizacion desde server/cuentas", () => {
-  assert.match(FUENTE_SERVER, /import\s*\{[^}]*\bdecidirRegistroAutorizacion\b[^}]*\}\s*from\s*"\.\/server\/cuentas"/);
+test("decidirEnvioSendEmail: huella que NO coincide -> 409, el resultado de decidirEnvioConHuella NUNCA se ignora", async () => {
+  const huellaDeOtroCorreo = huellaPar({ pagina: 1, fila: 1, correo: "otro@test.com" }, SECRETO);
+  const resultado = await decidirEnvioSendEmail(
+    LOTE_ID,
+    { to: "ok@test.com", fila: 1, pageIndex: 1 },
+    { obtenerHuellasLote: async () => [huellaDeOtroCorreo], secretoHuella: SECRETO }
+  );
+  assert.equal(resultado.ok, false);
+  if (resultado.ok === false) assert.equal(resultado.httpStatus, 409);
 });
 
-test("server.ts: la ruta POST /api/autorizacion-datos llama a decidirRegistroAutorizacion", () => {
-  const idx = FUENTE_SERVER.indexOf('app.post("/api/autorizacion-datos"');
-  assert.ok(idx >= 0, "no se encontro la ruta POST /api/autorizacion-datos en server.ts");
-  const bloque = FUENTE_SERVER.slice(idx, idx + 3000);
-  assert.match(bloque, /decidirRegistroAutorizacion\(/, "la ruta POST /api/autorizacion-datos ya no llama a decidirRegistroAutorizacion");
+test("decidirEnvioSendEmail: el correo se SANEA antes de comparar la huella (espacio interno + mayusculas)", async () => {
+  // La huella guardada en /api/lote/iniciar se calculo sobre el correo YA SANEADO ("ok@test.com").
+  // Si la decision usara `String(entrada.to)` crudo (con el espacio y las mayusculas) en vez del
+  // saneado, esta huella NUNCA coincidiria -> 409 por error, aunque el usuario confirmo
+  // exactamente este correo en el PASO 1.
+  const huella = huellaPar({ pagina: 2, fila: 5, correo: "ok@test.com" }, SECRETO);
+  const resultado = await decidirEnvioSendEmail(
+    LOTE_ID,
+    { to: " OK@Test.com ", fila: 5, pageIndex: 2 },
+    { obtenerHuellasLote: async () => [huella], secretoHuella: SECRETO }
+  );
+  assert.equal(resultado.ok, true, "el correo saneado debe coincidir con la huella guardada");
+  if (resultado.ok === true) assert.equal(resultado.correo, "ok@test.com");
+});
+
+// ── decidirAutorizacionLoteRuta ──────────────────────────────────────────────────────────────
+
+const VERSION_VIGENTE = "2.3";
+
+function autorizacionFalsa(version: string): AutorizacionDatos {
+  return { version, fecha: Timestamp.now(), idioma: "es", texto: "texto-aceptado" };
+}
+
+test("decidirAutorizacionLoteRuta: sin autorizacion guardada -> 403 motivo autorizacion", async () => {
+  const resultado = await decidirAutorizacionLoteRuta("uid-1", VERSION_VIGENTE, {
+    obtenerAutorizacionDatos: async () => null,
+  });
+  assert.equal(resultado.ok, false);
+  if (resultado.ok === false) {
+    assert.equal(resultado.httpStatus, 403);
+    assert.equal(resultado.motivo, "autorizacion");
+  }
+});
+
+test("decidirAutorizacionLoteRuta: autorizacion de una VERSION VIEJA -> 403 (se vuelve a pedir)", async () => {
+  const resultado = await decidirAutorizacionLoteRuta("uid-1", VERSION_VIGENTE, {
+    obtenerAutorizacionDatos: async () => autorizacionFalsa("2.2"),
+  });
+  assert.equal(resultado.ok, false);
+});
+
+test("decidirAutorizacionLoteRuta: autorizacion de la version VIGENTE -> ok:true", async () => {
+  const resultado = await decidirAutorizacionLoteRuta("uid-1", VERSION_VIGENTE, {
+    obtenerAutorizacionDatos: async () => autorizacionFalsa(VERSION_VIGENTE),
+  });
+  assert.equal(resultado.ok, true);
+});
+
+test("decidirAutorizacionLoteRuta: pasa el uid tal cual a obtenerAutorizacionDatos (nunca otro)", async () => {
+  let uidRecibido: string | null = null;
+  await decidirAutorizacionLoteRuta("uid-especifico", VERSION_VIGENTE, {
+    obtenerAutorizacionDatos: async (uid) => {
+      uidRecibido = uid;
+      return null;
+    },
+  });
+  assert.equal(uidRecibido, "uid-especifico");
 });

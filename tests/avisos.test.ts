@@ -14,7 +14,10 @@ import {
   construirAvisoReembolsoLeonardo,
   construirAvisoFalloWebhookLeonardo,
   construirAvisoBloqueoProveedorLeonardo,
+  construirAvisoReversionComprador,
   tienePlaceholderPendiente,
+  proveedorConfigurado,
+  relayConfigurado,
   PROVEEDOR_NOMBRE,
   PROVEEDOR_TELEFONO,
   PROVEEDOR_CORREO,
@@ -289,13 +292,77 @@ test("construirAvisoVentaLeonardo: incluye plan, monto, uid y paymentId (sin dat
 });
 
 test("construirAvisoReembolsoLeonardo: distingue contracargo de reembolso y si se revirtio la cuenta", () => {
-  const revertido = construirAvisoReembolsoLeonardo({ uid: "u", paymentId: "p", status: "charged_back", cuentaRevertida: true });
+  const revertido = construirAvisoReembolsoLeonardo({
+    uid: "u", paymentId: "p", status: "charged_back", cuentaRevertida: true,
+    correoComprador: "comprador@test.com", avisoCompradorEnviado: true,
+  });
   assert.match(revertido.asunto, /Contracargo/);
   assert.match(revertido.texto, /revirtió/);
 
-  const noActivo = construirAvisoReembolsoLeonardo({ uid: "u", paymentId: "p", status: "refunded", cuentaRevertida: false });
+  const noActivo = construirAvisoReembolsoLeonardo({
+    uid: "u", paymentId: "p", status: "refunded", cuentaRevertida: false,
+    correoComprador: null, avisoCompradorEnviado: false,
+  });
   assert.match(noActivo.asunto, /Reembolso/);
   assert.match(noActivo.texto, /NO se tocó/);
+});
+
+// ── Medio 1 (vuelta 35): aviso de reembolso a Leonardo incluye el correo del comprador y si ya ──
+// se le avisó o si todavía falta escribirle a mano (Terminos sec. 9.2).
+test("construirAvisoReembolsoLeonardo: incluye el correo del comprador y si YA se le avisó", () => {
+  const yaAvisado = construirAvisoReembolsoLeonardo({
+    uid: "u", paymentId: "p", status: "refunded", cuentaRevertida: true,
+    correoComprador: "comprador@test.com", avisoCompradorEnviado: true,
+  });
+  assert.match(yaAvisado.texto, /comprador@test\.com/);
+  assert.match(yaAvisado.texto, /YA fue notificado/);
+});
+
+test("construirAvisoReembolsoLeonardo: sin correo del comprador, dice que falta escribirle a mano", () => {
+  const sinCorreo = construirAvisoReembolsoLeonardo({
+    uid: "u", paymentId: "p", status: "refunded", cuentaRevertida: false,
+    correoComprador: null, avisoCompradorEnviado: false,
+  });
+  assert.match(sinCorreo.texto, /todavía NO fue notificado/);
+  assert.match(sinCorreo.texto, /escríbele/);
+});
+
+// ── Medio 1 (vuelta 35): aviso de reversion al COMPRADOR (Terminos sec. 9.2) ────────────────────
+test("construirAvisoReversionComprador: ES cumple §9.2 con 'te lo informamos al correo de tu cuenta'", () => {
+  const { asunto, texto } = construirAvisoReversionComprador({ idioma: "es", paymentId: "pago-1" });
+  assert.match(asunto, /pago-1/);
+  assert.match(texto, /te lo informamos al correo de tu cuenta/i);
+  assert.match(texto, /sección 9\.2/);
+});
+
+test("construirAvisoReversionComprador: EN tiene su propio texto (no una copia del ES)", () => {
+  const { texto } = construirAvisoReversionComprador({ idioma: "en", paymentId: "pago-1" });
+  assert.match(texto, /we inform you at your account/i);
+  assert.doesNotMatch(texto, /te lo informamos/i);
+});
+
+// ── Medio 2 (vuelta 35): proveedorConfigurado/relayConfigurado para GET /api/health ─────────────
+test("proveedorConfigurado: false si el nombre esta vacio o es el marcador [PENDIENTE]", () => {
+  assert.equal(proveedorConfigurado(""), false);
+  assert.equal(proveedorConfigurado("[PENDIENTE]"), false);
+  assert.equal(proveedorConfigurado("  [PENDIENTE]  "), false);
+});
+
+test("proveedorConfigurado: true con un nombre real", () => {
+  assert.equal(proveedorConfigurado("Leonardo Antolinez"), true);
+});
+
+test("relayConfigurado: false si falta cualquiera de las dos variables", () => {
+  assert.equal(relayConfigurado({}), false);
+  assert.equal(relayConfigurado({ AVISOS_RELAY_URL: "https://x" }), false);
+  assert.equal(relayConfigurado({ AVISOS_RELAY_SECRET: "s" }), false);
+  assert.equal(relayConfigurado({ AVISOS_RELAY_URL: "  ", AVISOS_RELAY_SECRET: "s" }), false);
+});
+
+test("relayConfigurado: true con las dos variables presentes, SIN revelar sus valores en el resultado", () => {
+  const resultado = relayConfigurado({ AVISOS_RELAY_URL: "https://x", AVISOS_RELAY_SECRET: "s" });
+  assert.equal(resultado, true);
+  assert.equal(typeof resultado, "boolean");
 });
 
 test("construirAvisoFalloWebhookLeonardo: incluye el paymentId y el numero de fallos", () => {

@@ -22,6 +22,7 @@ import {
   construirAvisoReembolsoLeonardo,
   construirAvisoBloqueoProveedorLeonardo,
   construirAvisoPagoDobleLeonardo,
+  construirAvisoReversionComprador,
   tienePlaceholderPendiente,
   type DatosCorreo,
   type DatosConfirmacionCompra,
@@ -78,7 +79,7 @@ export interface NotificarActivacionDeps {
   construirCorreoComprador(datos: DatosConfirmacionCompra): { asunto: string; texto: string };
 }
 
-const depsNotificarActivacionReales: NotificarActivacionDeps = {
+export const depsNotificarActivacionReales: NotificarActivacionDeps = {
   reclamarEnvioCorreo: reclamarEnvioCorreoReal,
   marcarCorreoEnviado: marcarCorreoEnviadoReal,
   liberarReclamoCorreo: liberarReclamoCorreoReal,
@@ -127,10 +128,14 @@ async function intentarEnviarUnDestinatario(
  * mando). Si el reintento TAMBIEN falla, se deja un log con un marcador fijo y grepable
  * (`RECLAMO_SIN_SALIDA`) para resolverlo a mano en Firestore — mismo patron ya aceptado en este
  * proyecto para la devolucion manual de la Tarea 9.
+ *
+ * `deps` solo exige `marcarCorreoEnviado`/`liberarReclamoCorreo` (no el resto de
+ * `NotificarActivacionDeps`) para que `avisarReembolsoPaquete` (Medio 1, vuelta 35) pueda
+ * reutilizar la misma funcion para cerrar el reclamo del aviso de reversion al comprador.
  */
 async function cerrarReclamoConReintento(
   paymentId: string,
-  deps: NotificarActivacionDeps,
+  deps: Pick<NotificarActivacionDeps, "marcarCorreoEnviado" | "liberarReclamoCorreo">,
   destinatario: DestinatarioCorreo,
   envioOk: boolean,
   reclamadoEn: Date
@@ -234,12 +239,60 @@ export async function notificarActivacionPaquete(
 export interface AvisarReembolsoDeps {
   revertirPago(paymentId: string, uid: string): Promise<ResultadoReversion>;
   enviarCorreo(datos: DatosCorreo): Promise<boolean>;
+  /** Medio 1 (vuelta 35): para leer `aceptaciones/{referenciaId}.email` e informarle al comprador
+   * la reversion (Terminos sec. 9.2) — mismo mecanismo de reclamo que `notificarActivacionPaquete`. */
+  obtenerAceptacion(id: string): Promise<{ email: string | null; idioma: Idioma } | null>;
+  reclamarEnvioCorreo(paymentId: string, destinatario: DestinatarioCorreo, ahora: Date): Promise<boolean>;
+  marcarCorreoEnviado(paymentId: string, destinatario: DestinatarioCorreo, reclamadoEn: Date): Promise<void>;
+  liberarReclamoCorreo(paymentId: string, destinatario: DestinatarioCorreo, reclamadoEn: Date): Promise<void>;
 }
 
-const depsAvisarReembolsoReales: AvisarReembolsoDeps = {
+export const depsAvisarReembolsoReales: AvisarReembolsoDeps = {
   revertirPago: revertirPagoSiNoRevertidoReal,
   enviarCorreo: enviarCorreoReal,
+  obtenerAceptacion: obtenerAceptacionReal,
+  reclamarEnvioCorreo: reclamarEnvioCorreoReal,
+  marcarCorreoEnviado: marcarCorreoEnviadoReal,
+  liberarReclamoCorreo: liberarReclamoCorreoReal,
 };
+
+/**
+ * Medio 1 (vuelta 35): avisa al COMPRADOR (mismo mecanismo de reclamo transaccional que
+ * `notificarActivacionPaquete` — nunca duplica, nunca lanza) que su pago fue revertido, tal como
+ * exige Terminos sec. 9.2 ("te lo informamos al correo de tu cuenta" — la via mas simple que
+ * cumple la seccion: mandarlo directo a ese correo, sin que Leonardo tenga que escribirlo a mano).
+ * Devuelve `{correoComprador, avisoEnviado}` para que `avisarReembolsoPaquete` pueda decirle a
+ * Leonardo si todavia falta escribirle a mano (si no se encontro correo, o si el envio fallo).
+ */
+async function avisarReversionAlComprador(
+  datos: { paymentId: string; referenciaId: string },
+  ahora: Date,
+  deps: AvisarReembolsoDeps
+): Promise<{ correoComprador: string | null; avisoEnviado: boolean }> {
+  try {
+    const aceptacion = await deps.obtenerAceptacion(datos.referenciaId);
+    const correoComprador = aceptacion?.email ?? null;
+    if (!correoComprador) return { correoComprador: null, avisoEnviado: false };
+
+    const reclamado = await deps.reclamarEnvioCorreo(datos.paymentId, "reversionComprador", ahora);
+    if (!reclamado) {
+      // Ya se reclamo/envio antes (reintento del mismo evento del webhook, o el barrido de
+      // notificaciones.test.ts simultaneo) — no es un fallo, es la razon de ser del reclamo.
+      return { correoComprador, avisoEnviado: true };
+    }
+
+    const { asunto, texto } = construirAvisoReversionComprador({
+      idioma: aceptacion?.idioma ?? "es",
+      paymentId: datos.paymentId,
+    });
+    const ok = await deps.enviarCorreo({ para: correoComprador, asunto, texto, idEnvio: `${datos.paymentId}:reversionComprador` });
+    await cerrarReclamoConReintento(datos.paymentId, deps, "reversionComprador", ok, ahora);
+    return { correoComprador, avisoEnviado: ok };
+  } catch (error: any) {
+    console.error(`[NOTIFICACIONES] fallo al avisar la reversion al comprador. paymentId=${datos.paymentId}:`, error?.message || error);
+    return { correoComprador: null, avisoEnviado: false };
+  }
+}
 
 /**
  * Tarea 9: ante un reembolso/contracargo, revierte la cuenta a Gratis SI el pago era el activo
@@ -254,20 +307,27 @@ const depsAvisarReembolsoReales: AvisarReembolsoDeps = {
  * `server/webhook.ts` responda 500 y Mercado Pago reintente el aviso completo, en vez de tragar el
  * error y arriesgarse a que una cuenta que debia revertirse se quede en Paquete/Pro. El aviso a
  * Leonardo (una vez que la reversion YA tuvo exito) si es best-effort: nunca debe tumbar una
- * reversion que ya se aplico.
+ * reversion que ya se aplico. El aviso al COMPRADOR (Medio 1, vuelta 35) es igualmente best-effort
+ * y nunca condiciona el de Leonardo (si falla, el texto de arriba simplemente le dice que falta
+ * escribirle a mano).
  */
 export async function avisarReembolsoPaquete(
-  datos: { uid: string; paymentId: string; status: string },
-  deps: AvisarReembolsoDeps = depsAvisarReembolsoReales
+  datos: { uid: string; paymentId: string; status: string; referenciaId: string },
+  deps: AvisarReembolsoDeps = depsAvisarReembolsoReales,
+  ahora: Date = new Date()
 ): Promise<void> {
   const resultado = await deps.revertirPago(datos.paymentId, datos.uid);
   if (resultado === "ya_procesado" || resultado === "ignorado") return;
+
+  const { correoComprador, avisoEnviado } = await avisarReversionAlComprador(datos, ahora, deps);
 
   const { asunto, texto } = construirAvisoReembolsoLeonardo({
     uid: datos.uid,
     paymentId: datos.paymentId,
     status: datos.status,
     cuentaRevertida: resultado === "revertido",
+    correoComprador,
+    avisoCompradorEnviado: avisoEnviado,
   });
   try {
     await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto, idEnvio: `${datos.paymentId}:reembolso` });
@@ -281,7 +341,7 @@ export interface AvisarPagoDobleDeps {
   enviarCorreo(datos: DatosCorreo): Promise<boolean>;
 }
 
-const depsAvisarPagoDobleReales: AvisarPagoDobleDeps = { enviarCorreo: enviarCorreoReal };
+export const depsAvisarPagoDobleReales: AvisarPagoDobleDeps = { enviarCorreo: enviarCorreoReal };
 
 /**
  * Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): avisa a Leonardo

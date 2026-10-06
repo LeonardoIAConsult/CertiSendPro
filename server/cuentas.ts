@@ -435,7 +435,13 @@ export async function activarPaqueteSiNoProcesado(
 // vez de bloquear para siempre. Un reclamo "reclamado" FRESCO (dentro del umbral) sigue bloqueando
 // igual que antes: dos intentos simultaneos de recuperar un reclamo atascado solo dejan ganar a
 // uno (ver tests/reintentoAcuse.test.ts).
-export type DestinatarioCorreo = "comprador" | "leonardo" | "bloqueoProveedor" | "acuse20h" | "acuse48h";
+export type DestinatarioCorreo =
+  | "comprador"
+  | "leonardo"
+  | "bloqueoProveedor"
+  | "acuse20h"
+  | "acuse48h"
+  | "reversionComprador";
 
 /** M37: un reclamo "reclamado" de AL MENOS 10 minutos se trata como libre (B3, corrige vuelta 30:
  * antes el borde exacto de los 10 minutos NO se consideraba atascado por usar `>` en vez de `>=`).
@@ -449,6 +455,7 @@ function campoCorreoDestinatario(destinatario: DestinatarioCorreo): string {
   if (destinatario === "leonardo") return "correoLeonardo";
   if (destinatario === "acuse20h") return "avisoAcuse20h";
   if (destinatario === "acuse48h") return "avisoAcuse48h";
+  if (destinatario === "reversionComprador") return "avisoReversionComprador";
   return "avisoBloqueoProveedor";
 }
 

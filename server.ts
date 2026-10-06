@@ -27,27 +27,34 @@ import {
   obtenerHuellasLote,
   normalizarIdioma,
   textoAutorizacionDatos,
-  decidirAutorizacionLote,
   decidirRegistroAutorizacion,
 } from "./server/cuentas";
 import {
   huellasLote,
   huellaConfigurada,
   validarSecretoYPares,
-  decidirEnvioConHuella,
   type ParConfirmacion,
 } from "./server/huellaLote";
-import { sanitizarCorreo } from "./shared/correo";
+import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta } from "./server/decisionesRuta";
 import { trmHoy, copDesdeUsd } from "./server/trm";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete } from "./server/cobroPaquete";
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
-import { enviarCorreo, construirAvisoFalloWebhookLeonardo, PROVEEDOR_NOMBRE } from "./server/avisos";
+import {
+  enviarCorreo,
+  construirAvisoFalloWebhookLeonardo,
+  PROVEEDOR_NOMBRE,
+  proveedorConfigurado,
+  relayConfigurado,
+} from "./server/avisos";
 import {
   notificarActivacionPaquete,
   avisarReembolsoPaquete,
   avisarPagoDobleRequiereReembolso,
   CORREO_LEONARDO,
+  depsNotificarActivacionReales,
+  depsAvisarReembolsoReales,
+  depsAvisarPagoDobleReales,
 } from "./server/notificaciones";
 import { registrarRutasTareas, verificarRutaTareasRegistrada } from "./server/tareasFondo";
 
@@ -569,50 +576,26 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       return res.status(400).json({ error: "Faltan parámetros obligatorios del correo o el archivo PDF" });
     }
 
-    // GRAVE 3 (correccion vuelta 33, 2026-10-06): sanitizador UNICO compartido con
-    // `normalizarCorreo` (server/huellaLote.ts) y con el cliente al construir `pares`. Antes
-    // este `cleanTo` quitaba caracteres invisibles y espacios internos, pero `normalizarCorreo`
-    // solo hacia `.trim().toLowerCase()`; un correo con un caracter de ancho cero o un espacio
-    // interno producia una huella distinta en cada lado y el envio quedaba en 409 permanente.
-    const cleanTo = sanitizarCorreo(String(to || ""));
-
-    // Check if the email address is structurally valid to avoid raw Gmail "Invalid To header" errors.
-    // If the user mapped columns incorrectly, this will fail-fast with an informative error.
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(cleanTo)) {
-      await liberarReserva(loteReservado, req.uid!);
-      loteReservado = null;
-      return res.status(400).json({
-        error: `La dirección de correo "${cleanTo}" no tiene un formato válido (p. ej., usuario@dominio.com). Por favor, en el PASO 1 (Configuración de Columnas), asegúrate de haber mapeado la 'COLUMNA DE CORREO' con la columna de tu Google Sheet que contiene los correos electrónicos reales.`
-      });
-    }
-
-    // Medio 3 (correccion vuelta 31, 2026-10-06): la huella prueba lo que de verdad se envia. Se
-    // recalcula el HMAC del par pagina-fila-correo y se exige que coincida con una de las huellas
-    // que /api/lote/iniciar guardo en lotes/{loteId}.confirmacion al confirmar ESTE lote — nunca
-    // basta con que el navegador mande un par cualquiera, tiene que ser uno de los que de verdad
-    // se autorizaron para este lote. GRAVE 2: falla cerrado (503) si falta el secreto.
-    const filaNum = Number(fila);
-    const pageIndexNum = Number(pageIndex);
-    if (!Number.isFinite(filaNum) || !Number.isFinite(pageIndexNum)) {
-      await liberarReserva(loteReservado, req.uid!);
-      loteReservado = null;
-      return res.status(400).json({ error: "Faltan los datos de verificación (pageIndex/fila) del certificado." });
-    }
-    const secretoHuella = process.env.HUELLA_LOTE_SECRET;
-    const huellas = await obtenerHuellasLote(loteReservado);
-    // Medio 3/correccion vuelta 33: decision extraida a `decidirEnvioConHuella` (server/huellaLote.ts,
-    // PURA) — unico punto que decide 503 (sin secreto) vs 409 (huella que no coincide), probado por
-    // su cuenta en tests/huellaLote.test.ts.
-    const decisionHuella = decidirEnvioConHuella({ pagina: pageIndexNum, fila: filaNum, correo: cleanTo }, huellas, secretoHuella);
-    if (decisionHuella.ok === false) {
-      if (decisionHuella.httpStatus === 503) {
+    // GRAVE 3 (correccion vuelta 33, 2026-10-06) + Medio 3 (correccion vuelta 31): decision
+    // COMPLETA (sanear el correo -> validar formato -> exigir la huella HMAC del par
+    // pagina-fila-correo contra lo que /api/lote/iniciar confirmo para ESTE lote) extraida a
+    // `decidirEnvioSendEmail` (server/decisionesRuta.ts, correccion vuelta 35/36 sobre
+    // tests/decisionesRuta.test.ts, que antes solo grepeaba texto fuente) — unico punto de llamada,
+    // nunca se reimplementa inline ni se ignora su resultado.
+    const decisionEnvio = await decidirEnvioSendEmail(
+      loteReservado,
+      { to, fila, pageIndex },
+      { obtenerHuellasLote, secretoHuella: process.env.HUELLA_LOTE_SECRET }
+    );
+    if (decisionEnvio.ok === false) {
+      if (decisionEnvio.httpStatus === 503) {
         console.error("[SEND-EMAIL] HUELLA_LOTE_SECRET no configurado; no se envia nada (falla cerrado).");
       }
       await liberarReserva(loteReservado, req.uid!);
       loteReservado = null;
-      return res.status(decisionHuella.httpStatus).json({ error: decisionHuella.error });
+      return res.status(decisionEnvio.httpStatus).json({ error: decisionEnvio.error });
     }
+    const cleanTo = decisionEnvio.correo;
 
     const cleanSubject = String(subject || "")
       .replace(/[\r\n]+/g, " ")
@@ -962,6 +945,21 @@ async function avisarSiFallaRepetido(paymentId: string, httpStatus: number): Pro
   }
 }
 
+// M-4 (corrige vuelta 36 del REVISOR_EXTERNO): el acuse EN LINEA (dentro de ESTA peticion del
+// webhook, con `await`, antes de responder a Mercado Pago) usa un timeout corto de 8s para el
+// correo — nunca los 20s por defecto de `enviarCorreo` (server/avisos.ts), que son para el
+// barrido programado (`server/tareasFondo.ts`), sin un cliente HTTP esperando la respuesta. Si el
+// relay tarda mas de 8s aqui, el correo queda pendiente y el barrido (que SI espera 20s) lo
+// reintenta en la siguiente corrida — nunca se pierde, solo se pospone.
+const TIMEOUT_CORREO_INLINE_MS = 8_000;
+const enviarCorreoInline = (datos: Parameters<typeof enviarCorreo>[0]) =>
+  enviarCorreo(datos, { timeoutMs: TIMEOUT_CORREO_INLINE_MS });
+const notificarActivacionEnLinea = (datos: Parameters<typeof notificarActivacionPaquete>[0]) =>
+  notificarActivacionPaquete(datos, new Date(), { ...depsNotificarActivacionReales, enviarCorreo: enviarCorreoInline });
+const avisarReembolsoEnLinea = (datos: Parameters<typeof avisarReembolsoPaquete>[0]) =>
+  avisarReembolsoPaquete(datos, { ...depsAvisarReembolsoReales, enviarCorreo: enviarCorreoInline });
+const avisarPagoDobleEnLinea = (datos: Parameters<typeof avisarPagoDobleRequiereReembolso>[0]) =>
+  avisarPagoDobleRequiereReembolso(datos, { ...depsAvisarPagoDobleReales, enviarCorreo: enviarCorreoInline });
 
 app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
   let paymentIdInterno = "";
@@ -994,14 +992,15 @@ app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
       timestampDesdeFecha: (fecha) => Timestamp.fromDate(fecha),
       log: (linea) => console.log(linea),
       // Tarea 5: correo de confirmacion al comprador + aviso de venta a Leonardo (idempotente,
-      // nunca lanza — ver server/notificaciones.ts).
-      notificarActivacion: notificarActivacionPaquete,
+      // nunca lanza — ver server/notificaciones.ts). M-4: timeout corto (8s), ver arriba.
+      notificarActivacion: notificarActivacionEnLinea,
       // Tarea 9: reembolso/contracargo -> revierte a Gratis si era el pago activo + avisa a
-      // Leonardo (idempotente, nunca lanza).
-      procesarReembolso: avisarReembolsoPaquete,
+      // Leonardo (idempotente, nunca lanza). M-4: timeout corto (8s), ver arriba.
+      procesarReembolso: avisarReembolsoEnLinea,
       // Medio 4 (pago doble con 2 preferencias, 2026-10-06): aviso a Leonardo cuando un pago no
       // se activa por ya existir un Paquete vigente de OTRO pago (idempotente, nunca lanza).
-      avisarPagoDoble: avisarPagoDobleRequiereReembolso,
+      // M-4: timeout corto (8s), ver arriba.
+      avisarPagoDoble: avisarPagoDobleEnLinea,
     });
 
     await avisarSiFallaRepetido(paymentId, resultado.httpStatus);
@@ -1042,8 +1041,13 @@ verificarRutaTareasRegistrada(app);
 // HMAC de confirmacion de lote (Tarea 15, requisito A.3) esta configurada, SIN revelar el valor
 // del secreto — `/api/lote/iniciar` falla cerrado (503) si falta, ver mas abajo. Hereda el
 // limitador de peticiones por IP ya montado arriba (`app.use("/api", ...)`).
+//
+// Medio 2 (vuelta 35): agrega `proveedor` (si `PROVEEDOR_NOMBRE` es un valor real, no el marcador
+// "[PENDIENTE]" — `proveedorConfigurado`, server/avisos.ts) y `relay` (si `AVISOS_RELAY_URL`/
+// `AVISOS_RELAY_SECRET` estan configurados — `relayConfigurado`, server/avisos.ts), mismo patron
+// que `huella`: nunca revela ningun valor, solo si la pieza esta lista.
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, huella: huellaConfigurada() });
+  res.json({ ok: true, huella: huellaConfigurada(), proveedor: proveedorConfigurado(), relay: relayConfigurado() });
 });
 
 // Endpoint publico de precios del dia (D3, decision del Brain 2026-10-05, Tarea 4): la web lo usa
@@ -1190,9 +1194,9 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
     // B.3 (requisito Ley 1581): sin autorizacion de datos guardada PARA LA VERSION VIGENTE, no se
     // inicia ningun lote. GRAVE 3(d): el `motivo: "autorizacion"` es lo que el cliente usa para
     // reabrir el modal de autorizacion (en vez de solo mostrar el texto de error). Decision
-    // extraida a `decidirAutorizacionLote` (server/cuentas.ts, PURA, correccion vuelta 33).
-    const autorizacion = await obtenerAutorizacionDatos(req.uid!);
-    const decisionAutorizacion = decidirAutorizacionLote(autorizacion, AUTORIZACION_DATOS_VERSION);
+    // extraida a `decidirAutorizacionLoteRuta` (server/decisionesRuta.ts, correccion vuelta 35/36
+    // sobre tests/decisionesRuta.test.ts — antes solo grepeaba texto fuente).
+    const decisionAutorizacion = await decidirAutorizacionLoteRuta(req.uid!, AUTORIZACION_DATOS_VERSION, { obtenerAutorizacionDatos });
     if (decisionAutorizacion.ok === false) {
       return res.status(decisionAutorizacion.httpStatus).json({
         error: decisionAutorizacion.error,

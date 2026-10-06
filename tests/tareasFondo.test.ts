@@ -51,6 +51,10 @@ test("esCandidatoBarridoAcuse: excluye un pago revertido aunque correoComprador 
   assert.equal(esCandidatoBarridoAcuse({ correoComprador: null, revertido: true }), false);
 });
 
+test("esCandidatoBarridoAcuse: un pago con correoComprador='reclamado' (reintento en curso) SI es candidato", () => {
+  assert.equal(esCandidatoBarridoAcuse({ correoComprador: "reclamado", revertido: false }), true);
+});
+
 // Medio 4/Tarea 15 (pago doble con 2 preferencias): un pago marcado `requiereReembolso=true` por
 // `activarPaqueteSiNoProcesadoTx` (server/cuentas.ts) nunca se activo — no hay nada que
 // confirmarle al comprador — y por tanto queda excluido del barrido. Control positivo: el mismo
@@ -64,8 +68,15 @@ test("esCandidatoBarridoAcuse (control positivo): el mismo pago SIN requiereReem
   assert.equal(esCandidatoBarridoAcuse({ correoComprador: null }), true);
 });
 
-test("esCandidatoBarridoAcuse: un pago con correoComprador='reclamado' (reintento en curso) SI es candidato", () => {
-  assert.equal(esCandidatoBarridoAcuse({ correoComprador: "reclamado", revertido: false }), true);
+// B-1 (corrige vuelta 36 del REVISOR_EXTERNO): `avisoBloqueoProveedor` ya NO es un estado
+// terminal que excluya del barrido (a diferencia del viejo mecanismo con backoff/tope de
+// intentos, que SI trataba "aviso de bloqueo ya enviado" como terminal). Desde la simplificacion
+// 2026-10-06, la unica decision de reintentar/alertar/abandonar es por ANTIGUEDAD del pago
+// (`reintentarAcusePendiente`, server/notificaciones.ts) — si Leonardo completa
+// PROVEEDOR_DOC/PROVEEDOR_DIR despues de ese aviso, el barrido debe seguir reintentando el acuse
+// de ese pago, nunca quedarse bloqueado para siempre por haber avisado una vez.
+test("esCandidatoBarridoAcuse: un pago con avisoBloqueoProveedor='enviado' SIGUE siendo candidato (no es terminal)", () => {
+  assert.equal(esCandidatoBarridoAcuse({ correoComprador: null, avisoBloqueoProveedor: "enviado" }), true);
 });
 
 function pagoFalso(overrides: Partial<PagoProcesadoAcuse> = {}): PagoProcesadoAcuse {
@@ -170,6 +181,43 @@ test("barrerTodosLosPagosPendientes respeta maxPaginas aunque el cursor siga dis
   );
   assert.equal(llamadas, 3, "nunca debe pedir mas paginas que maxPaginas");
   assert.equal(resultado.paginas, 3);
+});
+
+// M-2 (corrige vuelta 36 del REVISOR_EXTERNO): el barrido se corta a si mismo al agotar
+// `presupuestoMs`, con un reloj INYECTADO y fijo (nunca Date.now() real, para que la prueba sea
+// deterministica) — ver comentario de `barrerTodosLosPagosPendientes`.
+test("barrerTodosLosPagosPendientes se corta al agotar presupuestoMs y marca detenidoPorTiempo:true", async () => {
+  const pagina = { docs: [docCrudo("p1"), docCrudo("p2"), docCrudo("p3")], cursorSiguiente: "cursor-1" };
+  const reintentados: string[] = [];
+  let relojMs = 0;
+  // ahoraMs se llama una vez al arrancar (inicioMs=400) y una vez por documento del bucle. El
+  // reloj avanza 400ms en cada llamada: al mirar "p1" el transcurrido es 400ms (sigue dentro del
+  // presupuesto de 500ms, se reintenta); al mirar "p2" el transcurrido ya es 800ms (>= 500ms), se
+  // corta ANTES de reintentarlo. "p3" nunca se alcanza a mirar.
+  const resultado = await barrerTodosLosPagosPendientes(
+    {
+      obtenerPagina: async () => pagina,
+      reintentar: async (datos) => { reintentados.push(datos.paymentId); },
+    },
+    100,
+    50,
+    500, // presupuestoMs de prueba
+    () => { relojMs += 400; return relojMs; }
+  );
+  assert.equal(resultado.detenidoPorTiempo, true);
+  assert.deepEqual(reintentados, ["p1"], "se corta ANTES de procesar el segundo documento");
+});
+
+test("barrerTodosLosPagosPendientes: dentro del presupuesto -> detenidoPorTiempo:false", async () => {
+  const pagina = { docs: [docCrudo("p1")], cursorSiguiente: null };
+  const resultado = await barrerTodosLosPagosPendientes(
+    { obtenerPagina: async () => pagina, reintentar: async () => {} },
+    100,
+    50,
+    540_000,
+    () => 0 // el reloj nunca avanza: jamas agota el presupuesto.
+  );
+  assert.equal(resultado.detenidoPorTiempo, false);
 });
 
 test("barrerTodosLosPagosPendientes salta un pago revertido con correoComprador null (no se reintenta)", async () => {

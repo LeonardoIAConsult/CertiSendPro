@@ -113,7 +113,7 @@ export interface ProcesarWebhookMPOpts {
    * `server/notificaciones.ts` `avisarReembolsoPaquete`. Idempotente y, igual que
    * `notificarActivacion`, nunca debe lanzar (tambien envuelta en try/catch abajo).
    */
-  procesarReembolso(datos: { uid: string; paymentId: string; status: string }): Promise<void>;
+  procesarReembolso(datos: { uid: string; paymentId: string; status: string; referenciaId: string }): Promise<void>;
   /**
    * Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): se llama cuando
    * `activarPaquete` devuelve "requiere_reembolso" — avisa a Leonardo (log
@@ -251,7 +251,7 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
     statusDetailCrudo === "charged_back";
   if (esReembolsoOContracargo) {
     try {
-      await opts.procesarReembolso({ uid: referencia.uid, paymentId, status: status || statusDetailCrudo });
+      await opts.procesarReembolso({ uid: referencia.uid, paymentId, status: status || statusDetailCrudo, referenciaId: referencia.referenciaId });
     } catch (error: any) {
       opts.log(`[MP WEBHOOK] fallo al revertir el pago (se reintenta, la reversion es idempotente). paymentId=${paymentId}: ${error?.message || error}`);
       return { httpStatus: 500, razon: "fallo al procesar reembolso/contracargo" };
