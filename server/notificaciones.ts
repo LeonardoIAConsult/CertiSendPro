@@ -104,7 +104,10 @@ async function intentarEnviarUnDestinatario(
   const reclamado = await deps.reclamarEnvioCorreo(paymentId, destinatario, ahora);
   if (!reclamado) return; // ya reclamado o ya enviado por otra entrega.
 
-  const ok = await deps.enviarCorreo(correo);
+  // M-3(b): id idempotente de este correo logico — el relay (docs/relay/avisos-relay.gs) lo usa
+  // para no reenviarlo si una entrega anterior ya lo mando de verdad pero Node la dio por fallida
+  // (timeout del lado de Node mientras Apps Script seguia procesando, ver server/avisos.ts).
+  const ok = await deps.enviarCorreo({ ...correo, idEnvio: `${paymentId}:${destinatario}` });
   await cerrarReclamoConReintento(paymentId, deps, destinatario, ok, ahora);
 }
 
@@ -266,7 +269,7 @@ export async function avisarReembolsoPaquete(
     cuentaRevertida: resultado === "revertido",
   });
   try {
-    await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto });
+    await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto, idEnvio: `${datos.paymentId}:reembolso` });
   } catch (error: any) {
     // El aviso a Leonardo es best-effort: la reversion (lo que de verdad importa) YA tuvo exito.
     console.error(`[NOTIFICACIONES] fallo al avisar el reembolso a Leonardo (la reversión SÍ quedó). paymentId=${datos.paymentId}:`, error?.message || error);
@@ -382,7 +385,7 @@ async function emitirAlertaTiempoUnaVez(
   console.error(JSON.stringify({ severity: "ERROR", message: mensaje, paymentId: datos.paymentId, horas: horasRedondeadas }));
 
   const { asunto, texto } = construirAviso({ ...datos, horas: horasRedondeadas });
-  await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto });
+  await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto, idEnvio: `${datos.paymentId}:${destinatario}` });
   // Se marca "enviado" en los dos casos (correo OK o no): la unicidad de la alerta ya la dio el
   // log de arriba; reintentar solo el envio del correo (sin repetir el log) es complejidad que
   // esta alerta, de mejor esfuerzo, no necesita.

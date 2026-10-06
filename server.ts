@@ -31,7 +31,7 @@ import { crearCobroPaquete } from "./server/cobroPaquete";
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
 import { enviarCorreo, construirAvisoFalloWebhookLeonardo } from "./server/avisos";
 import { notificarActivacionPaquete, avisarReembolsoPaquete, CORREO_LEONARDO } from "./server/notificaciones";
-import { manejarBarridoAcusesTarea } from "./server/tareasFondo";
+import { registrarRutasTareas, verificarRutaTareasRegistrada } from "./server/tareasFondo";
 
 const app = express();
 // Cloud Run inyecta PORT; en local sigue siendo 3000.
@@ -980,10 +980,13 @@ app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
 // `reintentarAcusePendiente`): a las 20h, `ALERTA_ACUSE_ATRASADO` (sigue reintentando); a las 48h,
 // `ALERTA_ACUSE_ABANDONADO` (deja de reintentar) — los dos son logs estructurados grepables para
 // la alerta de Cloud Logging, ver docs/ops.md.
-app.post("/api/tareas/barrido-acuses", async (req, res) => {
-  const resultado = await manejarBarridoAcusesTarea(req.headers.authorization);
-  res.status(resultado.status).json(resultado.body);
-});
+// M-4 (corrige vuelta 34 del REVISOR_EXTERNO): la ruta la registra `registrarRutasTareas`
+// (server/tareasFondo.ts) — unica definicion, probada ahi con un app de Express real. El chequeo
+// de arranque de abajo es la unica defensa contra el caso que ninguna prueba puede cubrir: que
+// esta llamada se borre sin querer en un refactor futuro (ver el comentario de
+// `verificarRutaTareasRegistrada`).
+registrarRutasTareas(app);
+verificarRutaTareasRegistrada(app);
 
 // Endpoint publico de precios del dia (D3, decision del Brain 2026-10-05, Tarea 4): la web lo usa
 // para mostrar "≈ $X COP hoy" ANTES de pagar, sin exigir sesion. Vive bajo /api, asi que hereda el

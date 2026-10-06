@@ -26,11 +26,20 @@
  *   3. Comparacion de la firma en TIEMPO CONSTANTE (bucle XOR sobre los bytes de los dos hex),
  *      para no filtrar por timing cuanto de la firma esperada coincide con la recibida.
  *
+ * M-3(b) (corrige vuelta 34 del REVISOR_EXTERNO, 2026-10-06): deduplicacion por `idEnvio`
+ * (`${paymentId}:${destinatario}`, opcional, dentro del cuerpo firmado) en `PropertiesService`
+ * (7 dias, nunca `CacheService` — caduca). Si `server/avisos.ts` reintenta el MISMO correo logico
+ * porque el relay tardo mas que su timeout (20s) pero SI habia terminado de enviarlo, este relay
+ * responde OK sin mandarlo dos veces. Distinto del nonce (punto 2): el nonce es aleatorio en CADA
+ * llamada (incluido un reintento) y solo protege una ventana corta de minutos; `idEnvio` es
+ * estable para el mismo correo logico y protege una ventana de dias.
+ *
  * Que verifica antes de enviar (server/avisos.ts, lado TypeScript, es el que firma):
- *   1. Los 5 campos esperados (para, asunto, texto, ts, nonce) y la firma estan presentes.
+ *   1. Los 5 campos obligatorios (para, asunto, texto, ts, nonce) y la firma estan presentes
+ *      (`idEnvio` es el 6o campo del cuerpo, pero es OPCIONAL: cadena vacia es un valor valido).
  *   2. El timestamp (`ts`, segundos Unix) no tiene mas de 5 minutos de antiguedad ni esta en el
  *      futuro (hasta 60 s de margen por reloj desincronizado).
- *   3. La firma HMAC-SHA256 de `${ts}\n${nonce}\n${para}\n${asunto}\n${texto}` con
+ *   3. La firma HMAC-SHA256 de `${ts}\n${nonce}\n${idEnvio}\n${para}\n${asunto}\n${texto}` con
  *      AVISOS_RELAY_SECRET coincide EXACTAMENTE con la que manda el backend — comparada en tiempo
  *      constante.
  *   4. El `nonce` no se ha visto en los ultimos 10 minutos (CacheService).
@@ -41,6 +50,8 @@
  *      DESPUES de la firma: si llega hasta aqui, la peticion YA esta autenticada, y un
  *      destinatario inesperado es senal de un bug propio (vale la pena avisar a Leonardo), no de
  *      un ataque.
+ *   6. `idEnvio` (si viene, M-3(b)) no se ha marcado como ya procesado en los ultimos 7 dias
+ *      (`PropertiesService`) — ver arriba.
  *
  * DESPLIEGUE (cuenta contacto@leonardoantolinez.com) — ver docs/relay/README.md para el paso a
  * paso completo. Este archivo NO se despliega automaticamente: Leonardo o el Brain lo pegan a
@@ -58,6 +69,14 @@ var CONFIG = {
   MAX_ANTIGUEDAD_SEGUNDOS: 5 * 60,
   // Ventana anti-repeticion del nonce, en segundos (M33: 10 minutos exactos).
   NONCE_TTL_SEGUNDOS: 10 * 60,
+  // M-3(b) (corrige vuelta 34 del REVISOR_EXTERNO): ventana de deduplicacion de `idEnvio`, en
+  // segundos (7 dias) — mucho mas larga que NONCE_TTL_SEGUNDOS a proposito: el nonce protege
+  // contra REPETIR una peticion capturada (ventana corta, minutos); `idEnvio` protege contra
+  // REENVIAR el mismo correo logico tras un timeout del lado de Node mientras este script seguia
+  // procesando (ventana larga, dias — un barrido corre cada 30 min, asi que varias horas de
+  // reintentos del mismo pago deben seguir deduplicando).
+  ENVIO_TTL_SEGUNDOS: 7 * 24 * 3600,
+  ENVIO_PREFIJO: 'envio_',
   FROM_NAME: 'Leonardo Antolinez',
 };
 
@@ -75,6 +94,10 @@ function doPost(e) {
     var texto = String(body.texto || '');
     var ts = Number(body.ts);
     var nonce = String(body.nonce || '');
+    // M-3(b): id idempotente opcional — cadena vacia ('') si el llamador no lo manda (no todos
+    // los avisos lo mandan hoy, ver server/avisos.ts); nunca entra en el chequeo de "campos
+    // faltantes" de abajo porque una cadena vacia es un valor VALIDO para este campo.
+    var idEnvio = String(body.idEnvio || '');
     var firma = String(body.firma || '');
 
     if (!para || !asunto || !texto || !ts || !nonce || !firma) {
@@ -90,7 +113,7 @@ function doPost(e) {
     if (!antiguedadValida_(ts, Math.floor(Date.now() / 1000))) {
       return json_({ ok: false, error: 'solicitud_invalida' });
     }
-    if (!verificarFirma_(ts, nonce, para, asunto, texto, firma)) {
+    if (!verificarFirma_(ts, nonce, idEnvio, para, asunto, texto, firma)) {
       return json_({ ok: false, error: 'solicitud_invalida' });
     }
 
@@ -110,12 +133,24 @@ function doPost(e) {
       return json_({ ok: false, error: 'destinatario_no_esperado' });
     }
 
+    // M-3(b): si este MISMO correo logico (`idEnvio`) ya se mando antes, responder OK sin volver
+    // a mandarlo — este es exactamente el caso que esto previene: Node abortó la llamada anterior
+    // por timeout (`enviarCorreo`, server/avisos.ts) creyendo que fallo, pero este script SI habia
+    // terminado de mandar el correo original antes de que el cliente se desconectara. El chequeo
+    // va DESPUES de `destinatarioEsperado_` (nunca marcar un `idEnvio` como procesado si la
+    // peticion ni siquiera iba a mandarse) y, al estar todo `doPost` bajo `LockService` (arriba),
+    // no hay carrera entre dos ejecuciones casi simultaneas para el mismo `idEnvio`.
+    if (idEnvioYaProcesado_(idEnvio)) {
+      return json_({ ok: true, yaEnviado: true });
+    }
+
     MailApp.sendEmail({
       to: para,
       subject: asunto,
       body: texto,
       name: CONFIG.FROM_NAME,
     });
+    marcarIdEnvioProcesado_(idEnvio);
 
     return json_({ ok: true });
   } catch (err) {
@@ -134,18 +169,56 @@ function doPost(e) {
  * de `doPost` para poder ejecutarla sola desde el editor (`runTestHmac()`, abajo) sin tener que
  * desplegar nada primero.
  */
-function verificarFirma_(ts, nonce, para, asunto, texto, firmaRecibida) {
+function verificarFirma_(ts, nonce, idEnvio, para, asunto, texto, firmaRecibida) {
   var secreto = PropertiesService.getScriptProperties().getProperty(CONFIG.SECRET_PROPERTY);
   if (!secreto) return false;
-  var cadena = cadenaCanonica_(ts, nonce, para, asunto, texto);
+  var cadena = cadenaCanonica_(ts, nonce, idEnvio, para, asunto, texto);
   var firmaCalculada = hmacHex_(cadena, secreto);
   return igualesEnTiempoConstante_(firmaCalculada, firmaRecibida);
 }
 
 /** Cadena canonica a firmar — DEBE ser identica a `cadenaCanonicaAviso` de server/avisos.ts
- * (M33: ahora incluye `nonce` entre `ts` y `para`). */
-function cadenaCanonica_(ts, nonce, para, asunto, texto) {
-  return ts + '\n' + nonce + '\n' + para + '\n' + asunto + '\n' + texto;
+ * (M33: incluye `nonce` entre `ts` y `para`; M-3(b) agrega `idEnvio` entre `nonce` y `para`). */
+function cadenaCanonica_(ts, nonce, idEnvio, para, asunto, texto) {
+  return ts + '\n' + nonce + '\n' + idEnvio + '\n' + para + '\n' + asunto + '\n' + texto;
+}
+
+/**
+ * M-3(b) (corrige vuelta 34 del REVISOR_EXTERNO): true si `idEnvio` ya se marco como procesado
+ * (un correo logico igual YA se mando). Cadena vacia (sin `idEnvio`) NUNCA deduplica — siempre
+ * `false` — para no cambiar el comportamiento de avisos que todavia no lo mandan.
+ *
+ * Usa `PropertiesService` (NUNCA `CacheService`, que ya usa `nonceNuevo_` arriba): el cache de
+ * Apps Script caduca segun su TTL pero tambien puede perderse antes por presion de cuota; las
+ * propiedades del script son persistentes de verdad, necesarias para una ventana de 7 dias.
+ */
+function idEnvioYaProcesado_(idEnvio) {
+  if (!idEnvio) return false;
+  var props = PropertiesService.getScriptProperties();
+  return !!props.getProperty(CONFIG.ENVIO_PREFIJO + idEnvio);
+}
+
+/** Marca `idEnvio` como procesado (fecha = ahora, segundos Unix) y de paso limpia las entradas
+ * vencidas (limpieza simple: se ejecuta en cada envio nuevo, no en un cron aparte — el volumen de
+ * correos de este relay es bajo, un recorrido de `getProperties()` en cada envio es sobrado). */
+function marcarIdEnvioProcesado_(idEnvio) {
+  if (!idEnvio) return;
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty(CONFIG.ENVIO_PREFIJO + idEnvio, String(Math.floor(Date.now() / 1000)));
+  limpiarEnviosViejos_(props);
+}
+
+/** Borra toda propiedad `envio_*` con mas de `CONFIG.ENVIO_TTL_SEGUNDOS` (7 dias). */
+function limpiarEnviosViejos_(props) {
+  var ahora = Math.floor(Date.now() / 1000);
+  var todas = props.getProperties();
+  for (var clave in todas) {
+    if (clave.indexOf(CONFIG.ENVIO_PREFIJO) !== 0) continue;
+    var marcadoEn = Number(todas[clave]);
+    if (!marcadoEn || ahora - marcadoEn > CONFIG.ENVIO_TTL_SEGUNDOS) {
+      props.deleteProperty(clave);
+    }
+  }
 }
 
 /** HMAC-SHA256 de `cadena` con `secreto`, en hexadecimal minuscula (mismo formato que el `.digest
@@ -235,29 +308,32 @@ function json_(o) {
 // funciones que terminan en "_", igual que en Code.gs de Faro).
 
 /**
- * M39 (corrige vuelta 28, 2026-10-05): el vector de prueba ahora lleva tildes Y ñ en el `texto`
+ * M39 (corrige vuelta 28, 2026-10-05): el vector de prueba lleva tildes Y ñ en el `texto`
  * ("Confirmación de compra — Año ñandú ×2") — el vector viejo de M33 era ASCII puro y por eso
  * NUNCA habria detectado un charset implicito distinto de UTF-8 en `hmacHex_` (ver el comentario
- * de esa funcion arriba). Con ts=1700000000, nonce="nonce-de-prueba", para="a@b.com",
- * asunto="Asunto", texto="Confirmación de compra — Año ñandú ×2", secreto="secreto-de-prueba",
- * debe dar EXACTAMENTE "d808e9696d8701509709bcc9a16b8a736b4946b225b1deb508be560f684c42b4"
- * (calculado del lado de Node con
- * `crypto.createHmac('sha256','secreto-de-prueba').update(cadena,'utf8').digest('hex')`, misma
- * cadena canonica de abajo) — EXACTAMENTE el mismo valor que prueba tests/relayGs.test.ts
- * ejecutando este .gs real dentro de un sandbox de Node (M39).
+ * de esa funcion arriba).
+ *
+ * M-3(b) (corrige vuelta 34 del REVISOR_EXTERNO): la cadena canonica ahora lleva `idEnvio` entre
+ * `nonce` y `para` — este vector usa `idEnvio=''` (sin id idempotente), por eso el valor esperado
+ * CAMBIO frente al que probaba M39. Con ts=1700000000, nonce="nonce-de-prueba", idEnvio="",
+ * para="a@b.com", asunto="Asunto", texto="Confirmación de compra — Año ñandú ×2",
+ * secreto="secreto-de-prueba", debe dar EXACTAMENTE
+ * "1ff82e5298abc6f06614acdfff0755685d1e04448e46a6249b5510fc6f552731" (calculado del lado de Node
+ * con `crypto.createHmac('sha256','secreto-de-prueba').update(cadena,'utf8').digest('hex')`,
+ * misma cadena canonica de abajo) — EXACTAMENTE el mismo valor que prueba tests/relayGs.test.ts
+ * ejecutando este .gs real dentro de un sandbox de Node.
  *
  * ESTE ES EL PASO OBLIGATORIO ANTES DE CONFIGURAR AVISOS_RELAY_URL (ver docs/relay/README.md):
  * correr `runTestHmac` en el editor REAL de Apps Script (nunca solo en el sandbox de Node) y
- * confirmar "OK" en el log — eso prueba que ESTE despliegue en particular (con el charset
- * explicito nuevo) calcula el HMAC igual que server/avisos.ts para texto con tildes/ñ, antes de
- * que un correo real dependa de ello.
+ * confirmar "OK" en el log — eso prueba que ESTE despliegue en particular calcula el HMAC igual
+ * que server/avisos.ts para texto con tildes/ñ, antes de que un correo real dependa de ello.
  */
 function runTestHmac() {
-  var cadena = cadenaCanonica_(1700000000, 'nonce-de-prueba', 'a@b.com', 'Asunto', 'Confirmación de compra — Año ñandú ×2');
+  var cadena = cadenaCanonica_(1700000000, 'nonce-de-prueba', '', 'a@b.com', 'Asunto', 'Confirmación de compra — Año ñandú ×2');
   var resultado = hmacHex_(cadena, 'secreto-de-prueba');
   Logger.log(resultado);
   Logger.log(
-    resultado === 'd808e9696d8701509709bcc9a16b8a736b4946b225b1deb508be560f684c42b4'
+    resultado === '1ff82e5298abc6f06614acdfff0755685d1e04448e46a6249b5510fc6f552731'
       ? 'OK: coincide con tests/avisos.test.ts y tests/relayGs.test.ts'
       : 'DISTINTO: revisar el algoritmo de firma/la cadena canonica/el charset en los dos lados'
   );
@@ -267,12 +343,13 @@ function runTestHmac() {
 function runTestEnvio() {
   var ts = Math.floor(Date.now() / 1000);
   var nonce = Utilities.getUuid();
+  var idEnvio = ''; // prueba manual: sin id idempotente, igual que antes de M-3(b).
   var para = 'contacto@leonardoantolinez.com';
   var asunto = '[PRUEBA] Relay de avisos de CertiSend';
   var texto = 'Si ves este correo, el relay de avisos esta funcionando.';
   var secreto = PropertiesService.getScriptProperties().getProperty(CONFIG.SECRET_PROPERTY);
   if (!secreto) { Logger.log('Falta la propiedad ' + CONFIG.SECRET_PROPERTY); return; }
-  var firma = hmacHex_(cadenaCanonica_(ts, nonce, para, asunto, texto), secreto);
-  var resultado = doPost({ postData: { contents: JSON.stringify({ para: para, asunto: asunto, texto: texto, ts: ts, nonce: nonce, firma: firma }) } });
+  var firma = hmacHex_(cadenaCanonica_(ts, nonce, idEnvio, para, asunto, texto), secreto);
+  var resultado = doPost({ postData: { contents: JSON.stringify({ para: para, asunto: asunto, texto: texto, ts: ts, nonce: nonce, idEnvio: idEnvio, firma: firma }) } });
   Logger.log(resultado.getContent());
 }

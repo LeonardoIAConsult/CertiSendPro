@@ -10,14 +10,32 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Timestamp } from "firebase-admin/firestore";
+import express from "express";
 import {
   esCandidatoBarridoAcuse,
   barrerTodosLosPagosPendientes,
   manejarBarridoAcusesTarea,
   datosReintentoDesdePago,
+  registrarRutasTareas,
+  verificarRutaTareasRegistrada,
+  RUTA_BARRIDO_ACUSES,
   type PaginaPagos,
+  type AppConRutasTareas,
 } from "../server/tareasFondo";
 import type { PagoProcesadoAcuse } from "../server/cuentas";
+
+/** Captura console.error durante `fn` y lo restaura siempre, incluso si `fn` lanza. */
+async function capturarConsoleError(fn: () => Promise<void> | void): Promise<string[]> {
+  const logs: string[] = [];
+  const original = console.error;
+  console.error = (...args: any[]) => logs.push(args.map(String).join(" "));
+  try {
+    await fn();
+  } finally {
+    console.error = original;
+  }
+  return logs;
+}
 
 // ── esCandidatoBarridoAcuse (PURA): filtro de seleccion del barrido ─────────────────────────────
 
@@ -280,4 +298,136 @@ test("si barrer() lanza (p. ej. Firestore sin red a mitad del barrido), responde
     logs.some((l) => l.includes("BARRIDO_ACUSES_FALLO") && l.includes("Firestore sin red")),
     "debe quedar un log estructurado grepable"
   );
+});
+
+// ── M-1/M-2 (corrige vuelta 34 del REVISOR_EXTERNO): los logs de alerta son JSON ESTRUCTURADO ──
+// con severity="ERROR", message FIJO y sin uid/email/ningun valor con "@" — oraculo explicito de
+// la orden: capturar el console.error de cada alerta, hacer JSON.parse y verificar los tres.
+
+function assertLogEstructurado(linea: string, mensajeEsperado: string): Record<string, any> {
+  const json = JSON.parse(linea);
+  assert.equal(json.severity, "ERROR");
+  assert.equal(json.message, mensajeEsperado);
+  for (const [clave, valor] of Object.entries(json)) {
+    assert.notEqual(clave, "uid", `el log de ${mensajeEsperado} nunca debe llevar uid`);
+    assert.notEqual(clave, "email", `el log de ${mensajeEsperado} nunca debe llevar email`);
+    if (typeof valor === "string") {
+      assert.ok(!valor.includes("@"), `el log de ${mensajeEsperado} tiene un valor con '@' (campo ${clave}: ${valor})`);
+    }
+  }
+  return json;
+}
+
+test("BARRIDO_ACUSES_FALLO: log JSON estructurado, severity ERROR, message exacto, sin uid/email/@", async () => {
+  const logs = await capturarConsoleError(async () => {
+    const r = await manejarBarridoAcusesTarea("Bearer token-valido", {
+      verificarToken: async () => true,
+      barrer: async () => {
+        throw new Error("Firestore sin red");
+      },
+    });
+    assert.equal(r.status, 500);
+  });
+  const linea = logs.find((l) => l.includes("BARRIDO_ACUSES_FALLO"));
+  assert.ok(linea, "debe existir un log de BARRIDO_ACUSES_FALLO");
+  assertLogEstructurado(linea!, "BARRIDO_ACUSES_FALLO");
+});
+
+test("TAREA_BARRIDO_RECHAZADA (sin token): log JSON estructurado, severity ERROR, message exacto, sin uid/email/@", async () => {
+  const logs = await capturarConsoleError(async () => {
+    const r = await manejarBarridoAcusesTarea(undefined, {
+      verificarToken: async () => true,
+      barrer: async () => ({ paginas: 0, revisados: 0, reintentados: 0 }),
+    });
+    assert.equal(r.status, 401);
+  });
+  assert.equal(logs.length, 1);
+  const json = assertLogEstructurado(logs[0], "TAREA_BARRIDO_RECHAZADA");
+  assert.equal(json.motivo, "sin_token");
+});
+
+test("TAREA_BARRIDO_RECHAZADA (token invalido): log JSON estructurado, severity ERROR, message exacto, sin uid/email/@", async () => {
+  const logs = await capturarConsoleError(async () => {
+    const r = await manejarBarridoAcusesTarea("Bearer token-de-otra-sa", {
+      verificarToken: async () => false,
+      barrer: async () => ({ paginas: 0, revisados: 0, reintentados: 0 }),
+    });
+    assert.equal(r.status, 403);
+  });
+  assert.equal(logs.length, 1);
+  const json = assertLogEstructurado(logs[0], "TAREA_BARRIDO_RECHAZADA");
+  assert.equal(json.motivo, "token_invalido");
+});
+
+// ── M-4 (corrige vuelta 34): `registrarRutasTareas` + chequeo de arranque ─────────────────────
+
+test("registrarRutasTareas (app falso): registra POST /api/tareas/barrido-acuses y delega en manejarBarridoAcusesTarea", async () => {
+  const rutasRegistradas: Array<{ metodo: string; path: string; handler: Function }> = [];
+  const appFalso: AppConRutasTareas = {
+    post(path, handler) {
+      rutasRegistradas.push({ metodo: "post", path, handler });
+    },
+  };
+  let verificarLlamado = false;
+  let barrerLlamado = false;
+  registrarRutasTareas(appFalso, {
+    verificarToken: async () => {
+      verificarLlamado = true;
+      return true;
+    },
+    barrer: async () => {
+      barrerLlamado = true;
+      return { paginas: 1, revisados: 5, reintentados: 2 };
+    },
+  });
+
+  assert.equal(rutasRegistradas.length, 1);
+  assert.equal(rutasRegistradas[0].path, RUTA_BARRIDO_ACUSES);
+
+  let statusRecibido = 0;
+  let bodyRecibido: any = null;
+  const resFalso = {
+    status(s: number) {
+      statusRecibido = s;
+      return this;
+    },
+    json(b: any) {
+      bodyRecibido = b;
+    },
+  };
+  await rutasRegistradas[0].handler({ headers: { authorization: "Bearer token-valido" } }, resFalso);
+
+  assert.equal(verificarLlamado, true, "el handler registrado SI debe delegar en manejarBarridoAcusesTarea (verificarToken)");
+  assert.equal(barrerLlamado, true, "y en el barrido real al validar el token");
+  assert.equal(statusRecibido, 200);
+  assert.deepEqual(bodyRecibido, { ok: true, paginas: 1, revisados: 5, reintentados: 2 });
+});
+
+test("registrarRutasTareas + verificarRutaTareasRegistrada sobre un Express REAL (sin listen, sin red): la ruta SI queda registrada", () => {
+  const app = express();
+  registrarRutasTareas(app);
+  const logs: string[] = [];
+  const registrada = verificarRutaTareasRegistrada(app, (l) => logs.push(l));
+  assert.equal(registrada, true);
+  assert.equal(logs.length, 0, "si SI quedo registrada, no debe loguear nada");
+});
+
+test("verificarRutaTareasRegistrada sobre un Express REAL que NUNCA llamo a registrarRutasTareas: false + log estructurado RUTA_TAREAS_NO_REGISTRADA", () => {
+  const app = express(); // deliberadamente sin registrarRutasTareas(app) — simula el mutante "server.ts deja de llamarla".
+  const logs: string[] = [];
+  const registrada = verificarRutaTareasRegistrada(app, (l) => logs.push(l));
+  assert.equal(registrada, false);
+  assert.equal(logs.length, 1);
+  const json = JSON.parse(logs[0]);
+  assert.equal(json.severity, "ERROR");
+  assert.equal(json.message, "RUTA_TAREAS_NO_REGISTRADA");
+  assert.equal(json.ruta, RUTA_BARRIDO_ACUSES);
+});
+
+test("verificarRutaTareasRegistrada: nunca lanza ante un app malformado (defensa, de mejor esfuerzo)", () => {
+  const logs: string[] = [];
+  const registrada = verificarRutaTareasRegistrada({ _router: "no-es-un-router" }, (l) => logs.push(l));
+  assert.equal(registrada, false);
+  assert.equal(logs.length, 1);
+  assert.equal(JSON.parse(logs[0]).message, "RUTA_TAREAS_NO_REGISTRADA");
 });

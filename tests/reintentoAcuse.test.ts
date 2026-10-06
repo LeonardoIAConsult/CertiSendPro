@@ -344,3 +344,63 @@ test("un reclamo 'reclamado' UN ms antes del umbral NO se considera atascado tod
 
   assert.equal(reclamado, false, "todavia no llega al umbral: sigue fresco");
 });
+
+// ── M-2 (corrige vuelta 34 del REVISOR_EXTERNO): log JSON estructurado de ALERTA_ACUSE_ATRASADO/
+// ALERTA_ACUSE_ABANDONADO — severity="ERROR", message EXACTO, sin uid/email/ningun valor con "@"
+// (oraculo explicito de la orden: capturar, JSON.parse, verificar los tres). ───────────────────
+
+function assertLogEstructurado(linea: string, mensajeEsperado: string): Record<string, any> {
+  const json = JSON.parse(linea);
+  assert.equal(json.severity, "ERROR");
+  assert.equal(json.message, mensajeEsperado);
+  for (const [clave, valor] of Object.entries(json)) {
+    assert.notEqual(clave, "uid", `el log de ${mensajeEsperado} nunca debe llevar uid`);
+    assert.notEqual(clave, "email", `el log de ${mensajeEsperado} nunca debe llevar email`);
+    if (typeof valor === "string") {
+      assert.ok(!valor.includes("@"), `el log de ${mensajeEsperado} tiene un valor con '@' (campo ${clave}: ${valor})`);
+    }
+  }
+  return json;
+}
+
+async function capturarConsoleError(fn: () => Promise<void>): Promise<string[]> {
+  const logs: string[] = [];
+  const original = console.error;
+  console.error = (...args: any[]) => logs.push(args.map(String).join(" "));
+  try {
+    await fn();
+  } finally {
+    console.error = original;
+  }
+  return logs;
+}
+
+test("ALERTA_ACUSE_ATRASADO: log JSON estructurado, severity ERROR, message exacto, sin uid/email/@", async () => {
+  const db = new FirestoreFalso();
+  db.seed("pagosProcesados/pago-1", { procesadoEn: Timestamp.now() });
+  const { deps } = depsReintentoConFirestoreFalso(db, "pago-1", {
+    enviarCorreo: async (datos) => datos.para !== "comprador@test.com",
+  });
+
+  const ahora21h = new Date(DATOS_REINTENTO_BASE.fecha.getTime() + 21 * 3600_000);
+  const logs = await capturarConsoleError(() => reintentarAcusePendiente(DATOS_REINTENTO_BASE, ahora21h, deps));
+
+  const linea = logs.find((l) => l.includes("ALERTA_ACUSE_ATRASADO"));
+  assert.ok(linea, "debe existir un log de ALERTA_ACUSE_ATRASADO");
+  const json = assertLogEstructurado(linea!, "ALERTA_ACUSE_ATRASADO");
+  assert.equal(json.paymentId, DATOS_REINTENTO_BASE.paymentId);
+});
+
+test("ALERTA_ACUSE_ABANDONADO: log JSON estructurado, severity ERROR, message exacto, sin uid/email/@", async () => {
+  const db = new FirestoreFalso();
+  db.seed("pagosProcesados/pago-1", { procesadoEn: Timestamp.now(), correoComprador: null });
+  const { deps } = depsReintentoConFirestoreFalso(db, "pago-1");
+
+  const ahora49h = new Date(DATOS_REINTENTO_BASE.fecha.getTime() + 49 * 3600_000);
+  const logs = await capturarConsoleError(() => reintentarAcusePendiente(DATOS_REINTENTO_BASE, ahora49h, deps));
+
+  const linea = logs.find((l) => l.includes("ALERTA_ACUSE_ABANDONADO"));
+  assert.ok(linea, "debe existir un log de ALERTA_ACUSE_ABANDONADO");
+  const json = assertLogEstructurado(linea!, "ALERTA_ACUSE_ABANDONADO");
+  assert.equal(json.paymentId, DATOS_REINTENTO_BASE.paymentId);
+});

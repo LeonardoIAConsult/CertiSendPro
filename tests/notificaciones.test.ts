@@ -253,6 +253,40 @@ test("notificarActivacionPaquete (M36(2)): el aviso de bloqueo a Leonardo tiene 
   assert.equal(avisosBloqueo.length, 1, "el aviso de bloqueo no se repite en una entrega posterior");
 });
 
+// ── B-2 (corrige vuelta 34 del REVISOR_EXTERNO): el bloqueo de M36(2) NO es terminal ────────────
+// Con el dato del proveedor pendiente, el barrido NUNCA reclama/envia el correo al comprador (el
+// unico reclamo que toma es el de "bloqueoProveedor", para el aviso a Leonardo) — por eso, en
+// cuanto el dato se corrige (Leonardo completa PROVEEDOR_DOCUMENTO/PROVEEDOR_DIRECCION), el
+// SIGUIENTE barrido (`reintentarAcusePendiente` -> `notificarActivacionPaquete`, que relee
+// `construirCorreoComprador` desde cero en cada llamada) SI logra mandarlo — nada quedo
+// permanentemente bloqueado.
+
+test("B-2: con dato del proveedor pendiente no se envia al comprador; al corregirse, el SIGUIENTE barrido SI envia", async () => {
+  const db = new FirestoreFalso();
+  let datoPendiente = true; // simula PROVEEDOR_DOCUMENTO/PROVEEDOR_DIRECCION aun sin configurar.
+  const construirCorreoCompradorSimulado = () => ({
+    asunto: "Confirmación de tu compra",
+    texto: datoPendiente ? "Texto con un dato [PENDIENTE: completar] del proveedor." : "Texto ya completo, sin ningún dato pendiente.",
+  });
+  const { deps, correosEnviados } = depsConFirestoreFalsoReal(db, "pago-1", {
+    construirCorreoComprador: construirCorreoCompradorSimulado,
+  });
+
+  // 1er barrido: el dato SIGUE pendiente -> 0 correos al comprador.
+  await notificarActivacionPaquete(DATOS_BASE, AHORA, deps);
+  assert.equal(correosEnviados.filter((c) => c.para === "comprador@test.com").length, 0, "con dato pendiente, el comprador no debe recibir nada");
+  assert.equal(db.leer("pagosProcesados/pago-1")?.correoComprador ?? null, null, "el bloqueo NUNCA reclama el campo del comprador (no es terminal)");
+
+  // Leonardo completa el dato del proveedor entre un barrido y el siguiente.
+  datoPendiente = false;
+
+  // 2o barrido (30 min despues, mismo pago): ya no hay placeholder -> SI se manda al comprador.
+  await notificarActivacionPaquete(DATOS_BASE, new Date(AHORA.getTime() + 30 * 60_000), deps);
+  const paraComprador = correosEnviados.filter((c) => c.para === "comprador@test.com");
+  assert.equal(paraComprador.length, 1, "al corregirse el dato, el SIGUIENTE barrido SI manda el acuse");
+  assert.equal(db.leer("pagosProcesados/pago-1")?.correoComprador, "enviado");
+});
+
 // ── Hallazgo de /code-review sobre el commit de M33-M36 (vuelta 27): si la escritura que CIERRA
 // el reclamo falla, `cerrarReclamoConReintento` reintenta UNA vez la MISMA operacion antes de
 // darse por vencido (y nunca lanza, con o sin exito en el reintento) ───────────────────────────

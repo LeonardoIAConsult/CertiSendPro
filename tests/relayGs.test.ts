@@ -30,6 +30,10 @@ interface SandboxRelay {
    * esto, un charset implicito podria dar una firma distinta para texto con tildes/ñ (ver el
    * comentario de `hmacHex_` en docs/relay/avisos-relay.gs). */
   charsetsUsados: Array<string | undefined>;
+  /** M-3(b): shim de `PropertiesService` del script — expuesto para que las pruebas de
+   * deduplicacion/limpieza de `idEnvio` puedan sembrar o inspeccionar entradas directamente, sin
+   * depender solo de `doPost`. */
+  propiedadesScript: Map<string, string>;
 }
 
 /** Crea un sandbox nuevo (cache de nonces vacia) y ejecuta avisos-relay.gs dentro de el. */
@@ -59,9 +63,28 @@ function construirSandbox(secreto: string | null): SandboxRelay {
     },
   };
 
+  // M-3(b): shim CON ESTADO de `PropertiesService.getScriptProperties()` — a diferencia del
+  // shim original (solo `getProperty` para el secreto), ahora tambien soporta `setProperty`/
+  // `deleteProperty`/`getProperties`, que `idEnvioYaProcesado_`/`marcarIdEnvioProcesado_`/
+  // `limpiarEnviosViejos_` (docs/relay/avisos-relay.gs) usan de verdad.
+  const propiedadesScript = new Map<string, string>();
   const PropertiesService = {
     getScriptProperties() {
-      return { getProperty: (key: string) => (key === "AVISOS_RELAY_SECRET" ? secreto : null) };
+      return {
+        getProperty: (key: string) =>
+          key === "AVISOS_RELAY_SECRET" ? secreto : propiedadesScript.has(key) ? propiedadesScript.get(key)! : null,
+        setProperty: (key: string, value: string) => {
+          propiedadesScript.set(key, value);
+        },
+        deleteProperty: (key: string) => {
+          propiedadesScript.delete(key);
+        },
+        getProperties: () => {
+          const copia: Record<string, string> = {};
+          for (const [clave, valor] of propiedadesScript) copia[clave] = valor;
+          return copia;
+        },
+      };
     },
   };
 
@@ -102,12 +125,18 @@ function construirSandbox(secreto: string | null): SandboxRelay {
   };
   vm.createContext(sandbox);
   vm.runInContext(CODIGO_GS, sandbox, { filename: "avisos-relay.gs" });
-  return { sandbox, correosEnviados, charsetsUsados };
+  return { sandbox, correosEnviados, charsetsUsados, propiedadesScript };
 }
 
-function cuerpoFirmadoReal(secreto: string, datos: { ts: number; nonce: string; para: string; asunto: string; texto: string }) {
-  const firma = firmarHmac(cadenaCanonicaAviso(datos.ts, datos.nonce, datos.para, datos.asunto, datos.texto), secreto);
-  return { ...datos, firma };
+/** `idEnvio` es OPCIONAL — por defecto "" (mismo default que `server/avisos.ts`, sin id
+ * idempotente que deduplicar). */
+function cuerpoFirmadoReal(
+  secreto: string,
+  datos: { ts: number; nonce: string; idEnvio?: string; para: string; asunto: string; texto: string }
+) {
+  const idEnvio = datos.idEnvio ?? "";
+  const firma = firmarHmac(cadenaCanonicaAviso(datos.ts, datos.nonce, idEnvio, datos.para, datos.asunto, datos.texto), secreto);
+  return { ...datos, idEnvio, firma };
 }
 
 function doPost(sandbox: any, cuerpo: Record<string, any>): { ok: boolean; error?: string } {
@@ -119,15 +148,15 @@ const SECRETO = "secreto-compartido-de-prueba";
 
 // ── Vector HMAC fijo (M33): coincide con runTestHmac() del .gs ────────────────────────────────
 
-test("M33 (shim Node): el vector HMAC del .gs (cadenaCanonica_ + hmacHex_) coincide con el de server/avisos.ts", () => {
+test("M33/M-3(b) (shim Node): el vector HMAC del .gs (cadenaCanonica_ + hmacHex_) coincide con el de server/avisos.ts", () => {
   const { sandbox } = construirSandbox(SECRETO);
-  const cadena = sandbox.cadenaCanonica_(1700000000, "nonce-de-prueba", "a@b.com", "Asunto", "Texto del correo");
+  const cadena = sandbox.cadenaCanonica_(1700000000, "nonce-de-prueba", "", "a@b.com", "Asunto", "Texto del correo");
   const hashGs = sandbox.hmacHex_(cadena, "secreto-de-prueba");
   const hashTs = firmarHmac(
-    cadenaCanonicaAviso(1700000000, "nonce-de-prueba", "a@b.com", "Asunto", "Texto del correo"),
+    cadenaCanonicaAviso(1700000000, "nonce-de-prueba", "", "a@b.com", "Asunto", "Texto del correo"),
     "secreto-de-prueba"
   );
-  assert.equal(hashGs, "20f0e9b0af94d0e8d7dd20cc2b7199663ef20eadfc8ea3c2c1055f8ead6341a1");
+  assert.equal(hashGs, "c1422dd09b070935232f1194678b1d8aa0abddb9a4fb41bcb788129ea41c5b14");
   assert.equal(hashGs, hashTs, "el .gs y server/avisos.ts deben calcular EXACTAMENTE el mismo HMAC para la misma entrada");
 });
 
@@ -300,19 +329,22 @@ test("M33: igualesEnTiempoConstante_ del .gs es una comparacion EXACTA (no solo 
 
 // ── M39 (corrige vuelta 28, 2026-10-05): charset explicito del HMAC con un vector con tildes/ñ ───
 
+// M-3(b) (corrige vuelta 34): `idEnvio=""` — este vector es el mismo que escribe `runTestHmac()`
+// en avisos-relay.gs (sin id idempotente), por eso el valor esperado CAMBIO frente al de M39.
 const VECTOR_M39 = {
   ts: 1700000000,
   nonce: "nonce-de-prueba",
+  idEnvio: "",
   para: "a@b.com",
   asunto: "Asunto",
   texto: "Confirmación de compra — Año ñandú ×2",
 };
-const HASH_M39_ESPERADO = "d808e9696d8701509709bcc9a16b8a736b4946b225b1deb508be560f684c42b4";
+const HASH_M39_ESPERADO = "1ff82e5298abc6f06614acdfff0755685d1e04448e46a6249b5510fc6f552731";
 
 test("M39: hmacHex_ del .gs pasa Utilities.Charset.UTF_8 EXPLICITO a computeHmacSha256Signature", () => {
   const { sandbox, charsetsUsados } = construirSandbox(SECRETO);
   sandbox.hmacHex_(
-    sandbox.cadenaCanonica_(VECTOR_M39.ts, VECTOR_M39.nonce, VECTOR_M39.para, VECTOR_M39.asunto, VECTOR_M39.texto),
+    sandbox.cadenaCanonica_(VECTOR_M39.ts, VECTOR_M39.nonce, VECTOR_M39.idEnvio, VECTOR_M39.para, VECTOR_M39.asunto, VECTOR_M39.texto),
     "secreto-de-prueba"
   );
   assert.deepEqual(charsetsUsados, ["UTF-8"], "hmacHex_ debe mandar Utilities.Charset.UTF_8 como 3er argumento");
@@ -320,7 +352,7 @@ test("M39: hmacHex_ del .gs pasa Utilities.Charset.UTF_8 EXPLICITO a computeHmac
 
 test("M39 (runTestHmac): el vector con tildes y ñ ('Confirmación de compra — Año ñandú ×2') da el valor fijado en avisos-relay.gs", () => {
   const { sandbox } = construirSandbox(SECRETO);
-  const cadena = sandbox.cadenaCanonica_(VECTOR_M39.ts, VECTOR_M39.nonce, VECTOR_M39.para, VECTOR_M39.asunto, VECTOR_M39.texto);
+  const cadena = sandbox.cadenaCanonica_(VECTOR_M39.ts, VECTOR_M39.nonce, VECTOR_M39.idEnvio, VECTOR_M39.para, VECTOR_M39.asunto, VECTOR_M39.texto);
   const hashGs = sandbox.hmacHex_(cadena, "secreto-de-prueba");
 
   assert.equal(hashGs, HASH_M39_ESPERADO, "debe coincidir con el valor escrito en runTestHmac() de avisos-relay.gs");
@@ -328,7 +360,7 @@ test("M39 (runTestHmac): el vector con tildes y ñ ('Confirmación de compra —
   // Mismo valor del lado TypeScript (server/avisos.ts), con la MISMA cadena canonica — por eso una
   // peticion firmada por el backend real (texto con tildes/ñ) la acepta este .gs real.
   const hashTs = firmarHmac(
-    cadenaCanonicaAviso(VECTOR_M39.ts, VECTOR_M39.nonce, VECTOR_M39.para, VECTOR_M39.asunto, VECTOR_M39.texto),
+    cadenaCanonicaAviso(VECTOR_M39.ts, VECTOR_M39.nonce, VECTOR_M39.idEnvio, VECTOR_M39.para, VECTOR_M39.asunto, VECTOR_M39.texto),
     "secreto-de-prueba"
   );
   assert.equal(hashGs, hashTs, "el .gs (con charset UTF-8 explicito) y server/avisos.ts deben calcular EXACTAMENTE el mismo HMAC para texto con tildes/ñ");
@@ -350,4 +382,93 @@ test("M39: una peticion firmada por server/avisos.ts con asunto/texto en españo
   assert.equal(correosEnviados.length, 1);
   assert.equal(correosEnviados[0].subject, "Confirmación de tu compra en CertiSend Pro — Paquete — $49.102 COP");
   assert.equal(correosEnviados[0].body, "Hola:\n\nRecibimos y confirmamos tu pago. Año ñandú ×2 — café, señal, corazón.");
+});
+
+// ── M-3(b) (corrige vuelta 34 del REVISOR_EXTERNO): deduplicacion por idEnvio en PropertiesService
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Caso real que esto previene: `enviarCorreo` (server/avisos.ts) aborta por timeout y el barrido
+// reintenta el MISMO correo logico mas tarde — otra peticion, con `ts`/`nonce` NUEVOS (asi que el
+// anti-replay del nonce no la detiene), pero el MISMO `idEnvio` porque es el mismo
+// `paymentId:destinatario`. Sin esta deduplicacion, el comprador recibiria el acuse dos veces.
+
+test("M-3(b): el MISMO idEnvio en dos peticiones (nonce/ts distintos, como un reintento real) -> 1 solo correo; la segunda responde ok sin reenviar", () => {
+  const { sandbox, correosEnviados } = construirSandbox(SECRETO);
+  const datosBase = { para: "comprador@test.com", asunto: "Asunto", texto: "Texto", idEnvio: "pago-1:comprador" };
+  const c1 = cuerpoFirmadoReal(SECRETO, { ts: Math.floor(Date.now() / 1000), nonce: randomUUID(), ...datosBase });
+  const c2 = cuerpoFirmadoReal(SECRETO, { ts: Math.floor(Date.now() / 1000) + 5, nonce: randomUUID(), ...datosBase });
+
+  const r1 = doPost(sandbox, c1);
+  const r2 = doPost(sandbox, c2);
+
+  assert.equal(r1.ok, true);
+  assert.equal(r2.ok, true, "la segunda NO es un error: es un reintento legitimo del mismo correo");
+  assert.equal((r2 as any).yaEnviado, true, "la segunda debe indicar que ya se habia enviado");
+  assert.equal(correosEnviados.length, 1, "exactamente 1 correo real, aunque idEnvio llegue dos veces con nonce distinto");
+});
+
+test("M-3(b): idEnvio DISTINTO (mismo para/asunto/texto) -> las DOS se mandan (no es el mismo correo logico)", () => {
+  const { sandbox, correosEnviados } = construirSandbox(SECRETO);
+  const datosBase = { para: "comprador@test.com", asunto: "Asunto", texto: "Texto" };
+  const c1 = cuerpoFirmadoReal(SECRETO, { ts: Math.floor(Date.now() / 1000), nonce: randomUUID(), idEnvio: "pago-1:comprador", ...datosBase });
+  const c2 = cuerpoFirmadoReal(SECRETO, { ts: Math.floor(Date.now() / 1000), nonce: randomUUID(), idEnvio: "pago-2:comprador", ...datosBase });
+
+  const r1 = doPost(sandbox, c1);
+  const r2 = doPost(sandbox, c2);
+
+  assert.equal(r1.ok, true);
+  assert.equal(r2.ok, true);
+  assert.equal(correosEnviados.length, 2);
+});
+
+test("M-3(b): idEnvio vacio ('', compatibilidad) NUNCA deduplica — dos peticiones distintas sin idEnvio se mandan las DOS", () => {
+  const { sandbox, correosEnviados } = construirSandbox(SECRETO);
+  const datosBase = { para: "comprador@test.com", asunto: "Asunto", texto: "Texto", idEnvio: "" };
+  const c1 = cuerpoFirmadoReal(SECRETO, { ts: Math.floor(Date.now() / 1000), nonce: randomUUID(), ...datosBase });
+  const c2 = cuerpoFirmadoReal(SECRETO, { ts: Math.floor(Date.now() / 1000), nonce: randomUUID(), ...datosBase });
+
+  const r1 = doPost(sandbox, c1);
+  const r2 = doPost(sandbox, c2);
+
+  assert.equal(r1.ok, true);
+  assert.equal(r2.ok, true);
+  assert.equal(correosEnviados.length, 2, "sin idEnvio, el comportamiento es el de antes de M-3(b): nunca deduplica");
+});
+
+test("M-3(b): un idEnvio solo se marca como procesado DESPUES de un destinatario_no_esperado (un intento rechazado no bloquea el reintento correcto)", () => {
+  const { sandbox, correosEnviados } = construirSandbox(SECRETO);
+  const idEnvio = "pago-1:comprador";
+  const c1 = cuerpoFirmadoReal(SECRETO, { ts: Math.floor(Date.now() / 1000), nonce: randomUUID(), idEnvio, para: "esto-no-es-un-correo", asunto: "Asunto", texto: "Texto" });
+  const r1 = doPost(sandbox, c1);
+  assert.equal(r1.error, "destinatario_no_esperado");
+  assert.equal(correosEnviados.length, 1, "el rechazo SI manda el aviso de 'destinatario inesperado' a Leonardo (notifyLeo_)");
+
+  // Un segundo intento, con el MISMO idEnvio pero un destinatario valido esta vez, SI debe mandarse
+  // — el primer intento nunca llego a marcar el idEnvio porque nunca llego a MailApp.sendEmail (el
+  // envio REAL, no el aviso de notifyLeo_).
+  const c2 = cuerpoFirmadoReal(SECRETO, { ts: Math.floor(Date.now() / 1000) + 1, nonce: randomUUID(), idEnvio, para: "comprador@test.com", asunto: "Asunto", texto: "Texto" });
+  const r2 = doPost(sandbox, c2);
+  assert.equal(r2.ok, true);
+  assert.equal(correosEnviados.length, 2, "1 aviso de destinatario inesperado + 1 correo real al comprador (no deduplicado por el intento rechazado)");
+  assert.equal(correosEnviados[1].to, "comprador@test.com");
+});
+
+test("M-3(b): limpieza simple — una entrada idEnvio de mas de 7 dias se borra al marcar un envio nuevo", () => {
+  const { sandbox, propiedadesScript } = construirSandbox(SECRETO);
+  const hace8Dias = Math.floor(Date.now() / 1000) - 8 * 24 * 3600;
+  propiedadesScript.set("envio_pago-viejo:comprador", String(hace8Dias));
+
+  sandbox.marcarIdEnvioProcesado_("pago-nuevo:comprador");
+
+  assert.equal(propiedadesScript.has("envio_pago-viejo:comprador"), false, "la entrada vieja (>7 dias) debe limpiarse");
+  assert.equal(propiedadesScript.has("envio_pago-nuevo:comprador"), true, "la entrada nueva SI debe quedar");
+});
+
+test("M-3(b): una entrada idEnvio de MENOS de 7 dias NO se borra al marcar un envio nuevo", () => {
+  const { sandbox, propiedadesScript } = construirSandbox(SECRETO);
+  const hace1Dia = Math.floor(Date.now() / 1000) - 1 * 24 * 3600;
+  propiedadesScript.set("envio_pago-reciente:comprador", String(hace1Dia));
+
+  sandbox.marcarIdEnvioProcesado_("pago-nuevo:comprador");
+
+  assert.equal(propiedadesScript.has("envio_pago-reciente:comprador"), true, "una entrada de 1 dia no debe borrarse (el TTL es 7 dias)");
 });

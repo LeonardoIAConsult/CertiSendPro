@@ -136,6 +136,19 @@ export interface RespuestaBarridoTarea {
 }
 
 /**
+ * M-1/M-2 (corrige vuelta 34 del REVISOR_EXTERNO): log estructurado grepable (mismo formato que
+ * `BARRIDO_ACUSES_FALLO` abajo y las alertas de server/notificaciones.ts) ante un 401/403 — un
+ * token OIDC que de pronto deja de verificar (SA/audiencia mal configurada, permiso revocado) es
+ * exactamente el tipo de fallo "silencioso" que esta alerta busca atrapar: el barrido completo
+ * deja de correr y, sin este log, nadie se entera hasta que algun acuse lleva dias pendiente.
+ * Nunca lleva el token ni ningun dato del llamador (la peticion, antes de verificar el token, no
+ * tiene ninguna identidad que loguear).
+ */
+function logTareaBarridoRechazada(motivo: "sin_token" | "token_invalido"): void {
+  console.error(JSON.stringify({ severity: "ERROR", message: "TAREA_BARRIDO_RECHAZADA", motivo }));
+}
+
+/**
  * Logica (sin Express) del endpoint que dispara Cloud Scheduler. Sin encabezado
  * `Authorization: Bearer <idToken>` -> 401. Token que no verifica (otra cuenta de servicio,
  * audiencia distinta, token invencido/expirado) -> 403. Token valido -> ejecuta el barrido
@@ -152,10 +165,12 @@ export async function manejarBarridoAcusesTarea(
 ): Promise<RespuestaBarridoTarea> {
   const match = /^Bearer\s+(.+)$/.exec(authorizationHeader || "");
   if (!match) {
+    logTareaBarridoRechazada("sin_token");
     return { status: 401, body: { error: "Falta el token de identidad de Cloud Scheduler." } };
   }
   const autorizado = await deps.verificarToken(match[1]);
   if (!autorizado) {
+    logTareaBarridoRechazada("token_invalido");
     return { status: 403, body: { error: "Token no autorizado para esta tarea." } };
   }
   try {
@@ -166,5 +181,63 @@ export async function manejarBarridoAcusesTarea(
       JSON.stringify({ severity: "ERROR", message: "BARRIDO_ACUSES_FALLO", error: error?.message || String(error) })
     );
     return { status: 500, body: { error: "Fallo el barrido de acuses pendientes." } };
+  }
+}
+
+// ── M-4 (corrige vuelta 34 del REVISOR_EXTERNO): registro de la ruta extraido de server.ts ─────
+// Antes, `app.post("/api/tareas/barrido-acuses", ...)` vivia inline en server.ts, sin forma de
+// probar que el endpoint REAL (el que Express de verdad expone) delega en
+// `manejarBarridoAcusesTarea` sin pasar por una copia casi-igual del mismo codigo. Ahora
+// `registrarRutasTareas` es la UNICA definicion de esa ruta; server.ts solo la llama.
+
+/** Ruta del endpoint que dispara Cloud Scheduler — un solo literal, usado tanto al registrar la
+ * ruta como al verificar (al arrancar) que quedo registrada. */
+export const RUTA_BARRIDO_ACUSES = "/api/tareas/barrido-acuses";
+
+/** Forma minima de una app de Express (o un doble de pruebas) que necesita `registrarRutasTareas`. */
+export interface AppConRutasTareas {
+  post(path: string, handler: (req: any, res: any) => void | Promise<void>): void;
+}
+
+/** Registra `POST /api/tareas/barrido-acuses` en `app`, delegando en `manejarBarridoAcusesTarea`. */
+export function registrarRutasTareas(app: AppConRutasTareas, deps: DepsBarridoTarea = depsBarridoTareaReales): void {
+  app.post(RUTA_BARRIDO_ACUSES, async (req: any, res: any) => {
+    const resultado = await manejarBarridoAcusesTarea(req.headers.authorization, deps);
+    res.status(resultado.status).json(resultado.body);
+  });
+}
+
+/**
+ * M-4: chequeo de arranque — de mejor esfuerzo, nunca lanza. Si `server.ts` dejara de llamar a
+ * `registrarRutasTareas` (p. ej. al refactorizar y olvidar la linea), NINGUNA prueba de este
+ * archivo puede detectarlo: una prueba aqui solo puede comprobar que esta FUNCION registra la
+ * ruta cuando SI se la llama, nunca que `server.ts` la llame de verdad. Por eso la defensa real es
+ * esta: inspecciona el router de Express YA ARRANCADO y deja un log estructurado grepable si la
+ * ruta no aparece, para que el problema se note en los logs de arranque de Cloud Run en vez de
+ * descubrirse dias despues con acuses atascados.
+ */
+export function verificarRutaTareasRegistrada(
+  app: any,
+  log: (linea: string) => void = (linea) => console.error(linea)
+): boolean {
+  try {
+    const capas: any[] = app?._router?.stack ?? [];
+    const registrada = capas.some(
+      (capa) => capa?.route?.path === RUTA_BARRIDO_ACUSES && capa?.route?.methods?.post === true
+    );
+    if (!registrada) {
+      log(JSON.stringify({ severity: "ERROR", message: "RUTA_TAREAS_NO_REGISTRADA", ruta: RUTA_BARRIDO_ACUSES }));
+    }
+    return registrada;
+  } catch (error: any) {
+    log(
+      JSON.stringify({
+        severity: "ERROR",
+        message: "RUTA_TAREAS_NO_REGISTRADA",
+        ruta: RUTA_BARRIDO_ACUSES,
+        error: error?.message || String(error),
+      })
+    );
+    return false;
   }
 }
