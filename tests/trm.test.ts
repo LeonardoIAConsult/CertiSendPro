@@ -113,7 +113,7 @@ function fetchOk(fila: any): FetchLike {
 }
 
 test("trmHoy: con una fila buena, devuelve valor y vigencia", async () => {
-  const r = await trmHoy(fetchOk({ valor: 4200, vigenciadesde: "2026-10-05T00:00:00.000", vigenciahasta: "2026-10-05T00:00:00.000" }));
+  const r = await trmHoy(fetchOk({ valor: 4200, vigenciadesde: "2026-10-05T00:00:00.000", vigenciahasta: "2026-10-05T00:00:00.000" }), ahora);
   assert.ok(r !== null);
   assert.equal(r!.valor, 4200);
   assert.equal(r!.fechaDesde, "2026-10-05");
@@ -127,7 +127,7 @@ test("trmHoy: respuesta vacia ([]) del endpoint -> null (nunca un dato inventado
 });
 
 test("trmHoy: ninguna fila de la respuesta cubre hoy -> null (se descarta, nunca una vencida)", async () => {
-  const r = await trmHoy(fetchOk({ valor: 4200, vigenciadesde: "2026-10-01T00:00:00.000", vigenciahasta: "2026-10-02T00:00:00.000" }));
+  const r = await trmHoy(fetchOk({ valor: 4200, vigenciadesde: "2026-10-01T00:00:00.000", vigenciahasta: "2026-10-02T00:00:00.000" }), ahora);
   assert.equal(r, null);
 });
 
@@ -137,7 +137,7 @@ test("trmHoy: elige la primera fila (de varias) que SI cubre hoy, aunque no sea 
     { valor: 4200, vigenciadesde: "2026-10-05T00:00:00.000", vigenciahasta: "2026-10-05T00:00:00.000" }, // cubre hoy
   ];
   const fetchVarias: FetchLike = async () => ({ ok: true, json: async () => filas });
-  const r = await trmHoy(fetchVarias);
+  const r = await trmHoy(fetchVarias, ahora);
   assert.ok(r !== null);
   assert.equal(r!.valor, 4200);
 });
