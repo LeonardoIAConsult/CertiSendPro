@@ -131,6 +131,13 @@ export function textoCasillaRetractoPorUso(idioma: Idioma = "es"): string {
   return idioma === "en" ? TEXTO_CASILLA_RETRACTO_POR_USO_EN : TEXTO_CASILLA_RETRACTO_POR_USO;
 }
 
+/** Version vigente de la autorizacion de tratamiento de datos (T11). Bump a 2.4 (2026-10-07,
+ * decision del Brain): la Politica de Privacidad paso a v2.4 (Legal_LAP, src/legal/privacidad.md
+ * y docs/legal/politica-de-privacidad.md) — tabla de planes con Pago por uso, Pro retirado.
+ * Movida aqui (antes vivia como una constante local en server.ts) para que su version quede en
+ * el mismo lugar que `TERMINOS_VERSION`, nunca duplicada. */
+export const AUTORIZACION_DATOS_VERSION = "2.4";
+
 export function textoAutorizacionDatos(idioma: Idioma, nombreProveedor: string | null | undefined): string {
   const nombre = nombreProveedor && nombreProveedor.trim() ? nombreProveedor.trim() : "[dato pendiente]";
   if (idioma === "en") {

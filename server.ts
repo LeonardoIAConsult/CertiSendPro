@@ -34,6 +34,7 @@ import {
   textoAceptacionTerminosUso,
   decidirRegistroAutorizacion,
   TERMINOS_VERSION,
+  AUTORIZACION_DATOS_VERSION,
 } from "./server/cuentas";
 import {
   huellasLote,
@@ -800,10 +801,12 @@ const PLANES_USD = {
   porUso: { usdUnidad: 0.15, minimo: 50, maximo: 5000 },
 } as const;
 
-// Version vigente de la Politica de Privacidad (docs/legal/privacidad.plantilla.md, "Versión:
-// 2.3") que /api/autorizacion-datos guarda junto a la autorizacion (requisito B.3, Tarea 15,
-// Ley 1581). Subir esta constante cuando cambie la version publicada.
-const AUTORIZACION_DATOS_VERSION = "2.3";
+// Version vigente de la Politica de Privacidad que /api/autorizacion-datos guarda junto a la
+// autorizacion (requisito B.3, Tarea 15, Ley 1581). Fix (2026-10-07): esta constante vivia
+// hardcodeada aqui en "2.3" mientras la Politica de Privacidad ya habia pasado a v2.4
+// (docs/legal/politica-de-privacidad.md, src/legal/privacidad.md) — se movio a
+// `AUTORIZACION_DATOS_VERSION` de shared/textosCasillas.ts (mismo patron que `TERMINOS_VERSION`,
+// importada abajo), para que exista en un solo sitio y nunca vuelva a desincronizarse.
 // TRM del dia: validacion, timeout y cacheo robustos viven en server/trm.ts (Tarea 4, 2026-10-05)
 // — igual que cuentas.ts, separado de este archivo para poder probarse con node:test sin red.
 

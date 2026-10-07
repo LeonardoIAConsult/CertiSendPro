@@ -6,6 +6,7 @@ import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestor
 import { obtenerFirebaseApp } from "./firebaseAdmin";
 import {
   TERMINOS_VERSION,
+  AUTORIZACION_DATOS_VERSION,
   normalizarIdioma,
   textoCasillaRetracto,
   textoCasillaTerminos,
@@ -22,7 +23,11 @@ import {
 // (server/cobroPaquete.ts, server.ts, tests existentes). Antes este archivo y
 // `src/utils/checkout.ts` tenian el MISMO texto copiado a mano en dos sitios; ahora los dos
 // importan de la misma fuente (`tests/textosCasillas.test.ts` prueba que coincidan).
-export { TERMINOS_VERSION, normalizarIdioma, textoCasillaRetracto, textoCasillaTerminos, textoAutorizacionDatos, textoAceptacionTerminosUso, TEXTO_CASILLA_RETRACTO, TEXTO_CASILLA_RETRACTO_EN };
+//
+// Fix (2026-10-07): `AUTORIZACION_DATOS_VERSION` vivia como una constante LOCAL de server.ts
+// (desincronizada en "2.3" mientras la Politica de Privacidad ya paso a v2.4) — se mueve aqui, al
+// lado de `TERMINOS_VERSION`, mismo patron, para que solo exista en UN sitio.
+export { TERMINOS_VERSION, AUTORIZACION_DATOS_VERSION, normalizarIdioma, textoCasillaRetracto, textoCasillaTerminos, textoAutorizacionDatos, textoAceptacionTerminosUso, TEXTO_CASILLA_RETRACTO, TEXTO_CASILLA_RETRACTO_EN };
 export type { Idioma };
 
 // Base de datos NOMBRADA de Firestore (us-west1), ya existente. NUNCA la "(default)".
@@ -441,12 +446,31 @@ export async function activarPaqueteSiNoProcesadoTx(
  * `revertirPagoSiNoRevertidoTx` (mas abajo) los usa para saber RESTAR del saldo acumulado en vez
  * de resetear la cuenta entera a Gratis — un reembolso de Por Uso no "reemplaza" nada, solo resta
  * lo que ESE pago en concreto habia sumado.
+ *
+ * Fix (hallazgo 2026-10-07): igual que M37 ya hace para `activarPaqueteSiNoProcesadoTx`, el pago
+ * tambien guarda `referenciaId`/`fechaTrm` (OPCIONALES en esta Tx, mismo motivo que el Paquete: no
+ * romper llamadas viejas que no los necesitan) para poder RECONSTRUIR el acuse de compra
+ * (`notificarActivacionPorUso`, server/notificaciones.ts) en un reintento posterior sin volver a
+ * consultar Mercado Pago. Antes de este fix, un pago porUso nunca guardaba estos dos campos:
+ * `reintentarAcusePorUsoPendiente` los leia `null` y abandonaba con un `console.warn` ("sin
+ * referenciaId/fechaTrm guardados") sin reintentar nunca — el barrido programado
+ * (`barrerTodosLosPagosPendientes`, server/tareasFondo.ts) jamas podia recuperar el acuse en linea
+ * fallido de una compra porUso. En produccion (`activarPorUsoSiNoProcesado`, mas abajo) SIEMPRE se mandan.
  */
 export async function activarPorUsoSiNoProcesadoTx(
   tx: TransaccionLike,
   pagoRef: any,
   cuentaRef: any,
-  datos: { paymentId: string; uid: string; cantidad: number; cop: number; trm: number; fecha: Timestamp }
+  datos: {
+    paymentId: string;
+    uid: string;
+    cantidad: number;
+    cop: number;
+    trm: number;
+    fecha: Timestamp;
+    referenciaId?: string;
+    fechaTrm?: string;
+  }
 ): Promise<"activado" | "repetido"> {
   const pagoSnap = await tx.get(pagoRef);
   if (pagoSnap.exists) return "repetido";
@@ -459,8 +483,10 @@ export async function activarPorUsoSiNoProcesadoTx(
   tx.set(pagoRef, {
     procesadoEn: Timestamp.now(),
     uid: datos.uid,
+    referenciaId: datos.referenciaId ?? null,
     cop: datos.cop,
     trm: datos.trm,
+    fechaTrm: datos.fechaTrm ?? null,
     fecha: datos.fecha,
     tipo: "porUso",
     cantidad: datos.cantidad,
@@ -474,11 +500,15 @@ export async function activarPorUsoSiNoProcesadoTx(
   return "activado";
 }
 
-/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
+/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales.
+ * `referenciaId`/`fechaTrm` (fix 2026-10-07, ver el comentario de `activarPorUsoSiNoProcesadoTx`)
+ * son REQUERIDOS aqui (a diferencia de la Tx, que los deja opcionales) — mismo patron que
+ * `activarPaqueteSiNoProcesado`: en produccion el llamador (server/webhook.ts) siempre los tiene
+ * disponibles (vienen de la preferencia y del external_reference). */
 export async function activarPorUsoSiNoProcesado(
   uid: string,
   paymentId: string,
-  datos: { cantidad: number; cop: number; trm: number; fecha: Timestamp }
+  datos: { cantidad: number; cop: number; trm: number; fecha: Timestamp; referenciaId: string; fechaTrm: string }
 ): Promise<"activado" | "repetido"> {
   const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
   const cuentaRef = db().collection("cuentas").doc(uid);

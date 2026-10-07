@@ -179,7 +179,14 @@ test("webhook porUso: refunded llama a procesarReembolso con plan:\"porUso\" y N
 test("webhook porUso: revertirPagoSiNoRevertido (la funcion real) resta exactamente lo sumado", async () => {
   const db = new FirestoreFalso();
   const activarPorUso = activarPorUsoConFake(db);
-  await activarPorUso("uid-1", "pago-1", { cantidad: 50, cop: 7500, trm: 3900, fecha: Timestamp.now() });
+  await activarPorUso("uid-1", "pago-1", {
+    cantidad: 50,
+    cop: 7500,
+    trm: 3900,
+    fecha: Timestamp.now(),
+    referenciaId: "ref-1",
+    fechaTrm: "2026-10-06",
+  });
 
   let cuenta = db.leer("cuentas/uid-1") as Cuenta;
   assert.equal(cuenta.saldoPorUso, 50);

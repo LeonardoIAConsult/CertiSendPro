@@ -21,6 +21,7 @@ import {
   decidirAutorizacionLote,
   decidirRegistroAutorizacion,
   _usarFirestoreParaPruebas,
+  AUTORIZACION_DATOS_VERSION,
   type Cuenta,
   type AutorizacionDatos,
   type AutorizacionGuardada,
@@ -163,6 +164,24 @@ test("decidirAutorizacionLote: version guardada DISTINTA de la vigente -> 403 (s
 
 test("decidirAutorizacionLote: version guardada IGUAL a la vigente -> ok", () => {
   assert.deepEqual(decidirAutorizacionLote(autorizacion("2.3"), "2.3"), { ok: true });
+});
+
+// ── Fix (2026-10-07): AUTORIZACION_DATOS_VERSION se movio de una constante local de server.ts
+// (desincronizada en "2.3") a shared/textosCasillas.ts en "2.4" — la Politica de Privacidad ya
+// esta en v2.4 (src/legal/privacidad.md, docs/legal/politica-de-privacidad.md). Esta prueba usa
+// la CONSTANTE REAL (no un literal "2.3"/"2.4" escrito a mano, como las de arriba) para que, si
+// alguien la vuelve a dejar en "2.3" (o en cualquier version distinta de la que de verdad guardo
+// una autorizacion vieja), la prueba SI caiga.
+test("decidirAutorizacionLote: una autorizacion 2.3 (version vieja, pre-fix) se vuelve a pedir contra AUTORIZACION_DATOS_VERSION vigente", () => {
+  assert.equal(AUTORIZACION_DATOS_VERSION, "2.4", "la version vigente debe ser 2.4 (Politica de Privacidad v2.4)");
+  const r = decidirAutorizacionLote(autorizacion("2.3"), AUTORIZACION_DATOS_VERSION);
+  assert.equal(r.ok, false, "una autorizacion de la version vieja (2.3) debe pedirse de nuevo");
+  assert.equal((r as any).httpStatus, 403);
+  assert.equal((r as any).motivo, "autorizacion");
+});
+
+test("decidirAutorizacionLote: una autorizacion YA en AUTORIZACION_DATOS_VERSION vigente (2.4) -> ok", () => {
+  assert.deepEqual(decidirAutorizacionLote(autorizacion(AUTORIZACION_DATOS_VERSION), AUTORIZACION_DATOS_VERSION), { ok: true });
 });
 
 // ── decidirRegistroAutorizacion (Medio 2, correccion vuelta 33, 2026-10-06): decision de

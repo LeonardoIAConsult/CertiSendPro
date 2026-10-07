@@ -86,11 +86,16 @@ export interface ProcesarWebhookMPOpts {
    * uso" (suma `cantidad` al saldo, SIN vencimiento, ACUMULABLE — ver
    * `activarPorUsoSiNoProcesado`, server/cuentas.ts). A diferencia del Paquete, nunca hay
    * "requiere_reembolso": el saldo Por uso no tiene un "pago activo" unico que proteger.
+   *
+   * Fix (hallazgo 2026-10-07): `referenciaId`/`fechaTrm` (mismo patron que `activarPaquete`
+   * arriba) se guardan junto con el pago para poder reconstruir el acuse de compra en un
+   * reintento posterior (barrido programado) sin volver a consultar Mercado Pago. Antes de este
+   * fix nunca se pasaban: un pago porUso jamas podia reintentar su acuse en linea fallido.
    */
   activarPorUso(
     uid: string,
     paymentId: string,
-    datos: { cantidad: number; cop: number; trm: number; fecha: Timestamp }
+    datos: { cantidad: number; cop: number; trm: number; fecha: Timestamp; referenciaId: string; fechaTrm: string }
   ): Promise<"activado" | "repetido">;
   /** Para construir el Timestamp de la fecha del pago sin importar firebase-admin aqui (se inyecta
    * desde server.ts/los tests, que ya tienen el Timestamp real o uno falso). */
@@ -362,6 +367,11 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
       cop: referencia.cop,
       trm: prefPorUso.trm,
       fecha: opts.timestampDesdeFecha(fechaPagoPorUso),
+      // Fix (hallazgo 2026-10-07): salen de la preferencia y del external_reference, igual que el
+      // Paquete (ver la activacion de abajo) — sin esto, el barrido programado nunca podia
+      // reconstruir el acuse de una compra porUso cuyo acuse en linea fallo.
+      referenciaId: referencia.referenciaId,
+      fechaTrm: prefPorUso.fechaTrm,
     });
 
     try {
