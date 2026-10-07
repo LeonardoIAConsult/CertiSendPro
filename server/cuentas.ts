@@ -566,7 +566,18 @@ export async function activarPorUsoSiNoProcesadoTx(
   });
 
   if (cuentaActual) {
-    tx.update(cuentaRef, { saldoPorUso: saldoPorUsoNuevo, ultimoPago });
+    const actualizacion: Record<string, unknown> = { saldoPorUso: saldoPorUsoNuevo, ultimoPago };
+    // B6 (corrige NO-GO 2026-10-07): una cuenta con Paquete activado por el codigo VIEJO (antes de
+    // que `pagoPaqueteId` existiera) no tiene el campo (`undefined`). Si esta escritura pisa
+    // `ultimoPago` con el pago Por Uso que se esta activando SIN migrar `pagoPaqueteId` primero,
+    // `resolverPagoPaqueteId` ya no puede usar su fallback (que depende de que `ultimoPago` SIGA
+    // siendo el del Paquete) — el Paquete queda invisible para esa funcion, y un reembolso
+    // posterior del Paquete real nunca lo encontraria activo (quedaria "no_activo" en vez de
+    // revertir la cuenta a gratis). Se migra AQUI, ANTES de pisar `ultimoPago` en este mismo update.
+    if (cuentaActual.pagoPaqueteId === undefined && cuentaActual.plan === "paquete") {
+      actualizacion.pagoPaqueteId = cuentaActual.ultimoPago?.id ?? null;
+    }
+    tx.update(cuentaRef, actualizacion);
   } else {
     tx.set(cuentaRef, { ...CUENTA_GRATIS_BASE, saldoPorUso: saldoPorUsoNuevo, ultimoPago, actualizado: Timestamp.now() });
   }
@@ -1287,7 +1298,13 @@ export async function contarReservadosPorUsoVigentes(uid: string, ahora: Date): 
   let total = 0;
   for (const doc of snap.docs) {
     const lote = doc.data() as Lote;
-    const esFuentePorUso = lote.planEfectivo === "porUso" || lote.planEfectivo === "mixto";
+    // G2 (corrige NO-GO 2026-10-07): desde B2, un lote "paquete" PURO tambien puede reservar del
+    // saldo Por Uso (si el Paquete se agoto/vencio a mitad del lote) — igual que ya hacia "mixto".
+    // El filtro viejo (solo "porUso"/"mixto") dejaba esas reservas sin contar: con envios en
+    // paralelo se podia gastar mas saldo Por Uso del pagado (ver `reservarEnvioTx`, que SI las
+    // reserva, pero este recalculo las ignoraba al recontar). "gratis" es la unica fuente que
+    // nunca toca ninguno de los dos saldos.
+    const esFuentePorUso = lote.planEfectivo !== "gratis";
     if (esFuentePorUso && lote.expira.toMillis() > ahora.getTime()) {
       total += lote.reservadosPorUso ?? 0;
     }
@@ -1498,7 +1515,14 @@ export async function reservarEnvio(
 function fuenteDelLote(lote: Lote, planEfectivo: PlanEfectivo): "paquete" | "porUso" | null {
   if (planEfectivo === "gratis") return null; // nunca toca la cuenta.
   if (planEfectivo === "porUso") return "porUso";
-  return (lote.reservadosPaquete ?? 0) > 0 ? "paquete" : "porUso"; // "paquete" o "mixto".
+  // B7 (corrige NO-GO 2026-10-07): un lote "paquete" PURO escrito ANTES de que `reservadosPaquete`
+  // existiera no tiene el campo (`undefined`), pero su `reservados` YA era, por definicion, 100%
+  // Paquete — mismo fallback (y mismo motivo) que ya usa `contarReservadosPaqueteVigentes`. Sin
+  // el, ese lote viejo caia siempre a "porUso" y confirmaba/liberaba contra el saldo equivocado.
+  // "mixto" siempre es NUEVO (el tipo no existia antes de esta tarea): `reservadosPaquete` SIEMPRE
+  // esta escrito en el (aunque sea 0), asi que nunca necesita el fallback.
+  const reservadosPaquete = planEfectivo === "paquete" ? lote.reservadosPaquete ?? lote.reservados ?? 0 : lote.reservadosPaquete ?? 0;
+  return reservadosPaquete > 0 ? "paquete" : "porUso"; // "paquete" o "mixto".
 }
 
 export async function confirmarEnvioExitosoTx(

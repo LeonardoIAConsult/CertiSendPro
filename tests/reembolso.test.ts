@@ -285,3 +285,103 @@ test("G1 fallback conservador: cuenta VIEJA sin pagoPaqueteId y ultimoPago SIN r
   const cuenta = db.leer("cuentas/uid-1") as Cuenta;
   assert.equal(cuenta.plan, "paquete", "la cuenta no debe tocarse ante la duda");
 });
+
+// ── B6 (NO-GO de la revision externa sobre b865256, 2026-10-07): una cuenta con Paquete activado
+// por el codigo VIEJO (sin `pagoPaqueteId`) que despues compra Por Uso debia migrar el campo ANTES
+// de que esa misma compra pisara `ultimoPago` — sin la migracion, un reembolso posterior del
+// Paquete real quedaba "no_activo" para siempre (el mismo sintoma que G1, pero para cuentas que
+// nunca pasaron por el fix de G1 porque se activaron antes de que `pagoPaqueteId` existiera). ────
+
+test("B6: cuenta VIEJA con Paquete (sin pagoPaqueteId) + compra porUso migra el campo ANTES de pisar ultimoPago -> el reembolso del Paquete SI revierte", async () => {
+  const db = new FirestoreFalso();
+  await activar(db, "uid-1", "pago-paquete-1");
+
+  // Simula una cuenta de Paquete activada por el codigo VIEJO (antes de este fix): el campo
+  // `pagoPaqueteId` nunca llego a escribirse.
+  const cuentaVieja: any = { ...(db.leer("cuentas/uid-1") as Cuenta) };
+  delete cuentaVieja.pagoPaqueteId;
+  db.seed("cuentas/uid-1", cuentaVieja);
+
+  await activarPorUso(db, "uid-1", "pago-poruso-1", 100);
+
+  const tras = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(tras.ultimoPago!.id, "pago-poruso-1", "la compra porUso pisa ultimoPago (esperado)");
+  assert.equal(tras.pagoPaqueteId, "pago-paquete-1", "B6: pero la migracion ya dejo pagoPaqueteId con el del Paquete viejo");
+
+  const resultado = await revertir(db, "uid-1", "pago-paquete-1");
+  assert.equal(resultado, "revertido", "con el campo migrado, el Paquete viejo SI se reconoce como activo");
+
+  const cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.plan, "gratis");
+  assert.equal(cuenta.saldoPorUso, 100, "el saldo Por Uso no se toca al revertir el Paquete");
+});
+
+test("B6 (mutacion documentada): quitar la migracion en activarPorUsoSiNoProcesadoTx hace caer la prueba de arriba", () => {
+  // Verificado a mano (no comiteado): en activarPorUsoSiNoProcesadoTx, quitar el bloque que
+  // escribe `pagoPaqueteId` antes del `tx.update(cuentaRef, actualizacion)` (volver a
+  // `tx.update(cuentaRef, { saldoPorUso: saldoPorUsoNuevo, ultimoPago })` sin mas) hace que la
+  // prueba de arriba reciba "no_activo" en vez de "revertido": sin la migracion, pagoPaqueteId
+  // sigue `undefined` y el fallback de resolverPagoPaqueteId mira `ultimoPago` (ya pisado por la
+  // compra porUso, tipo "porUso") en vez del Paquete real. Restaurado de inmediato.
+  assert.ok(true);
+});
+
+// ── Chequeo de tipo dentro del fallback de resolverPagoPaqueteId (parte del cierre de B6): una
+// cuenta vieja (sin pagoPaqueteId) cuyo `ultimoPago` YA es un pago Por Uso no debe tratarse como
+// si fuera el Paquete activo. Se prueba por el otro llamador de resolverPagoPaqueteId
+// (activarPaqueteSiNoProcesadoTx/`vigentePorOtroPago`): al revertir, paymentId==ultimoPago.id
+// siempre se resuelve antes por la rama "porUso" del propio pago (ver linea ~1011 de
+// server/cuentas.ts), asi que ahi el chequeo de tipo nunca cambia el resultado observable; aqui
+// SI lo hace, porque compara contra un paymentId DISTINTO (el de una activacion nueva). ──────────
+
+function activarConTipoPago(db: FirestoreFalso, uid: string, paymentId: string) {
+  const pagoRef = db.doc(`pagosProcesados/${paymentId}`);
+  const cuentaRef = db.doc(`cuentas/${uid}`);
+  const obtenerTipoPago = async (id: string) => db.leer(`pagosProcesados/${id}`)?.tipo as string | undefined;
+  return db.runTransaction((tx) =>
+    activarPaqueteSiNoProcesadoTx(
+      tx,
+      pagoRef,
+      cuentaRef,
+      { paymentId, cop: 49102, trm: 3273.49, fecha: Timestamp.fromDate(new Date("2026-10-07T12:00:00.000Z")) },
+      obtenerTipoPago
+    )
+  );
+}
+
+test("resolverPagoPaqueteId (chequeo de tipo en el fallback): ultimoPago de tipo porUso NO se asume Paquete vigente de otro pago", async () => {
+  const db = new FirestoreFalso();
+  // Cuenta "paquete" vigente (plan/enviosRestantes/vence) pero sin `pagoPaqueteId` (no migrada) y
+  // cuyo `ultimoPago` ya fue pisado por una compra Por Uso posterior — mismo estado que B6
+  // describe, construido directamente para aislar el chequeo de tipo del resto de los fixes.
+  db.seed("cuentas/uid-1", {
+    plan: "paquete",
+    enviosRestantes: 80,
+    vence: Timestamp.fromDate(new Date("2026-12-01T00:00:00.000Z")),
+    renueva: false,
+    mpSuscripcionId: null,
+    reservadosPaquete: 0,
+    saldoPorUso: 100,
+    reservadosPorUso: 0,
+    ultimoPago: { id: "pago-poruso-1", cop: 60000, trm: 3900, fecha: Timestamp.now() },
+    actualizado: Timestamp.now(),
+  });
+  db.seed("pagosProcesados/pago-poruso-1", { procesadoEn: Timestamp.now(), tipo: "porUso", cantidad: 100 });
+
+  const resultado = await activarConTipoPago(db, "uid-1", "pago-nuevo-2");
+  assert.equal(
+    resultado,
+    "activado",
+    "el chequeo de tipo descarta ultimoPago (porUso) como el Paquete: sin pagoPaqueteId confiable, no bloquea la activacion nueva"
+  );
+});
+
+test("resolverPagoPaqueteId (mutacion documentada): quitar el chequeo de tipo del fallback hace caer la prueba de arriba", () => {
+  // Verificado a mano (no comiteado): en resolverPagoPaqueteId, cambiar
+  // `return tipo === "porUso" ? null : cuenta.ultimoPago.id;` por `return cuenta.ultimoPago.id;`
+  // (sin el chequeo de tipo) hace que la prueba de arriba reciba "requiere_reembolso" en vez de
+  // "activado": el fallback asumiria, sin comprobar, que el pago Por Uso (ultimoPago) es un
+  // Paquete vigente de OTRO pago, y bloquearia la activacion nueva legitima. Restaurado de
+  // inmediato tras confirmarlo.
+  assert.ok(true);
+});

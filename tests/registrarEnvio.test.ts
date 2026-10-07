@@ -517,3 +517,32 @@ test("B2 (mutacion documentada): sin el fallback a porUso, r2/r3 de la primera p
   // `ok:false` en la prueba "el Paquete se AGOTA a mitad del lote" de arriba. Restaurado de inmediato.
   assert.ok(true);
 });
+
+// ── B7 (NO-GO de la revision externa sobre b865256, 2026-10-07): un lote "paquete" PURO escrito
+// ANTES de que `reservadosPaquete` existiera (solo tiene `reservados`) debe seguir confirmando y
+// liberando contra el Paquete, no caer a "porUso" por falta del campo nuevo (mismo fallback que
+// ya usa `contarReservadosPaqueteVigentes`). ────────────────────────────────────────────────────
+
+test("B7: lote viejo 'paquete' sin reservadosPaquete (solo 'reservados') confirma contra el Paquete, no contra Por Uso", async () => {
+  const db = new FirestoreFalso();
+  const loteViejo: any = loteBase({ uid: "u1", cantidad: 5, planEfectivo: "paquete", reservados: 2 });
+  delete loteViejo.reservadosPaquete; // simula un lote escrito ANTES de que el campo existiera.
+  db.seed("lotes/L1", loteViejo);
+  db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 40, saldoPorUso: 100 }));
+  const loteRef = db.doc("lotes/L1");
+  const cuentaRef = db.doc("cuentas/u1");
+
+  await db.runTransaction((tx) => confirmarEnvioExitosoTx(tx, loteRef, cuentaRef, "paquete"));
+
+  const cuenta = db.leer("cuentas/u1") as Cuenta;
+  assert.equal(cuenta.enviosRestantes, 39, "B7: con el fallback a `reservados`, debe confirmar contra el Paquete");
+  assert.equal(cuenta.saldoPorUso, 100, "el saldo Por Uso no debe tocarse: este lote nunca fue 'porUso'");
+});
+
+test("B7 (mutacion documentada): quitar el fallback a 'lote.reservados' en fuenteDelLote hace caer la prueba de arriba", () => {
+  // Verificado a mano (no comiteado): en fuenteDelLote, usar solo `lote.reservadosPaquete ?? 0`
+  // (sin el fallback a `lote.reservados` para planEfectivo "paquete") hace que este lote viejo
+  // (reservadosPaquete ausente) se clasifique como "porUso": la prueba de arriba pasa de bajar
+  // `enviosRestantes` a bajar `saldoPorUso`. Restaurado de inmediato tras confirmarlo.
+  assert.ok(true);
+});

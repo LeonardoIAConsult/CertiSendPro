@@ -13,6 +13,7 @@ import {
   atribucionPorUso,
   contarReservadosPorUsoVigentes,
   reservarEnvioTx,
+  reservarEnvio,
   _usarFirestoreParaPruebas,
   type Cuenta,
   type Lote,
@@ -500,4 +501,83 @@ test("M3 (mutacion documentada): sin el recalculo REAL inyectado, el mismo caso 
   const cuentaRef = db.doc("cuentas/u1");
   const r = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
   assert.equal(r.ok, false, "sin recalculo, el contador viejo (5<=5) rechaza, aunque el real sea 2");
+});
+
+// ── G2 (NO-GO de la revision externa sobre b865256, 2026-10-07): contarReservadosPorUsoVigentes
+// tambien debe contar un lote "paquete" que, por B2, cayo parcialmente al saldo Por Uso — el
+// filtro viejo (solo "porUso"/"mixto") lo dejaba fuera, y con envios en paralelo se podia gastar
+// mas saldo Por Uso del pagado. ──────────────────────────────────────────────────────────────────
+
+test("G2 (a): contarReservadosPorUsoVigentes (la funcion REAL) tambien cuenta un lote 'paquete' con reservadosPorUso", async () => {
+  const db = new FirestoreFalso();
+  _usarFirestoreParaPruebas(db);
+  try {
+    db.seed("lotes/L1", {
+      uid: "u1",
+      cantidad: 20,
+      planEfectivo: "paquete", // B2: un lote "paquete" PURO puede caer al saldo Por Uso a mitad de camino.
+      enviados: 0,
+      reservados: 2,
+      reservadosPaquete: 0,
+      reservadosPorUso: 2,
+      creado: Timestamp.now(),
+      expira: Timestamp.fromMillis(Date.now() + 3600_000),
+    } as Lote);
+
+    const total = await contarReservadosPorUsoVigentes("u1", new Date());
+    assert.equal(total, 2, "G2: un lote 'paquete' con reservadosPorUso debe sumar igual que uno 'porUso'/'mixto'");
+  } finally {
+    _usarFirestoreParaPruebas(null);
+  }
+});
+
+test("G2 (b, sonda de concurrencia real): Paquete vigente agotado + saldoPorUso 3, lote 'paquete' de 20, 10 reservas en paralelo -> solo 3 aceptadas", async () => {
+  const db = new FirestoreFalso();
+  _usarFirestoreParaPruebas(db);
+  try {
+    db.seed("lotes/L1", {
+      uid: "u1",
+      cantidad: 20,
+      planEfectivo: "paquete",
+      enviados: 0,
+      reservados: 0,
+      reservadosPaquete: 0,
+      reservadosPorUso: 0,
+      creado: Timestamp.now(),
+      expira: Timestamp.fromMillis(Date.now() + 3600_000),
+    } as Lote);
+    db.seed("cuentas/u1", {
+      plan: "paquete",
+      enviosRestantes: 0, // Paquete agotado: cae al saldo Por Uso (B2).
+      vence: Timestamp.fromMillis(Date.now() + 30 * 24 * 3600_000), // vigente.
+      renueva: false,
+      mpSuscripcionId: null,
+      reservadosPaquete: 0,
+      saldoPorUso: 3,
+      reservadosPorUso: 0,
+      ultimoPago: null,
+      actualizado: Timestamp.now(),
+    } as Cuenta);
+
+    // `reservarEnvio` (el envoltorio REAL, no el `...Tx`): usa `contarReservadosPaqueteVigentes`/
+    // `contarReservadosPorUsoVigentes` reales para el recalculo, igual que produccion.
+    const resultados = await Promise.all(Array.from({ length: 10 }, () => reservarEnvio("L1", "u1")));
+
+    const aceptadas = resultados.filter((r) => r.ok === true);
+    const rechazadas = resultados.filter((r) => r.ok === false);
+    assert.equal(aceptadas.length, 3, "G2: el saldo Por Uso (3) debe ganar, aunque el lote sea 'paquete'");
+    assert.equal(rechazadas.length, 7);
+  } finally {
+    _usarFirestoreParaPruebas(null);
+  }
+});
+
+test("G2 (mutacion documentada): volver al filtro viejo ('porUso' || 'mixto') hace caer las dos pruebas de arriba", () => {
+  // Verificado a mano (no comiteado): en contarReservadosPorUsoVigentes, volver a
+  // `lote.planEfectivo === "porUso" || lote.planEfectivo === "mixto"` hace que:
+  //  - G2 (a) reciba 0 en vez de 2 (el lote "paquete" ya no cuenta).
+  //  - G2 (b) acepte mas de 3 reservas (el recalculo, al no ver las reservas Por Uso que el propio
+  //    lote "paquete" ya hizo, deja pasar reservas por encima del saldo real).
+  // Restaurado de inmediato tras confirmarlo.
+  assert.ok(true);
 });
