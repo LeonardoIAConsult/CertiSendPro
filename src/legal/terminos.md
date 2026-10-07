@@ -1,6 +1,6 @@
 # Términos y Condiciones de Venta y Suscripción — CertiSend Pro
 
-**Versión:** 1.3 · **Entrada en vigencia:** el día de su publicación en https://certisendpro.online
+**Versión:** 1.4 · **Entrada en vigencia:** el día de su publicación en https://certisendpro.online
 
 Cada sección tiene dos capas: el texto que obliga y, debajo, **«En corto»**, una línea en lenguaje sencillo. Si las dos parecen decir cosas distintas, manda el texto que obliga y nos lo puedes reportar.
 
@@ -52,30 +52,36 @@ Esta identificación es la misma que aparece en la Política de Privacidad y en 
 |---|---|---|
 | **Gratis** | Hasta 15 certificados por lote. Asunto y cuerpo del correo personalizados. Lectura de nombres con IA. | $0 |
 | **Paquete** | 150 envíos con éxito para lotes de más de 15 certificados. Vigencia: 1 mes desde la confirmación del pago o hasta gastarlos, lo que ocurra primero. Se compra como **pago único**: no se renueva solo ni genera cobros posteriores. Los lotes de 15 certificados o menos **no gastan** envíos del Paquete (sección 4.4-bis). | Precio final en pesos que resulta de la fórmula de la sección 5 (referencia: US$15) |
-| **Pro** | **Próximamente.** Hoy no se vende. Sus condiciones se publicarán, con aviso, antes de ofrecerlo. | — |
+| **Pago por uso** | Saldo de envíos con éxito para lotes de más de 15 certificados, comprado en bloques de entre **50 y 5.000 envíos** por compra. Se compra como **pago único**: no se renueva solo ni genera cobros posteriores. El saldo **no tiene fecha de vencimiento** y **se acumula** con el de compras anteriores (sección 4.5-bis). Los lotes de 15 certificados o menos **no gastan** este saldo (sección 4.4-bis). | Precio final en pesos que resulta de la fórmula de la sección 5 (referencia: US$0,15 por cada envío que compres) |
+
+**Pro no se ofrece.** CertiSend no vende ni anuncia ningún plan Pro; si en el futuro se ofreciera, se publicaría con aviso previo y sus propias condiciones.
 
 4.2. **Moneda y precio final.** Todo cobro se hace en **pesos colombianos (COP)**. El precio principal que verás antes de pagar es el **monto exacto en pesos**: es el **precio total y final, sin cargos adicionales**: incluye cualquier impuesto o costo que aplique, y es exactamente lo que se cobra; no se le suma nada después. El valor en dólares se muestra solo como **referencia** para calcular el precio.
 
 4.3. **Qué es un «envío con éxito».** Es cada correo que la API de Gmail acepta para envío desde tu cuenta (Gmail devuelve un identificador del mensaje). Los envíos que Gmail rechaza o que fallan **no se descuentan** de tu Paquete. CertiSend no puede garantizar que el destinatario abra o reciba el correo una vez Gmail lo aceptó (por ejemplo, si la dirección no existe o el correo cae en spam).
 
-4.4. **Antes de empezar un lote**, CertiSend verifica en su servidor que tu plan lo permite: en Gratis, que el lote no supere 15 certificados; en Paquete, que tengas envíos suficientes y vigentes para todo el lote. Si no alcanzan, el lote no empieza y te lo decimos antes. Ya iniciado, un lote puede quedar incompleto por causas ajenas a tu plan (por ejemplo, los límites que Gmail aplica a tu cuenta o una falla de conexión); los envíos que no salgan no se descuentan.
+4.4. **Antes de empezar un lote**, CertiSend verifica en su servidor que tu plan lo permite: en Gratis, que el lote no supere 15 certificados; en Paquete y Pago por uso, que la suma de tu saldo disponible de los dos alcance para todo el lote (sección 4.4-ter). Si no alcanza, el lote no empieza y te lo decimos antes. Ya iniciado, un lote puede quedar incompleto por causas ajenas a tu plan (por ejemplo, los límites que Gmail aplica a tu cuenta o una falla de conexión); los envíos que no salgan no se descuentan.
 
-4.4-bis. **Los lotes pequeños no gastan tu Paquete.** Los lotes de **15 certificados o menos** se envían siempre con las condiciones del plan Gratis y **nunca descuentan** envíos de tu Paquete, aunque lo tengas activo y con saldo. El saldo del Paquete **solo se usa para lotes de más de 15 certificados**, y en ese caso cada envío con éxito de ese lote descuenta uno. Si tu saldo no alcanza para un lote de más de 15, puedes dividirlo en lotes de 15 o menos.
+4.4-bis. **Los lotes pequeños no gastan tu saldo pagado.** Los lotes de **15 certificados o menos** se envían siempre con las condiciones del plan Gratis y **nunca descuentan** envíos del Paquete ni de Pago por uso, aunque los tengas activos y con saldo. El saldo pagado **solo se usa para lotes de más de 15 certificados**, y en ese caso cada envío con éxito de ese lote descuenta uno. Si tu saldo no alcanza para un lote de más de 15, puedes dividirlo en lotes de 15 o menos.
 
-4.5. **Sobrantes del Paquete.** Los envíos del Paquete **vencen** al mes de la confirmación del pago. **Los envíos que no uses en ese mes se pierden y no se acumulan** a otro Paquete que compres después. Este vencimiento se te muestra antes de pagar y dentro de la app («te quedan N envíos, vencen el DD/MM»). **No puedes comprar un Paquete nuevo mientras el actual esté vigente y tenga saldo:** debes agotarlo o esperar a que venza antes de comprar otro; si lo intentas, no podrás iniciar el pago y te mostraremos el aviso correspondiente.
+4.4-ter. **Orden de consumo cuando tienes los dos saldos.** Para un lote de más de 15 certificados, primero se descuenta del saldo vigente del Paquete y, solo si no alcanza, del saldo de Pago por uso. Puedes comprar Pago por uso aunque tengas un Paquete vigente (a diferencia de la sección 4.5, que solo bloquea la recompra de otro Paquete). Si la suma de tu saldo del Paquete y de Pago por uso no alcanza para todo el lote, el lote **no se envía** y te lo decimos antes de empezar.
+
+4.5. **Sobrantes del Paquete.** Los envíos del Paquete **vencen** al mes de la confirmación del pago. **Los envíos que no uses en ese mes se pierden y no se acumulan** a otro Paquete que compres después. Este vencimiento se te muestra antes de pagar y dentro de la app («te quedan N envíos, vencen el DD/MM»). **No puedes comprar un Paquete nuevo mientras el actual esté vigente y tenga saldo:** debes agotarlo o esperar a que venza antes de comprar otro; si lo intentas, no podrás iniciar el pago y te mostraremos el aviso correspondiente. Este bloqueo es solo del Paquete: no te impide comprar Pago por uso (sección 4.5-bis).
+
+4.5-bis. **Pago por uso: saldo sin vencimiento.** Cada compra de Pago por uso es de un mínimo de 50 y un máximo de 5.000 envíos. El saldo que compras **no vence** y **se acumula** con el de cualquier compra anterior de Pago por uso que no hayas gastado. Puedes comprar Pago por uso cuantas veces quieras, incluso con un Paquete vigente.
 
 4.6. **Plan Gratis.** El plan Gratis no tiene costo. Sus condiciones (por ejemplo, el tope de 15 certificados por lote) pueden cambiar solo con el aviso previo de la sección 11.
 
-**En corto:** Gratis hasta 15 por lote; Paquete de 150 envíos de pago único que vencen al mes y no se acumulan; Pro llega más adelante. Todo se cobra en pesos, con el precio final a la vista antes de pagar.
+**En corto:** Gratis hasta 15 por lote; Paquete de 150 envíos de pago único que vencen al mes y no se acumulan; Pago por uso de 50 a 5.000 envíos por compra, que nunca vence y se acumula. Pro no se ofrece. Todo se cobra en pesos, con el precio final a la vista antes de pagar.
 
 ## 5. Cómo se calcula el precio en pesos (fórmula pactada)
 
-5.1. **Fórmula.** El precio en pesos del Paquete se calcula así, y al comprar aceptas esta fórmula:
+5.1. **Fórmula.** El precio en pesos del Paquete y de Pago por uso se calcula así, y al comprar aceptas esta fórmula:
 
 > **Monto en COP = precio de referencia en USD × TRM**, redondeado al peso más cercano.
 
 Donde:
-- **Precio de referencia:** US$15 para el Paquete.
+- **Precio de referencia:** US$15 para el Paquete; para Pago por uso, **US$0,15 por cada envío** multiplicado por la cantidad de envíos que compres (entre 50 y 5.000). El redondeo al peso se hace **una sola vez, sobre el total de la compra**, nunca envío por envío.
 - **TRM:** la Tasa Representativa del Mercado **certificada por la Superintendencia Financiera de Colombia**, vigente el día en que se calcula el monto (consultada en la fuente oficial de datos abiertos del Estado colombiano).
 
 5.2. **Monto de tu compra.** El monto se calcula con la TRM vigente el día de tu compra y se te muestra exacto, en pesos, en el resumen previo al pago. Pagas ese monto, no otro. Si la TRM cambia mientras estás en el proceso de compra, te mostramos el monto nuevo y debes volver a aceptarlo antes de pagar.
@@ -88,7 +94,7 @@ Donde:
 
 6.1. **Medios de pago.** Los pagos se procesan con **Mercado Pago**. Podrás usar los medios que Mercado Pago muestre en su pantalla de pago. CertiSend no ve ni guarda los datos de tu tarjeta ni de tu cuenta bancaria. **Mercado Pago trata los datos de tu pago (tarjeta, cuenta, identificación del pagador, prevención de fraude) como responsable independiente**, bajo sus propios términos y su propia política de privacidad, que aceptas con Mercado Pago al pagar. CertiSend solo recibe de Mercado Pago lo necesario para saber si el pago se aprobó y activar tu plan (ver Política de Privacidad, sección 6).
 
-6.2. **Resumen previo.** Antes de pagar verás un resumen con: plan, descripción de lo que compras, monto exacto en pesos (precio final, sin cargos adicionales), la TRM usada y su fecha, la referencia en dólares, que es un pago único y el vencimiento de los envíos. Puedes corregir o cancelar la compra antes de confirmar.
+6.2. **Resumen previo.** Antes de pagar verás un resumen con: plan, descripción de lo que compras (en Pago por uso, incluida la cantidad de envíos que compras), monto exacto en pesos (precio final, sin cargos adicionales), la TRM usada y su fecha, la referencia en dólares, que es un pago único y, si aplica, el vencimiento de los envíos (el saldo de Pago por uso no tiene vencimiento). Puedes corregir o cancelar la compra antes de confirmar.
 
 6.3. **Aceptación expresa.** Para pagar debes marcar dos casillas —que aparecen **sin marcar**—: con la primera aceptas la versión vigente de estos Términos; con la segunda declaras que quieres que el servicio empiece de inmediato (sección 8). Guardamos un registro de esa aceptación (versión de los Términos, texto de cada casilla, idioma, fecha y hora, cuenta, correo, plan, monto y TRM) como prueba de la relación comercial.
 
@@ -102,9 +108,9 @@ Donde:
 
 ## 7. Sin renovación automática
 
-7.1. El Paquete es un **pago único**: no se renueva solo, no queda ninguna suscripción activa en Mercado Pago y **no se te vuelve a cobrar**. Si quieres más envíos, compras otro Paquete cuando quieras.
+7.1. El Paquete y Pago por uso son **pagos únicos**: ninguno se renueva solo, no queda ninguna suscripción activa en Mercado Pago y **no se te vuelve a cobrar**. Si quieres más envíos, compras otro Paquete o más Pago por uso cuando quieras.
 
-7.2. Al vencer el Paquete o gastar sus envíos, tu cuenta sigue en el plan Gratis sin ningún trámite. No hay permanencia mínima ni penalidad.
+7.2. Al vencer el Paquete, gastar sus envíos o agotar tu saldo de Pago por uso, tu cuenta sigue en el plan Gratis sin ningún trámite. No hay permanencia mínima ni penalidad.
 
 **En corto:** pagas una vez y se acabó; no hay nada que cancelar.
 
@@ -118,15 +124,19 @@ Donde:
 
 8.4. **Devolución del Paquete sin usar.** Aunque el retracto no proceda, si compraste un Paquete y **no has hecho ningún envío con éxito con él**, puedes pedir la devolución completa de ese pago dentro de los **cinco (5) días hábiles** siguientes a la confirmación del pago, escribiendo a contacto@leonardoantolinez.com. Los lotes de 15 o menos no cuentan como uso del Paquete (sección 4.4-bis). Al hacer la devolución, el Paquete se desactiva. Si ya hiciste al menos un envío con éxito con ese Paquete, esta devolución no aplica. Se paga en los plazos de la sección 10.2.
 
-**En corto:** como el servicio arranca apenas pagas y tú lo aceptas así, no aplica el retracto de 5 días; pero si no has usado ningún envío de tu Paquete, te lo devolvemos si lo pides en 5 días hábiles.
+8.5. **Devolución de una compra de Pago por uso sin usar.** El mismo principio de la sección 8.4 aplica a cada compra de Pago por uso, de manera individual: si **no has hecho ningún envío con éxito de ESA compra en particular**, puedes pedir la devolución completa de ese pago dentro de los **cinco (5) días hábiles** siguientes a su confirmación, escribiendo a contacto@leonardoantolinez.com con la referencia del pago. Los lotes de 15 o menos no cuentan como uso (sección 4.4-bis). Si ya hiciste al menos un envío con éxito que se descontó de esa compra, esta devolución no aplica a esa compra, aunque conserves saldo sin usar de otras compras de Pago por uso. Se paga en los plazos de la sección 10.2.
+
+**En corto:** como el servicio arranca apenas pagas y tú lo aceptas así, no aplica el retracto de 5 días; pero si no has usado ningún envío de tu Paquete ni de una compra de Pago por uso, te la devolvemos si lo pides en 5 días hábiles.
 
 ## 9. Reversión del pago
 
 9.1. Conforme al artículo 51 de la Ley 1480 de 2011, puedes pedir la reversión del pago cuando hayas sido objeto de **fraude**, se trate de una **operación no solicitada**, **no hayas recibido** el servicio, o el servicio **no corresponda** a lo que compraste o sea defectuoso. Debes presentar la queja ante nosotros (contacto@leonardoantolinez.com) dentro de los cinco (5) días hábiles siguientes a la fecha en que tuviste noticia del hecho, y notificar al emisor de tu medio de pago.
 
-9.2. Si se reversa un pago o se reembolsa, tu cuenta pasa al **plan Gratis** desde ese momento y te lo informamos al correo de tu cuenta. No bloqueamos tu cuenta ni tu acceso al plan Gratis por haber pedido una reversión.
+9.2. Si se reversa un pago del Paquete o se reembolsa, tu cuenta pasa al **plan Gratis** desde ese momento y te lo informamos al correo de tu cuenta. No bloqueamos tu cuenta ni tu acceso al plan Gratis por haber pedido una reversión.
 
-**En corto:** si hubo fraude, un cobro que no pediste o no recibiste el servicio, puedes pedir que te devuelvan el pago; tu cuenta queda en Gratis.
+9.3. Si se reversa un pago o se reembolsa una compra de **Pago por uso**, te restamos de tu saldo acumulado exactamente la cantidad de envíos que esa compra había sumado (nunca más de lo que esa compra aportó); tu plan Paquete, si tienes uno vigente, y el resto de tu saldo de Pago por uso de otras compras no se ven afectados. Te lo informamos al correo de tu cuenta.
+
+**En corto:** si hubo fraude, un cobro que no pediste o no recibiste el servicio, puedes pedir que te devuelvan el pago; si es del Paquete, tu cuenta queda en Gratis; si es de Pago por uso, solo se resta lo de esa compra de tu saldo acumulado.
 
 ## 10. Reembolsos
 
@@ -137,12 +147,13 @@ Donde:
 | Cobro duplicado | El cobro repetido, completo, sin que lo pidas |
 | Cobro distinto del monto que aceptaste en el resumen | La diferencia, sin que lo pidas |
 | Paquete sin ningún envío con éxito, pedido dentro de los 5 días hábiles siguientes al pago (sección 8.4) | El pago completo de ese Paquete |
-| El servicio no se prestó, en todo o en parte, por una falla nuestra (por ejemplo, el servidor de CertiSend no permitió enviar durante la vigencia del Paquete) | La parte no prestada, en proporción |
+| Compra de Pago por uso sin ningún envío con éxito de ESA compra, pedido dentro de los 5 días hábiles siguientes al pago (sección 8.5) | El pago completo de esa compra |
+| El servicio no se prestó, en todo o en parte, por una falla nuestra (por ejemplo, el servidor de CertiSend no permitió enviar durante la vigencia del Paquete o teniendo saldo de Pago por uso) | La parte no prestada, en proporción |
 | Los demás casos que la ley del consumidor reconozca | Lo que la ley disponga |
 
 10.2. **Plazos.** Respondemos tu solicitud de reembolso, aceptándola o explicando por qué no procede, en un máximo de **quince (15) días hábiles** desde que la recibimos. Si procede, hacemos el reembolso por medio de Mercado Pago al mismo medio de pago en un máximo de **treinta (30) días calendario** desde nuestra respuesta. Cuando el reembolso no requiere solicitud (cobro duplicado o cobro distinto del aceptado), los 30 días calendario se cuentan desde el cobro. Los tiempos que tarde tu banco o emisor en reflejarlo dependen de ellos.
 
-10.3. Fuera de los casos anteriores, un Paquete que ya empezaste a usar no se reembolsa; lo conservas hasta su vencimiento (sección 4.5). Nada de esta sección limita los derechos que la ley te reconoce.
+10.3. Fuera de los casos anteriores, un Paquete que ya empezaste a usar no se reembolsa; lo conservas hasta su vencimiento (sección 4.5). Lo mismo aplica a una compra de Pago por uso que ya empezaste a usar: no se reembolsa esa compra, y conservas el saldo que te quede, sin fecha de vencimiento (sección 4.5-bis). Nada de esta sección limita los derechos que la ley te reconoce.
 
 10.4. Para pedir un reembolso escribe a contacto@leonardoantolinez.com con el correo de tu cuenta y la referencia del pago de Mercado Pago.
 
@@ -231,5 +242,5 @@ La marca CertiSend Pro, el software, el diseño de la aplicación y sus textos s
 ## 19. Contacto y vigencia
 
 - Correo único: **contacto@leonardoantolinez.com** · Teléfono: {{PROVEEDOR_TEL}}
-- Versión 1.3 · Fecha: 2026-10-05 · Entrada en vigencia: el día de su publicación
+- Versión 1.4 · Fecha: 2026-10-07 · Entrada en vigencia: el día de su publicación
 - Las versiones anteriores de estos Términos se conservan y están disponibles a solicitud. Cada compra queda asociada a la versión que aceptaste.

@@ -1,6 +1,6 @@
 # Política de Privacidad y Tratamiento de Datos Personales — CertiSend Pro
 
-**Versión:** 2.3 · **Entrada en vigencia:** el día de su publicación en https://certisendpro.online
+**Versión:** 2.4 · **Entrada en vigencia:** el día de su publicación en https://certisendpro.online
 
 Debajo de cada sección hay una línea **«En corto»** en lenguaje sencillo.
 
@@ -35,8 +35,8 @@ Debajo de cada sección hay una línea **«En corto»** en lenguaje sencillo.
 |---|---|---|---|
 | Identificación de tu cuenta | Nombre, correo electrónico, foto de perfil e identificador de usuario de Google | Inicio de sesión con Google (Firebase Authentication) | Firebase Authentication (Google), mientras tengas cuenta |
 | Permisos de Google | Token de acceso temporal con dos permisos: enviar correos desde tu Gmail (`gmail.send`) y **leer hojas de cálculo** (`spreadsheets.readonly`). Ese segundo permiso, por cómo lo define Google, **habilita la lectura de todas tus hojas de cálculo**, pero CertiSend **solo lee la hoja que tú indicas** (sus pestañas y las celdas A1:Z1000 de la pestaña que eliges), no busca ni abre otras, y nunca puede modificarlas | Tu autorización al iniciar sesión | Solo en la memoria de tu navegador durante la sesión; viaja al servidor en cada envío y **no se guarda** |
-| Cuenta y plan | Plan (Gratis o Paquete), envíos restantes y reservados, fecha de vencimiento e identificador del último pago que activó tu plan | Lo genera CertiSend cuando compras | **Base de datos Cloud Firestore (Google)**, colección `cuentas`, mientras tengas cuenta y luego según la sección 7 |
-| Pagos | Identificador del pago en Mercado Pago, estado, monto en pesos, TRM usada y su fecha, fecha del cobro, plan, y el estado de los correos de confirmación. Antes del pago, el cobro preparado (monto, TRM, tu identificador de usuario). **No** recibimos ni guardamos los datos de tu tarjeta o cuenta bancaria | Mercado Pago, al confirmar cada pago; CertiSend, al preparar el cobro | Cloud Firestore, colecciones `pagosProcesados` y `preferencias`, según la sección 7 |
+| Cuenta y plan | Plan (Gratis, Paquete o Pago por uso); del Paquete, envíos restantes, reservados y fecha de vencimiento; de Pago por uso, el saldo acumulado y el saldo reservado (sin fecha de vencimiento); e identificador del último pago que activó o aumentó tu plan | Lo genera CertiSend cuando compras | **Base de datos Cloud Firestore (Google)**, colección `cuentas`, mientras tengas cuenta y luego según la sección 7 |
+| Pagos | Identificador del pago en Mercado Pago, estado, monto en pesos, TRM usada y su fecha, fecha del cobro, plan, cantidad de envíos comprada (solo en compras de Pago por uso), y el estado de los correos de confirmación. Antes del pago, el cobro preparado (monto, TRM, cantidad si es Pago por uso, tu identificador de usuario). **No** recibimos ni guardamos los datos de tu tarjeta o cuenta bancaria | Mercado Pago, al confirmar cada pago; CertiSend, al preparar el cobro | Cloud Firestore, colecciones `pagosProcesados` y `preferencias`, según la sección 7 |
 | Prueba de aceptación | Versión de los Términos aceptada, texto exacto de cada casilla marcada (aceptación de los Términos y declaración de inicio inmediato del servicio), idioma, fecha y hora, identificador de usuario, correo de tu cuenta, plan, modalidad, monto y TRM | Tu clic en las casillas del checkout | Cloud Firestore, colección `aceptaciones`, según la sección 7 |
 | Autorización de tratamiento de datos | Versión de esta política que autorizaste, texto exacto de la casilla, idioma, fecha y hora, y tus autorizaciones anteriores si la política cambió de versión | Tu clic en la casilla antes de entrar con Google | Cloud Firestore, colección `autorizaciones`, según la sección 7 |
 | Aceptación de los Términos y Condiciones (fuera del checkout) | Versión de los Términos que aceptaste, texto exacto de la casilla, idioma, fecha y hora, y tus aceptaciones anteriores si los Términos cambiaron de versión | Tu clic en la casilla antes de entrar con Google | Cloud Firestore, colección `aceptacionesUso`, según la sección 7 |
@@ -56,7 +56,7 @@ No tratamos datos sensibles (salud, biometría, origen racial, creencias, etc.) 
 ## 4. Para qué usamos tus datos (finalidades)
 
 1. **Prestarte el servicio:** iniciar tu sesión, dividir tus PDF, leer los nombres con IA, emparejarlos con tu lista y enviar los correos desde tu Gmail.
-2. **Gestionar tu plan:** saber qué plan tienes, contar los envíos con éxito del Paquete, aplicar los límites en el servidor y mostrarte tu saldo y tu vencimiento.
+2. **Gestionar tu plan:** saber qué plan tienes, contar los envíos con éxito del Paquete y descontarlos (o acumularlos) del saldo de Pago por uso, aplicar los límites en el servidor y mostrarte tu saldo y, si aplica, tu vencimiento.
 3. **Cobrar y probar el cobro:** crear el cobro en Mercado Pago, verificar que el pago es real antes de activar tu plan, procesar cada pago una sola vez, y conservar la prueba de la relación comercial y de tu aceptación (Ley 1480 de 2011, artículo 50, literal e).
 4. **Avisarte por correo:** enviarte la confirmación de compra, la respuesta a tus solicitudes de reembolso o reversión, y los avisos de cambios en los Términos o en esta política.
 5. **Avisar al administrador:** {{PROVEEDOR_NOMBRE}} recibe un correo por cada venta, reembolso o contracargo, con tu identificador de usuario, el plan, el monto y la referencia de Mercado Pago, para atender incidencias.
@@ -171,4 +171,4 @@ Si cambiamos esta política de forma que afecte el uso de tus datos, te avisarem
 
 ## 15. Vigencia
 
-Versión 2.3 · Fecha: 2026-10-05 · Entrada en vigencia: el día de su publicación. Las versiones anteriores se conservan y se entregan a solicitud.
+Versión 2.4 · Fecha: 2026-10-07 · Entrada en vigencia: el día de su publicación. Las versiones anteriores se conservan y se entregan a solicitud.

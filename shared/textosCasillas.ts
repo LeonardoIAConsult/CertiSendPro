@@ -12,8 +12,10 @@
 // copias — `tests/textosCasillas.test.ts` es la prueba que detecta si algun lado alguna vez vuelve
 // a desviarse, p. ej. si alguien reintroduce una copia local en vez de importar de aqui).
 
-/** Version vigente de los Terminos y Condiciones citada en la casilla T4. */
-export const TERMINOS_VERSION = "1.3";
+/** Version vigente de los Terminos y Condiciones citada en la casilla T4. Bump a 1.4 (2026-10-07,
+ * decision del Brain, Tarea 16A): plan Pago por uso + Pro desaparece — ver docs/legal/
+ * terminos-y-condiciones.md v1.4 y src/legal/terminos.md. */
+export const TERMINOS_VERSION = "1.4";
 
 /** Idioma de la UI en el momento del cobro: el checkout acepta "es" o "en"; cualquier otro valor
  * (ausente, invalido) se trata como "es" — ver `normalizarIdioma`. */
