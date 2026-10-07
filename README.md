@@ -16,9 +16,10 @@ Lo grande: ya no envías a ciegas. Antes de que salga un solo correo, ves qué p
 * **Una huella por certificado, sin guardar correos en claro.** Queda la prueba de cada par página → correo que confirmaste, pero tu lista de destinatarios no se guarda en una base de datos (los registros técnicos pueden conservar 30 días un correo que falló; ver [Privacidad](https://certisendpro.online/privacidad)).
 * **En nuestro servidor, tus PDF se borran solos a más tardar en unas 2 horas y 10 minutos.**
 * **Autorización de datos y Términos antes de entrar.** Las reglas quedan claras desde el principio: [Términos](https://certisendpro.online/terminos) y [Privacidad](https://certisendpro.online/privacidad).
-* **Paquete de 150 envíos.** US$15, que se cobran en pesos a la TRM del día (la web te muestra el valor en COP de hoy). Pago único, válido 1 mes o hasta gastarlo. Los lotes de 15 o menos no gastan el Paquete y los envíos que fallan no se descuentan. El pago en línea llega pronto; mientras tanto, escríbeme a contacto@leonardoantolinez.com.
-* **Acuse de cada compra por correo.** Cuando se abra el pago en línea, cada compra recibe su acuse; si ese correo falla, se reintenta solo de forma programada.
-* **Plan Pro: próximamente.**
+* **Paquete de 150 envíos.** US$15, que se cobran en pesos a la TRM del día (la web te muestra el valor en COP de hoy). Pago único, válido 1 mes o hasta gastarlo.
+* **Pago por uso.** US$0,15 por envío: eliges cuántos compras (entre 50 y 5.000) y se cobran en pesos a la TRM del día. Tu saldo no vence y se suma con cada compra.
+* **Reglas para los dos planes de pago:** los lotes de 15 o menos no gastan saldo, los envíos que fallan no se descuentan y, si tienes los dos, primero se usa el Paquete. El pago es en línea con Mercado Pago.
+* **Acuse de cada compra por correo.** Cada compra recibe su acuse; si ese correo falla, se reintenta solo de forma programada.
 
 ## 📱 Vista Previa de la Aplicación
 
@@ -32,7 +33,7 @@ El proyecto fue desarrollado utilizando el siguiente ecosistema técnico:
 * **Inteligencia Artificial:** Gemini (Google), llamado desde el servidor, para leer el nombre en cada página.
 * **Backend:** servidor Node con Express en Cloud Run, Firestore para cuentas y planes, y Firebase Authentication.
 * **Hosting:** Firebase Hosting.
-* **Pagos:** Mercado Pago, en pesos colombianos (apagado mientras se abre el pago en línea).
+* **Pagos:** Mercado Pago, en pesos colombianos.
 
 ## ✨ Características Principales
 
