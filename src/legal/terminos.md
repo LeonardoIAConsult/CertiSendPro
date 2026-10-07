@@ -126,6 +126,8 @@ Donde:
 
 8.5. **Devolución de una compra de Pago por uso sin usar.** El mismo principio de la sección 8.4 aplica a cada compra de Pago por uso, de manera individual: si **no has hecho ningún envío con éxito de ESA compra en particular**, puedes pedir la devolución completa de ese pago dentro de los **cinco (5) días hábiles** siguientes a su confirmación, escribiendo a contacto@leonardoantolinez.com con la referencia del pago. Los lotes de 15 o menos no cuentan como uso (sección 4.4-bis). Si ya hiciste al menos un envío con éxito que se descontó de esa compra, esta devolución no aplica a esa compra, aunque conserves saldo sin usar de otras compras de Pago por uso. Se paga en los plazos de la sección 10.2.
 
+**8.5-bis. Si tienes más de una compra de Pago por uso.** Si al momento de tu solicitud tienes más de una compra de Pago por uso y no es posible saber con certeza de cuál salió un envío ya hecho, lo resolvemos así: consideramos que los envíos ya hechos se descontaron primero de tu compra de Pago por uso más antigua con saldo (orden de llegada) y seguimos en ese orden. Solo te negamos la devolución de la compra que pides si, aplicando ese orden, a esa compra en concreto ya le tocó al menos un envío. Si queda alguna duda real sobre el resultado de ese cálculo, la resolvemos a tu favor (Ley 1480 de 2011, artículo 34).
+
 **En corto:** como el servicio arranca apenas pagas y tú lo aceptas así, no aplica el retracto de 5 días; pero si no has usado ningún envío de tu Paquete ni de una compra de Pago por uso, te la devolvemos si lo pides en 5 días hábiles.
 
 ## 9. Reversión del pago
@@ -225,7 +227,7 @@ La marca CertiSend Pro, el software, el diseño de la aplicación y sus textos s
 
 17.1. **Por tu parte:** puedes dejar de usar CertiSend cuando quieras. Para cerrar tu cuenta y pedir la supresión de tus datos, escribe a contacto@leonardoantolinez.com; se atiende como indica la Política de Privacidad, salvo los datos de pagos que la ley nos obligue a conservar.
 
-17.2. **Por nuestra parte:** podemos suspender o cerrar una cuenta por incumplimiento grave de la sección 14, avisándote por correo con el motivo. Si cerramos el servicio o tu cuenta sin culpa tuya, te avisaremos con al menos treinta (30) días calendario de anticipación y te reembolsaremos la parte no prestada de tu Paquete vigente.
+17.2. **Por nuestra parte:** podemos suspender o cerrar una cuenta por incumplimiento grave de la sección 14, avisándote por correo con el motivo. Si cerramos el servicio o tu cuenta sin culpa tuya, te avisaremos con al menos treinta (30) días calendario de anticipación y te reembolsaremos la parte no prestada de tu Paquete vigente y todo tu saldo de Pago por uso que no hayas gastado a esa fecha, sin importar hace cuánto lo compraste.
 
 **En corto:** te puedes ir cuando quieras; si te cerramos sin culpa tuya, te devolvemos lo no usado.
 
