@@ -24,6 +24,7 @@ import {
   construirAvisoBloqueoProveedorLeonardo,
   construirAvisoPagoDobleLeonardo,
   construirAvisoReversionComprador,
+  construirAvisoUsoParcialPorUsoLeonardo,
   tienePlaceholderPendiente,
   type DatosCorreo,
   type DatosConfirmacionCompra,
@@ -36,6 +37,7 @@ import {
   obtenerAceptacion as obtenerAceptacionReal,
   revertirPagoSiNoRevertido as revertirPagoSiNoRevertidoReal,
   obtenerEstadoCorreoComprador as obtenerEstadoCorreoCompradorReal,
+  obtenerUsadosAlRevertirPorUso as obtenerUsadosAlRevertirPorUsoReal,
   type DestinatarioCorreo,
   type Idioma,
   type ResultadoReversion,
@@ -350,10 +352,19 @@ export interface AvisarReembolsoDeps {
   reclamarEnvioCorreo(paymentId: string, destinatario: DestinatarioCorreo, ahora: Date): Promise<boolean>;
   marcarCorreoEnviado(paymentId: string, destinatario: DestinatarioCorreo, reclamadoEn: Date): Promise<void>;
   liberarReclamoCorreo(paymentId: string, destinatario: DestinatarioCorreo, reclamadoEn: Date): Promise<void>;
+  /** M1 (corrige NO-GO 2026-10-07): cuanto de la compra Por Uso revertida YA se habia usado
+   * (0 si nada o si no aplica — Paquete, o nada usado). Leido DESPUES de que la reversion ya
+   * aplico (ver `server/cuentas.ts` `obtenerUsadosAlRevertirPorUso`). */
+  obtenerUsadosAlRevertirPorUso(paymentId: string): Promise<number>;
+  /** M1: log + correo a Leonardo (`ALERTA_REVERSION_PORUSO_USADO`) cuando `obtenerUsadosAlRevertirPorUso`
+   * devuelve > 0 — ver `server/notificaciones.ts` `avisarUsoParcialPorUso`, mas abajo. */
+  avisarUsoParcialPorUso(datos: { paymentId: string; usados: number }): Promise<void>;
 }
 
 export const depsAvisarReembolsoReales: AvisarReembolsoDeps = {
   revertirPago: revertirPagoSiNoRevertidoReal,
+  obtenerUsadosAlRevertirPorUso: obtenerUsadosAlRevertirPorUsoReal,
+  avisarUsoParcialPorUso,
   enviarCorreo: enviarCorreoReal,
   obtenerAceptacion: obtenerAceptacionReal,
   reclamarEnvioCorreo: reclamarEnvioCorreoReal,
@@ -434,6 +445,21 @@ export async function avisarReembolsoPaquete(
 
   const cuentaRevertida = resultado === "revertido";
   const plan = datos.plan ?? "paquete";
+
+  // M1 (corrige NO-GO 2026-10-07): si la compra Por Uso revertida YA tenia parte de su saldo
+  // usado (atribucion FIFO, server/cuentas.ts `atribucionPorUso`), avisar a Leonardo ANTES de
+  // seguir — best-effort, nunca debe tumbar el resto del aviso (la reversion YA tuvo exito).
+  if (plan === "porUso" && cuentaRevertida) {
+    try {
+      const usados = await deps.obtenerUsadosAlRevertirPorUso(datos.paymentId);
+      if (usados > 0) {
+        await deps.avisarUsoParcialPorUso({ paymentId: datos.paymentId, usados });
+      }
+    } catch (error: any) {
+      console.error(`[NOTIFICACIONES] fallo al comprobar/avisar el uso parcial de Por Uso. paymentId=${datos.paymentId}:`, error?.message || error);
+    }
+  }
+
   const { correoComprador, avisoEnviado } = await avisarReversionAlComprador(datos, cuentaRevertida, ahora, deps, plan);
 
   const { asunto, texto } = construirAvisoReembolsoLeonardo({
@@ -485,6 +511,35 @@ export async function avisarPagoDobleRequiereReembolso(
   } catch (error: any) {
     console.error(
       `[NOTIFICACIONES] fallo al avisar el pago doble a Leonardo (el log ALERTA_REEMBOLSO_REQUERIDO ya quedo). paymentId=${datos.paymentId}:`,
+      error?.message || error
+    );
+  }
+}
+
+export interface AvisarUsoParcialPorUsoDeps {
+  enviarCorreo(datos: DatosCorreo): Promise<boolean>;
+}
+
+export const depsAvisarUsoParcialPorUsoReales: AvisarUsoParcialPorUsoDeps = { enviarCorreo: enviarCorreoReal };
+
+/**
+ * M1 (corrige NO-GO 2026-10-07, Terminos SS8.5/8.5-bis): avisa a Leonardo (log con marcador fijo
+ * `ALERTA_REVERSION_PORUSO_USADO` + correo) cuando se revierte una compra Por Uso de la que YA se
+ * habia usado parte del saldo (atribucion FIFO, `server/cuentas.ts` `atribucionPorUso`/
+ * `obtenerUsadosAlRevertirPorUso`). Nunca lanza: el log va primero y por separado del correo, que
+ * es best-effort. Nunca lleva uid ni email (mismo criterio que `avisarPagoDobleRequiereReembolso`).
+ */
+export async function avisarUsoParcialPorUso(
+  datos: { paymentId: string; usados: number },
+  deps: AvisarUsoParcialPorUsoDeps = depsAvisarUsoParcialPorUsoReales
+): Promise<void> {
+  console.error(JSON.stringify({ severity: "ERROR", message: "ALERTA_REVERSION_PORUSO_USADO", paymentId: datos.paymentId, usados: datos.usados }));
+  try {
+    const { asunto, texto } = construirAvisoUsoParcialPorUsoLeonardo(datos);
+    await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto });
+  } catch (error: any) {
+    console.error(
+      `[NOTIFICACIONES] fallo al avisar el uso parcial de Por Uso a Leonardo (el log ALERTA_REVERSION_PORUSO_USADO ya quedo). paymentId=${datos.paymentId}:`,
       error?.message || error
     );
   }
@@ -681,16 +736,9 @@ export async function reintentarAcusePendiente(
 // Mismo mecanismo (por antigüedad, alerta a 20h/48h) que `reintentarAcusePendiente`, pero
 // reconstruyendo el acuse desde `pagosProcesados/{paymentId}` para un pago `tipo:"porUso"` (que
 // guarda `cantidad` en vez de `vence` — ver `activarPorUsoSiNoProcesadoTx`, server/cuentas.ts).
-//
-// NOTA DE ALCANCE (Tarea 16A-2): esta funcion es el bloque constructor — PROBADA de forma directa
-// con datos de `pagosProcesados` ya reconstruidos. Cablearla dentro del barrido programado
-// (`server/tareasFondo.ts` `barrerTodosLosPagosPendientes`/`datosReintentoDesdePago`, que hoy solo
-// lee los campos del Paquete via `pagoProcesadoAcuseDesdeDoc` en server/cuentas.ts) requiere tocar
-// esos dos archivos, FUERA de los archivos permitidos de esta orden (Paso 16A-2: server.ts,
-// server/cobroPaquete.ts, server/webhook.ts, server/notificaciones.ts, server/avisos.ts,
-// shared/textosCasillas.ts, tests/). Queda pendiente como Tarea 16A-3, anotada en el ledger del
-// plan — hoy el acuse en linea de un pago porUso (webhook, inmediato) SI queda cableado de punta a
-// punta; solo el reintento del barrido de 30 min para un porUso pendiente no activa esta funcion.
+// Cableada dentro del barrido programado desde la Tarea 16A-3 (`server/tareasFondo.ts`
+// `barrerTodosLosPagosPendientes`/`datosReintentoPorUsoDesdePago`): un porUso pendiente SI se
+// reintenta en el barrido de 30 min, no solo en el acuse en linea del webhook.
 
 export interface DatosReintentoAcusePorUsoPendiente {
   paymentId: string;

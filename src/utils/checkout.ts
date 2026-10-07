@@ -82,7 +82,7 @@ export function clampCantidadPorUso(cantidad: number, minimo = PORUSO_MINIMO, ma
  * server/cobroPaquete.ts `crearCobroPorUso` y server/trm.ts, reexportada de `shared/precios.ts`
  * — la MISMA funcion, nunca una copia): el total SIEMPRE se redondea UNA vez sobre el total en
  * USD, nunca redondeando primero un COP unitario y multiplicandolo por N (eso multiplicaria N
- * veces el error de redondeo de una sola unidad). `tests/precios.test.ts` prueba la paridad para
+ * veces el error de redondeo de una sola unidad). `tests/checkout.test.ts` prueba la paridad para
  * 50, 137 y 5000 envios.
  */
 export function calcularTotalPorUso(

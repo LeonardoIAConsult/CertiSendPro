@@ -7,10 +7,12 @@ import {
   notificarActivacionPorUso,
   reintentarAcusePorUsoPendiente,
   avisarReembolsoPaquete,
+  avisarUsoParcialPorUso,
   CORREO_LEONARDO,
   type NotificarActivacionPorUsoDeps,
   type ReintentarAcusePorUsoDeps,
   type AvisarReembolsoDeps,
+  type AvisarUsoParcialPorUsoDeps,
 } from "../server/notificaciones";
 import { type DatosCorreo } from "../server/avisos";
 
@@ -191,6 +193,8 @@ function depsReembolsoFalsas(overrides: Partial<AvisarReembolsoDeps> = {}): { de
     liberarReclamoCorreo: async (paymentId, destinatario) => {
       reclamos.delete(`${paymentId}:${destinatario}`);
     },
+    obtenerUsadosAlRevertirPorUso: async () => 0,
+    avisarUsoParcialPorUso: async () => {},
     ...overrides,
   };
   return { deps, correosEnviados };
@@ -217,4 +221,122 @@ test("avisarReembolsoPaquete: sin `plan` (o plan:'paquete'), el comportamiento E
   assert.match(alComprador!.texto, /plan Gratis/);
   const aLeonardo = correosEnviados.find((c) => c.para === CORREO_LEONARDO);
   assert.match(aLeonardo!.texto, /Se revirtió la cuenta a Gratis/);
+});
+
+// ── M1 (NO-GO de la revision externa sobre la Tarea 16, 2026-10-07): avisarReembolsoPaquete
+// avisa a Leonardo (log + correo) cuando la compra porUso revertida ya tenia parte USADA ────────
+
+test("avisarReembolsoPaquete (plan:porUso, M1): usados>0 -> avisarUsoParcialPorUso se llama con paymentId+usados", async () => {
+  const avisos: Array<{ paymentId: string; usados: number }> = [];
+  const { deps, correosEnviados } = depsReembolsoFalsas({
+    obtenerUsadosAlRevertirPorUso: async (paymentId) => {
+      assert.equal(paymentId, "pago-1");
+      return 7;
+    },
+    avisarUsoParcialPorUso: async (datos) => {
+      avisos.push(datos);
+    },
+  });
+
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded", referenciaId: "ref-1", plan: "porUso" }, deps);
+
+  assert.equal(avisos.length, 1);
+  assert.deepEqual(avisos[0], { paymentId: "pago-1", usados: 7 });
+  // El resto del aviso (comprador + Leonardo) sigue saliendo normal, sin que esto lo bloquee.
+  assert.ok(correosEnviados.some((c) => c.para === CORREO_LEONARDO));
+});
+
+test("avisarReembolsoPaquete (plan:porUso, M1): usados=0 -> avisarUsoParcialPorUso NUNCA se llama", async () => {
+  let llamadas = 0;
+  const { deps } = depsReembolsoFalsas({
+    obtenerUsadosAlRevertirPorUso: async () => 0,
+    avisarUsoParcialPorUso: async () => {
+      llamadas++;
+    },
+  });
+
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded", referenciaId: "ref-1", plan: "porUso" }, deps);
+  assert.equal(llamadas, 0);
+});
+
+test("avisarReembolsoPaquete (plan:paquete, M1): nunca comprueba usados (eso es solo de porUso)", async () => {
+  let llamadas = 0;
+  const { deps } = depsReembolsoFalsas({
+    obtenerUsadosAlRevertirPorUso: async () => {
+      llamadas++;
+      return 99;
+    },
+  });
+
+  await avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded", referenciaId: "ref-1" }, deps);
+  assert.equal(llamadas, 0, "plan paquete (default) nunca debe consultar usadosAlRevertir");
+});
+
+test("avisarReembolsoPaquete (M1): si obtenerUsadosAlRevertirPorUso lanza, el resto del aviso sigue sin tumbarse", async () => {
+  const { deps, correosEnviados } = depsReembolsoFalsas({
+    obtenerUsadosAlRevertirPorUso: async () => {
+      throw new Error("Firestore caido");
+    },
+  });
+
+  await assert.doesNotReject(
+    avisarReembolsoPaquete({ uid: "uid-1", paymentId: "pago-1", status: "refunded", referenciaId: "ref-1", plan: "porUso" }, deps)
+  );
+  assert.ok(correosEnviados.some((c) => c.para === CORREO_LEONARDO), "el aviso normal a Leonardo sigue saliendo");
+});
+
+// ── avisarUsoParcialPorUso (M1): log ALERTA_REVERSION_PORUSO_USADO + correo a Leonardo ───────────
+
+function depsUsoParcialFalsas(overrides: Partial<AvisarUsoParcialPorUsoDeps> = {}): {
+  deps: AvisarUsoParcialPorUsoDeps;
+  correosEnviados: DatosCorreo[];
+} {
+  const correosEnviados: DatosCorreo[] = [];
+  const deps: AvisarUsoParcialPorUsoDeps = {
+    enviarCorreo: async (datos) => {
+      correosEnviados.push(datos);
+      return true;
+    },
+    ...overrides,
+  };
+  return { deps, correosEnviados };
+}
+
+test("avisarUsoParcialPorUso: manda exactamente 1 correo a Leonardo con el paymentId/usados", async () => {
+  const { deps, correosEnviados } = depsUsoParcialFalsas();
+  await avisarUsoParcialPorUso({ paymentId: "pago-1", usados: 7 }, deps);
+  assert.equal(correosEnviados.length, 1);
+  assert.equal(correosEnviados[0].para, CORREO_LEONARDO);
+  assert.match(correosEnviados[0].texto, /pago-1/);
+  assert.match(correosEnviados[0].texto, /7/);
+});
+
+test("avisarUsoParcialPorUso: emite el log ALERTA_REVERSION_PORUSO_USADO en JSON con severity ERROR, sin uid/email", async () => {
+  const { deps } = depsUsoParcialFalsas();
+  const original = console.error;
+  const llamadas: any[] = [];
+  console.error = (...args: any[]) => llamadas.push(args);
+  try {
+    await avisarUsoParcialPorUso({ paymentId: "pago-1", usados: 7 }, deps);
+  } finally {
+    console.error = original;
+  }
+  const logEstructurado = llamadas
+    .map((args) => { try { return JSON.parse(args[0]); } catch { return null; } })
+    .find((obj) => obj?.message === "ALERTA_REVERSION_PORUSO_USADO");
+  assert.ok(logEstructurado, "debe loguear el marcador fijo ALERTA_REVERSION_PORUSO_USADO como JSON");
+  assert.equal(logEstructurado.severity, "ERROR");
+  assert.equal(logEstructurado.paymentId, "pago-1");
+  assert.equal(logEstructurado.usados, 7);
+  assert.equal(logEstructurado.uid, undefined, "nunca uid en el log (dato personal)");
+  assert.equal(logEstructurado.email, undefined, "nunca email en el log (dato personal)");
+});
+
+test("avisarUsoParcialPorUso: si enviarCorreo falla/lanza, la funcion no lanza (el log ya quedo)", async () => {
+  const { deps } = depsUsoParcialFalsas({
+    enviarCorreo: async () => {
+      throw new Error("relay caido");
+    },
+  });
+  await assert.doesNotReject(avisarUsoParcialPorUso({ paymentId: "pago-1", usados: 7 }, deps));
 });

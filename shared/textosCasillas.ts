@@ -106,12 +106,12 @@ export function textoAceptacionTerminosUso(idioma: Idioma = "es"): string {
 }
 
 // ── Casilla de retracto para Pago por uso (Tarea 16A-2, decision del Brain 2026-10-06) ──────────
-// REVISAR ABOGADO: mismo criterio legal que TEXTO_CASILLA_RETRACTO del Paquete (Ley 1480 de 2011,
-// articulo 47, numeral 1), adaptado a que Pago por uso no "empieza un servicio" sino que ACTIVA un
-// saldo de inmediato, y que la devolucion completa aplica por COMPRA (no por el saldo acumulado
-// total, que puede incluir compras anteriores ya usadas): si no se ha usado ningun envio de ESA
-// compra en particular, procede la devolucion completa de ESE pago dentro de los 5 dias habiles
-// siguientes. Pendiente de que un abogado colegiado confirme la redaccion antes de publicar.
+// Aprobado por Abogado_LAP 2026-10-07 (decisión (a) de Leonardo) — VERIFICACION-v1.4: mismo
+// criterio legal que TEXTO_CASILLA_RETRACTO del Paquete (Ley 1480 de 2011, articulo 47, numeral
+// 1), adaptado a que Pago por uso no "empieza un servicio" sino que ACTIVA un saldo de inmediato,
+// y que la devolucion completa aplica por COMPRA (no por el saldo acumulado total, que puede
+// incluir compras anteriores ya usadas): si no se ha usado ningun envio de ESA compra en
+// particular, procede la devolucion completa de ESE pago dentro de los 5 dias habiles siguientes.
 export const TEXTO_CASILLA_RETRACTO_POR_USO =
   "Quiero que mi saldo se active de inmediato al confirmarse mi pago. Sé que, por eso, no procede " +
   "el derecho de retracto de 5 días hábiles (Ley 1480 de 2011, artículo 47, numeral 1). Conservo " +

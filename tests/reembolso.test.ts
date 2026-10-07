@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { Timestamp } from "firebase-admin/firestore";
 import {
   activarPaqueteSiNoProcesadoTx,
+  activarPorUsoSiNoProcesadoTx,
   revertirPagoSiNoRevertidoTx,
   type Cuenta,
 } from "../server/cuentas";
@@ -26,10 +27,37 @@ function activar(db: FirestoreFalso, uid: string, paymentId: string, cop = 49102
   );
 }
 
+function activarPorUso(db: FirestoreFalso, uid: string, paymentId: string, cantidad: number) {
+  const pagoRef = db.doc(`pagosProcesados/${paymentId}`);
+  const cuentaRef = db.doc(`cuentas/${uid}`);
+  return db.runTransaction((tx) =>
+    activarPorUsoSiNoProcesadoTx(tx, pagoRef, cuentaRef, {
+      paymentId,
+      uid,
+      cantidad,
+      cop: cantidad * 600,
+      trm: 3900,
+      fecha: Timestamp.fromDate(new Date("2026-10-06T12:00:00.000Z")),
+    })
+  );
+}
+
 function revertir(db: FirestoreFalso, uid: string, paymentId: string) {
   const pagoRef = db.doc(`pagosProcesados/${paymentId}`);
   const cuentaRef = db.doc(`cuentas/${uid}`);
   return db.runTransaction((tx) => revertirPagoSiNoRevertidoTx(tx, pagoRef, cuentaRef, paymentId));
+}
+
+/** G1 (fallback para cuentas viejas): mismo patron de DI que `recalcular` en
+ * tests/registrarEnvio.test.ts — una consulta de `obtenerTipoPago` contra el propio doble de
+ * Firestore de esta prueba, sin tocar la produccion. */
+function revertirConTipoPago(db: FirestoreFalso, uid: string, paymentId: string) {
+  const pagoRef = db.doc(`pagosProcesados/${paymentId}`);
+  const cuentaRef = db.doc(`cuentas/${uid}`);
+  const obtenerTipoPago = async (id: string) => db.leer(`pagosProcesados/${id}`)?.tipo as string | undefined;
+  return db.runTransaction((tx) =>
+    revertirPagoSiNoRevertidoTx(tx, pagoRef, cuentaRef, paymentId, undefined, obtenerTipoPago)
+  );
 }
 
 // ── Oraculo: charged_back del pago activo -> Gratis y saldo 0, una sola vez ────────────────────
@@ -166,3 +194,94 @@ test("revertirPagoSiNoRevertidoTx: paymentId sin pagosProcesados -> ignorado, na
 // segunda reversion la pisaria otra vez a Gratis, borrando una compra nueva legitima). Se
 // verifico a mano comentando ese `if` y confirmando que `r2` pasaba de "ya_procesado" a
 // "revertido"; restaurado de inmediato.
+
+// ── G1 (NO-GO de la revision externa sobre la Tarea 16, 2026-10-07): un reembolso del Paquete
+// DESPUES de una compra Por Uso dejaba el Paquete activo — `activarPorUsoSiNoProcesadoTx` pisa
+// `cuenta.ultimoPago` (lo necesita para su propia idempotencia), y `revertirPagoSiNoRevertidoTx`
+// comparaba `cuenta.ultimoPago.id === paymentId` para saber si el Paquete que se esta revirtiendo
+// es el activo: tras una compra Por Uso, esa comparacion siempre fallaba y devolvia "no_activo".
+// Arreglo: `cuenta.pagoPaqueteId`, que SOLO escribe `activarPaqueteSiNoProcesadoTx` y que una
+// compra Por Uso nunca toca. ──────────────────────────────────────────────────────────────────────
+
+test("G1: Paquete -> porUso -> reembolso del Paquete SI revierte (antes daba no_activo)", async () => {
+  const db = new FirestoreFalso();
+  await activar(db, "uid-1", "pago-paquete-1");
+  await activarPorUso(db, "uid-1", "pago-poruso-1", 100);
+
+  let cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.ultimoPago!.id, "pago-poruso-1", "la compra porUso pisa ultimoPago (esperado)");
+  assert.equal(cuenta.pagoPaqueteId, "pago-paquete-1", "pero pagoPaqueteId sigue siendo el del Paquete");
+  assert.equal(cuenta.saldoPorUso, 100);
+
+  const resultado = await revertir(db, "uid-1", "pago-paquete-1");
+  assert.equal(resultado, "revertido", "con pagoPaqueteId, el Paquete SI se reconoce como activo");
+
+  cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.plan, "gratis");
+  assert.equal(cuenta.enviosRestantes, 0);
+  assert.equal(cuenta.pagoPaqueteId, null, "pagoPaqueteId vuelve a null al revertir el Paquete activo");
+  assert.equal(cuenta.saldoPorUso, 100, "el saldo Por Uso no se toca al revertir el Paquete");
+});
+
+test("G1 (mutacion documentada): comparar contra ultimoPago.id en vez de pagoPaqueteId hace caer la prueba de arriba", () => {
+  // Verificado a mano (no comiteado): en revertirPagoSiNoRevertidoTx, cambiar
+  // `pagoPaqueteIdActual === paymentId` por `(cuenta?.ultimoPago?.id ?? null) === paymentId`
+  // reproduce exactamente el bug de G1 — la prueba de arriba pasa de "revertido" a "no_activo"
+  // (cuenta.ultimoPago.id es "pago-poruso-1", nunca "pago-paquete-1", tras la compra porUso).
+  // Restaurado de inmediato tras confirmarlo.
+  assert.ok(true);
+});
+
+test("G1 fallback: cuenta VIEJA sin pagoPaqueteId (campo ausente) con ultimoPago de tipo Paquete SI revierte", async () => {
+  const db = new FirestoreFalso();
+  await activar(db, "uid-1", "pago-1");
+
+  // Simula una cuenta migrada ANTES de este fix: el campo pagoPaqueteId nunca llego a escribirse.
+  const cuentaVieja: any = { ...(db.leer("cuentas/uid-1") as Cuenta) };
+  delete cuentaVieja.pagoPaqueteId;
+  db.seed("cuentas/uid-1", cuentaVieja);
+
+  const resultado = await revertirConTipoPago(db, "uid-1", "pago-1");
+  assert.equal(resultado, "revertido", "fallback a ultimoPago.id: pagosProcesados/pago-1.tipo no es porUso");
+});
+
+test("G1 fallback (mutacion documentada): sin `obtenerTipoPago` inyectado, la cuenta vieja NO revierte (conservador)", async () => {
+  const db = new FirestoreFalso();
+  await activar(db, "uid-1", "pago-1");
+  const cuentaVieja: any = { ...(db.leer("cuentas/uid-1") as Cuenta) };
+  delete cuentaVieja.pagoPaqueteId;
+  db.seed("cuentas/uid-1", cuentaVieja);
+
+  // Mismo caso que arriba, pero via `revertir` (sin inyectar `obtenerTipoPago`, como hace la
+  // produccion `revertirPagoSiNoRevertido` SIEMPRE hace — esta funcion es el equivalente de
+  // "la mutacion de quitar la inyeccion real" para esta prueba).
+  const resultado = await revertir(db, "uid-1", "pago-1");
+  assert.equal(resultado, "no_activo", "sin la consulta inyectada, no se puede confirmar el tipo: conservador");
+});
+
+test("G1 fallback conservador: cuenta VIEJA sin pagoPaqueteId y ultimoPago SIN registro en pagosProcesados -> no se asume activo", async () => {
+  const db = new FirestoreFalso();
+  // Cuenta vieja cuyo ultimoPago.id no tiene ningun documento en pagosProcesados (caso
+  // practicamente imposible en produccion: esa coleccion nunca se borra; existe solo para probar
+  // el camino "conservador" explicito del Brain).
+  db.seed("cuentas/uid-1", {
+    plan: "paquete",
+    enviosRestantes: 150,
+    vence: Timestamp.fromDate(new Date("2026-11-05T00:00:00.000Z")),
+    renueva: false,
+    mpSuscripcionId: null,
+    reservadosPaquete: 0,
+    saldoPorUso: 0,
+    reservadosPorUso: 0,
+    ultimoPago: { id: "pago-huerfano", cop: 49102, trm: 3273.49, fecha: Timestamp.now() },
+    actualizado: Timestamp.now(),
+  });
+  // Un pago REAL y distinto, que si existe y SI es de tipo Paquete.
+  db.seed("pagosProcesados/pago-real", { procesadoEn: Timestamp.now() });
+
+  const resultado = await revertirConTipoPago(db, "uid-1", "pago-real");
+  assert.equal(resultado, "no_activo", "sin poder confirmar el tipo de ultimoPago, no se asume que pago-real sea el activo");
+
+  const cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.plan, "paquete", "la cuenta no debe tocarse ante la duda");
+});

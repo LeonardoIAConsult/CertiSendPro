@@ -14,7 +14,7 @@
 // bundle del cliente como cualquier otro modulo TS sin dependencias — mismo patron exacto que
 // shared/textosCasillas.ts.
 //
-// Nunca duplicar esta formula en un tercer sitio: `tests/precios.test.ts` prueba que el cliente
+// Nunca duplicar esta formula en un tercer sitio: `tests/checkout.test.ts` prueba que el cliente
 // (src/utils/checkout.ts `calcularTotalPorUso`) y el servidor (server/trm.ts, reexportado de aqui)
 // den EXACTAMENTE el mismo COP para la misma cantidad/TRM.
 export function copDesdeUsd(usd: number, trmValor: number): number {

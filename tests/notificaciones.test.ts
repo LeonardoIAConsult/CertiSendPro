@@ -407,6 +407,10 @@ function depsReembolsoFalsas(overrides: Partial<AvisarReembolsoDeps> = {}): {
     liberarReclamoCorreo: async (paymentId, destinatario) => {
       reclamos.delete(`${paymentId}:${destinatario}`);
     },
+    // M1 (corrige NO-GO 2026-10-07): por defecto SIN uso parcial (0) — las pruebas de M1 pasan
+    // `obtenerUsadosAlRevertirPorUso` explicito.
+    obtenerUsadosAlRevertirPorUso: async () => 0,
+    avisarUsoParcialPorUso: async () => {},
     ...overrides,
   };
   return { deps, correosEnviados };

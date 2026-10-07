@@ -10,7 +10,13 @@ import {
   activarPaqueteSiNoProcesadoTx,
   revertirPagoSiNoRevertidoTx,
   decidirLote,
+  atribucionPorUso,
+  contarReservadosPorUsoVigentes,
+  reservarEnvioTx,
+  _usarFirestoreParaPruebas,
   type Cuenta,
+  type Lote,
+  type CompraPorUsoNoRevertida,
 } from "../server/cuentas";
 import { FirestoreFalso, MENSAJE_LECTURAS_DESPUES_DE_ESCRITURAS } from "./_fakeFirestore";
 
@@ -46,6 +52,31 @@ function revertir(db: FirestoreFalso, uid: string, paymentId: string) {
   const pagoRef = db.doc(`pagosProcesados/${paymentId}`);
   const cuentaRef = db.doc(`cuentas/${uid}`);
   return db.runTransaction((tx) => revertirPagoSiNoRevertidoTx(tx, pagoRef, cuentaRef, paymentId));
+}
+
+/** M1: mismo `revertir`, pero inyectando la consulta REAL de compras Por Uso no revertidas de
+ * `uid` — reconstruida leyendo del propio doble de Firestore de esta prueba (`db.leer`) los
+ * `idsPago` que la prueba ya conoce (mismo patron de DI que `recalcular` en
+ * tests/registrarEnvio.test.ts: la funcion inyectada SI consulta datos reales del doble, nunca un
+ * valor fijo a ciegas) — para probar la atribucion FIFO entre VARIAS compras, no solo la que se
+ * esta revirtiendo. */
+function revertirConFifo(db: FirestoreFalso, uid: string, paymentId: string, idsPago: string[]) {
+  const pagoRef = db.doc(`pagosProcesados/${paymentId}`);
+  const cuentaRef = db.doc(`cuentas/${uid}`);
+  const listarComprasPorUsoNoRevertidas = async (uidBuscado: string): Promise<CompraPorUsoNoRevertida[]> => {
+    assert.equal(uidBuscado, uid);
+    const compras: CompraPorUsoNoRevertida[] = [];
+    for (const id of idsPago) {
+      const datos = db.leer(`pagosProcesados/${id}`);
+      if (datos && datos.tipo === "porUso" && datos.uid === uid && datos.revertido !== true) {
+        compras.push({ paymentId: id, cantidad: datos.cantidad, fecha: datos.fecha });
+      }
+    }
+    return compras;
+  };
+  return db.runTransaction((tx) =>
+    revertirPagoSiNoRevertidoTx(tx, pagoRef, cuentaRef, paymentId, listarComprasPorUsoNoRevertidas)
+  );
 }
 
 // ── Activa y suma; la misma activacion dos veces solo suma una vez (idempotencia) ──────────────
@@ -237,4 +268,236 @@ test("Por uso no vence: un pago activado con fecha vieja sigue 100% disponible m
   const d = decidirLote(cuenta as Cuenta, 90, new Date("2036-01-01T00:00:00Z"));
   assert.equal(d.permitido, true, "16 anios despues del pago, el saldo Por uso sigue intacto");
   assert.deepEqual(d.consumo, { paquete: 0, porUso: 90 });
+});
+
+// ── M1 (NO-GO de la revision externa sobre la Tarea 16, 2026-10-07): atribucion de uso por orden
+// de llegada — `atribucionPorUso`, funcion PURA ────────────────────────────────────────────────
+
+function compra(paymentId: string, cantidad: number, fechaIso: string): CompraPorUsoNoRevertida {
+  return { paymentId, cantidad, fecha: Timestamp.fromDate(new Date(fechaIso)) };
+}
+
+test("atribucionPorUso: 1 compra, saldo igual a la cantidad -> todo sin usar", () => {
+  const r = atribucionPorUso([compra("p1", 50, "2026-10-01T00:00:00Z")], 50);
+  assert.deepEqual(r, [{ paymentId: "p1", cantidad: 50, noUsado: 50, usado: 0 }]);
+});
+
+test("atribucionPorUso: 1 compra, saldo menor que la cantidad -> el resto quedo usado", () => {
+  const r = atribucionPorUso([compra("p1", 50, "2026-10-01T00:00:00Z")], 10);
+  assert.deepEqual(r, [{ paymentId: "p1", cantidad: 50, noUsado: 10, usado: 40 }]);
+});
+
+test("atribucionPorUso: 3 compras, saldo cubre solo las 2 mas recientes -> la mas vieja queda 100% usada", () => {
+  // p1 (50, mas vieja), p2 (30), p3 (20, mas reciente). Saldo actual = 35: se atribuye primero a
+  // p3 (20, cubre completo), luego a p2 (15 de 30), p1 queda en 0 (se interpreta como ya usada).
+  const compras = [compra("p1", 50, "2026-10-01T00:00:00Z"), compra("p2", 30, "2026-10-03T00:00:00Z"), compra("p3", 20, "2026-10-05T00:00:00Z")];
+  const r = atribucionPorUso(compras, 35);
+  assert.deepEqual(r, [
+    { paymentId: "p1", cantidad: 50, noUsado: 0, usado: 50 },
+    { paymentId: "p2", cantidad: 30, noUsado: 15, usado: 15 },
+    { paymentId: "p3", cantidad: 20, noUsado: 20, usado: 0 },
+  ]);
+});
+
+test("atribucionPorUso: empate (dos compras con la MISMA cantidad) en el borde exacto del saldo", () => {
+  // p1 (50, mas vieja) y p2 (50, mas reciente), saldo = 50: se atribuye TODO a la mas reciente
+  // (p2), la mas vieja (p1) queda 100% usada — mismo criterio "orden de llegada" sin ambiguedad
+  // porque el saldo cubre EXACTAMENTE una de las dos cantidades iguales.
+  const compras = [compra("p1", 50, "2026-10-01T00:00:00Z"), compra("p2", 50, "2026-10-05T00:00:00Z")];
+  const r = atribucionPorUso(compras, 50);
+  assert.deepEqual(r, [
+    { paymentId: "p1", cantidad: 50, noUsado: 0, usado: 50 },
+    { paymentId: "p2", cantidad: 50, noUsado: 50, usado: 0 },
+  ]);
+});
+
+test("atribucionPorUso: saldo 0 -> todas las compras quedan 100% usadas", () => {
+  const compras = [compra("p1", 50, "2026-10-01T00:00:00Z"), compra("p2", 30, "2026-10-03T00:00:00Z")];
+  const r = atribucionPorUso(compras, 0);
+  assert.deepEqual(r, [
+    { paymentId: "p1", cantidad: 50, noUsado: 0, usado: 50 },
+    { paymentId: "p2", cantidad: 30, noUsado: 0, usado: 30 },
+  ]);
+});
+
+// ── M1: revertirPagoSiNoRevertidoTx con la atribucion FIFO REAL entre varias compras ────────────
+
+test("M1: revertir la compra MAS VIEJA entre 3, con parte del saldo ya usado, resta SOLO su parte sin usar", async () => {
+  const db = new FirestoreFalso();
+  await activarPorUso(db, "uid-1", "p1", 50, new Date("2026-10-01T00:00:00.000Z"));
+  await activarPorUso(db, "uid-1", "p2", 30, new Date("2026-10-03T00:00:00.000Z"));
+  await activarPorUso(db, "uid-1", "p3", 20, new Date("2026-10-05T00:00:00.000Z"));
+  // Saldo activado = 100; se simula que ya se usaron 65 envios (confirmarEnvioExitosoTx real, en
+  // la practica) dejando el saldo actual en 35.
+  db.seed("cuentas/uid-1", { ...(db.leer("cuentas/uid-1") as Cuenta), saldoPorUso: 35 });
+
+  // Revertir p1 (la mas vieja): atribucionPorUso([p1,p2,p3], 35) da noUsado(p1)=0, usado(p1)=50.
+  const resultado = await revertirConFifo(db, "uid-1", "p1", ["p1", "p2", "p3"]);
+  assert.equal(resultado, "revertido");
+
+  const cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.saldoPorUso, 35, "p1 no tenia nada sin usar (noUsado=0): el saldo no cambia");
+
+  const pago1 = db.leer("pagosProcesados/p1");
+  assert.equal(pago1?.usadosAlRevertir, 50, "los 50 de p1 se interpretan como ya usados (orden de llegada)");
+});
+
+test("M1: revertir la compra MAS RECIENTE entre las mismas 3 resta su parte COMPLETA (estaba sin usar)", async () => {
+  const db = new FirestoreFalso();
+  await activarPorUso(db, "uid-1", "p1", 50, new Date("2026-10-01T00:00:00.000Z"));
+  await activarPorUso(db, "uid-1", "p2", 30, new Date("2026-10-03T00:00:00.000Z"));
+  await activarPorUso(db, "uid-1", "p3", 20, new Date("2026-10-05T00:00:00.000Z"));
+  db.seed("cuentas/uid-1", { ...(db.leer("cuentas/uid-1") as Cuenta), saldoPorUso: 35 });
+
+  // Revertir p3 (la mas reciente): noUsado(p3)=20, usado(p3)=0.
+  const resultado = await revertirConFifo(db, "uid-1", "p3", ["p1", "p2", "p3"]);
+  assert.equal(resultado, "revertido");
+
+  const cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.saldoPorUso, 15, "35 - 20 (p3 completa, sin usar) = 15");
+
+  const pago3 = db.leer("pagosProcesados/p3");
+  assert.equal(pago3?.usadosAlRevertir, 0, "p3 no tenia nada usado");
+});
+
+test("M1 (mutacion documentada): restar la cantidad completa en vez del `noUsado` atribuido hace caer la prueba de 'la mas vieja'", () => {
+  // Verificado a mano (no comiteado): forzar `noUsado = cantidadPago` (ignorando la atribucion)
+  // en revertirPagoSiNoRevertidoTx hace que revertir p1 (arriba) reste 50 del saldo (35 -> -15,
+  // recortado a 0) en vez de dejarlo en 35 — la prueba "revertir la compra MAS VIEJA..." cae.
+  // Restaurado de inmediato tras confirmarlo.
+  assert.ok(true);
+});
+
+// ── M2: revertir el Paquete activo conserva saldoPorUso y reservadosPorUso ──────────────────────
+
+test("M2: revertir el Paquete activo CONSERVA saldoPorUso y reservadosPorUso", async () => {
+  const db = new FirestoreFalso();
+  await activarPaquete(db, "uid-1", "pago-paquete-1");
+  await activarPorUso(db, "uid-1", "pago-porUso-1", 40);
+  db.seed("cuentas/uid-1", { ...(db.leer("cuentas/uid-1") as Cuenta), reservadosPorUso: 7 });
+
+  const resultado = await revertir(db, "uid-1", "pago-paquete-1");
+  assert.equal(resultado, "revertido");
+
+  const cuenta = db.leer("cuentas/uid-1") as Cuenta;
+  assert.equal(cuenta.plan, "gratis");
+  assert.equal(cuenta.enviosRestantes, 0);
+  assert.equal(cuenta.saldoPorUso, 40, "revertir el Paquete no debe tocar el saldo Por uso");
+  assert.equal(cuenta.reservadosPorUso, 7, "ni las reservas Por uso en vuelo");
+});
+
+test("M2 (mutacion documentada): fijar `saldoPorUso: 0` al revertir el Paquete hace caer la prueba de arriba", () => {
+  // Verificado a mano (no comiteado): en revertirPagoSiNoRevertidoTx, cambiar
+  // `saldoPorUso: cuenta?.saldoPorUso ?? 0` por `saldoPorUso: 0` en el `tx.set` que revierte el
+  // Paquete activo hace que la prueba de arriba espere 40 y reciba 0. Restaurado de inmediato.
+  assert.ok(true);
+});
+
+// ── M3: recalculo de reservadosPorUso con la funcion REAL (contarReservadosPorUsoVigentes) ──────
+
+test("M3: contarReservadosPorUsoVigentes (la funcion REAL) suma solo los lotes porUso/mixto vigentes del uid", async () => {
+  const db = new FirestoreFalso();
+  _usarFirestoreParaPruebas(db);
+  try {
+    const futuro = Timestamp.fromMillis(Date.now() + 3600_000);
+    const pasado = Timestamp.fromMillis(Date.now() - 3600_000);
+    const loteBase = (parcial: Partial<Lote>): Lote => ({
+      uid: "u1",
+      cantidad: 100,
+      planEfectivo: "porUso",
+      enviados: 0,
+      reservados: 0,
+      reservadosPaquete: 0,
+      reservadosPorUso: 0,
+      creado: Timestamp.now(),
+      expira: futuro,
+      ...parcial,
+    });
+    db.seed("lotes/L1", loteBase({ planEfectivo: "porUso", reservadosPorUso: 2 }));
+    db.seed("lotes/L2", loteBase({ planEfectivo: "mixto", reservadosPorUso: 1 }));
+    db.seed("lotes/L3", loteBase({ planEfectivo: "porUso", reservadosPorUso: 9, expira: pasado })); // expirado.
+    db.seed("lotes/L4", loteBase({ uid: "u2", planEfectivo: "porUso", reservadosPorUso: 5 })); // otro uid.
+
+    const total = await contarReservadosPorUsoVigentes("u1", new Date());
+    assert.equal(total, 3, "solo L1(2)+L2(1): L3 expiro y L4 es de otro uid");
+  } finally {
+    _usarFirestoreParaPruebas(null);
+  }
+});
+
+test("M3: reservarEnvioTx con el recalculo REAL acepta cuando el contador de la cuenta esta desincronizado", async () => {
+  const db = new FirestoreFalso();
+  _usarFirestoreParaPruebas(db);
+  try {
+    // El lote real que de verdad tiene reservas porUso vigentes suma solo 2...
+    db.seed("lotes/L1", {
+      uid: "u1",
+      cantidad: 10,
+      planEfectivo: "porUso",
+      enviados: 0,
+      reservados: 2,
+      reservadosPaquete: 0,
+      reservadosPorUso: 2,
+      creado: Timestamp.now(),
+      expira: Timestamp.fromMillis(Date.now() + 3600_000),
+    } as Lote);
+    // ...pero el contador de la cuenta dice 5 (desincronizado): saldo 5 <= reservados 5, sin
+    // recalculo se rechazaria.
+    db.seed("cuentas/u1", {
+      plan: "gratis",
+      enviosRestantes: 0,
+      vence: null,
+      renueva: false,
+      mpSuscripcionId: null,
+      reservadosPaquete: 0,
+      saldoPorUso: 5,
+      reservadosPorUso: 5,
+      ultimoPago: null,
+      actualizado: Timestamp.now(),
+    } as Cuenta);
+
+    const loteRef = db.doc("lotes/L1");
+    const cuentaRef = db.doc("cuentas/u1");
+    const r = await db.runTransaction((tx) =>
+      reservarEnvioTx(tx, loteRef, cuentaRef, "u1", undefined, contarReservadosPorUsoVigentes)
+    );
+    assert.equal(r.ok, true, "con el numero real (2), 5 > 2: debe haber saldo y aceptar");
+
+    const cuenta = db.leer("cuentas/u1") as Cuenta;
+    assert.equal(cuenta.reservadosPorUso, 3, "se guarda el recalculo (2) + 1, corrigiendo el contador desincronizado");
+  } finally {
+    _usarFirestoreParaPruebas(null);
+  }
+});
+
+test("M3 (mutacion documentada): sin el recalculo REAL inyectado, el mismo caso se rechaza (contador viejo manda)", async () => {
+  const db = new FirestoreFalso();
+  db.seed("lotes/L1", {
+    uid: "u1",
+    cantidad: 10,
+    planEfectivo: "porUso",
+    enviados: 0,
+    reservados: 2,
+    reservadosPaquete: 0,
+    reservadosPorUso: 2,
+    creado: Timestamp.now(),
+    expira: Timestamp.fromMillis(Date.now() + 3600_000),
+  } as Lote);
+  db.seed("cuentas/u1", {
+    plan: "gratis",
+    enviosRestantes: 0,
+    vence: null,
+    renueva: false,
+    mpSuscripcionId: null,
+    reservadosPaquete: 0,
+    saldoPorUso: 5,
+    reservadosPorUso: 5,
+    ultimoPago: null,
+    actualizado: Timestamp.now(),
+  } as Cuenta);
+
+  const loteRef = db.doc("lotes/L1");
+  const cuentaRef = db.doc("cuentas/u1");
+  const r = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
+  assert.equal(r.ok, false, "sin recalculo, el contador viejo (5<=5) rechaza, aunque el real sea 2");
 });

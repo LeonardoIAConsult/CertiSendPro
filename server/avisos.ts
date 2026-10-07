@@ -643,6 +643,26 @@ export function construirAvisoPagoDobleLeonardo(datos: {
   };
 }
 
+/** M1 (corrige NO-GO 2026-10-07, Terminos SS8.5/8.5-bis): aviso a Leonardo cuando se revierte una
+ * compra Por Uso de la que YA se habia usado parte del saldo (atribucion FIFO, ver
+ * `server/cuentas.ts` `atribucionPorUso`). La devolucion del dinero sigue siendo MANUAL: este
+ * correo es la unica forma de que alguien se entere de que el reembolso no cubre el 100% del
+ * saldo original — nunca lleva uid ni email (dato personal, no hace falta para decidir el
+ * reembolso). */
+export function construirAvisoUsoParcialPorUsoLeonardo(datos: {
+  paymentId: string;
+  usados: number;
+}): { asunto: string; texto: string } {
+  return {
+    asunto: `[CertiSend] Reversión de Pago por uso con saldo YA USADO — pago ${datos.paymentId}`,
+    texto:
+      `Se revirtió la compra de Pago por uso ${datos.paymentId}, pero ${datos.usados} de sus envíos ` +
+      `ya se habían usado antes de la reversión (atribución por orden de llegada sobre el saldo ` +
+      `actual). Solo se restó del saldo la parte SIN usar; la devolución del dinero de los ` +
+      `${datos.usados} ya usados, si corresponde, requiere revisión manual en el panel de Mercado Pago.`,
+  };
+}
+
 export function construirAvisoFalloWebhookLeonardo(datos: {
   paymentId: string;
   fallosConsecutivos: number;

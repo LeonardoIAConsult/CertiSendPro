@@ -62,7 +62,10 @@ function cuentaBase(parcial: Partial<Cuenta>): Cuenta {
 
 test("G3: confirmarEnvioExitosoTx (version correcta) NO lanza 'reads before writes' con un Paquete", async () => {
   const db = new FirestoreFalso();
-  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 5, planEfectivo: "paquete", reservados: 1 }));
+  // B2 (corrige NO-GO 2026-10-07): `reservadosPaquete` debe reflejar de donde salio la reserva
+  // (fuenteDelLote ya no lo infiere solo del `planEfectivo` estatico) — consistente con lo que
+  // reservarEnvioTx de verdad habria escrito para esta reserva.
+  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 5, planEfectivo: "paquete", reservados: 1, reservadosPaquete: 1 }));
   db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 40 }));
   const loteRef = db.doc("lotes/L1");
   const cuentaRef = db.doc("cuentas/u1");
@@ -210,7 +213,8 @@ test("M23: saldo 1 y DOS lotes Paquete abiertos a la vez -> solo 1 reserva acept
 
 test("M23: tras confirmar el envio de L1, el cupo liberado SI alcanza para L2", async () => {
   const db = new FirestoreFalso();
-  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete", reservados: 1 }));
+  // B2: mismo motivo que en G3 arriba — `reservadosPaquete` consistente con `reservados`.
+  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete", reservados: 1, reservadosPaquete: 1 }));
   db.seed("lotes/L2", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete" }));
   db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 1, reservadosPaquete: 1 }));
   const lote1Ref = db.doc("lotes/L1");
@@ -443,4 +447,73 @@ test("mixto: sin saldo en ninguna de las dos fuentes, se rechaza con mensaje gen
   const r = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
   assert.equal(r.ok, false);
   if (r.ok === false) assert.equal(r.error, "No tienes saldo disponible para este envio.");
+});
+
+// ── B2 (NO-GO de la revision externa sobre la Tarea 16, 2026-10-07): un lote "paquete" PURO cuyo
+// Paquete se agota o vence A MITAD del lote cae al saldo Por Uso, igual que ya hacia "mixto" ────
+
+test("B2: lote 'paquete' puro, el Paquete se AGOTA a mitad del lote -> las reservas siguientes caen a porUso", async () => {
+  const db = new FirestoreFalso();
+  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete" }));
+  db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 1, saldoPorUso: 5 }));
+  const loteRef = db.doc("lotes/L1");
+  const cuentaRef = db.doc("cuentas/u1");
+
+  // La 1a reserva sale del Paquete (su unico cupo); la 2a y 3a, al no quedar Paquete, caen a porUso.
+  const r1 = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
+  const r2 = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
+  const r3 = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
+  assert.equal(r1.ok, true);
+  assert.equal(r2.ok, true, "el Paquete se agoto, pero porUso cubre esta reserva (B2)");
+  assert.equal(r3.ok, true);
+
+  const lote = db.leer("lotes/L1") as Lote;
+  const cuenta = db.leer("cuentas/u1") as Cuenta;
+  assert.equal(lote.planEfectivo, "paquete", "el lote SIGUE etiquetado 'paquete' (B2 no lo convierte en mixto)");
+  assert.equal(lote.reservadosPaquete, 1, "solo la 1a reserva salio del Paquete");
+  assert.equal(lote.reservadosPorUso, 2, "la 2a y 3a salieron de porUso");
+  assert.equal(cuenta.reservadosPaquete, 1);
+  assert.equal(cuenta.reservadosPorUso, 2);
+});
+
+test("B2: lote 'paquete' puro, el Paquete VENCE a mitad del lote (simulado) -> cae a porUso igual", async () => {
+  const db = new FirestoreFalso();
+  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete" }));
+  db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 999, saldoPorUso: 5 }));
+  const loteRef = db.doc("lotes/L1");
+  const cuentaRef = db.doc("cuentas/u1");
+
+  const r1 = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
+  assert.equal(r1.ok, true, "1a reserva: el Paquete todavia esta vigente");
+
+  // El Paquete vence ENTRE la 1a y la 2a reserva (otro proceso lo revirtio, o simplemente paso el
+  // tiempo): `enviosRestantes` todavia marca 999, pero `vence` ya quedo en el pasado.
+  db.seed("cuentas/u1", { ...(db.leer("cuentas/u1") as Cuenta), vence: Timestamp.fromMillis(Date.now() - 1000) });
+
+  const r2 = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
+  assert.equal(r2.ok, true, "el Paquete vencio, pero porUso cubre esta reserva (B2)");
+
+  const lote = db.leer("lotes/L1") as Lote;
+  assert.equal(lote.reservadosPaquete, 1, "solo la 1a reserva (antes de vencer) salio del Paquete");
+  assert.equal(lote.reservadosPorUso, 1, "la 2a (ya vencido) salio de porUso");
+});
+
+test("B2: lote 'paquete' puro sin saldo Por Uso sigue rechazando con el mensaje especifico de antes", async () => {
+  const db = new FirestoreFalso();
+  db.seed("lotes/L1", loteBase({ uid: "u1", cantidad: 10, planEfectivo: "paquete" }));
+  db.seed("cuentas/u1", cuentaBase({ enviosRestantes: 0, saldoPorUso: 0 }));
+  const loteRef = db.doc("lotes/L1");
+  const cuentaRef = db.doc("cuentas/u1");
+
+  const r = await db.runTransaction((tx) => reservarEnvioTx(tx, loteRef, cuentaRef, "u1"));
+  assert.equal(r.ok, false);
+  if (r.ok === false) assert.equal(r.error, "Tu Paquete ya no tiene saldo disponible para este envio.");
+});
+
+test("B2 (mutacion documentada): sin el fallback a porUso, r2/r3 de la primera prueba B2 se rechazarian", () => {
+  // Verificado a mano (no comiteado): restaurar el `if (vencido) return {ok:false,...}` original
+  // (rechazo inmediato, sin mirar porUso) al inicio del bloque `lote.planEfectivo === "paquete"`
+  // de reservarEnvioTx hace que r2 (la reserva que depende de porUso) pase de `ok:true` a
+  // `ok:false` en la prueba "el Paquete se AGOTA a mitad del lote" de arriba. Restaurado de inmediato.
+  assert.ok(true);
 });

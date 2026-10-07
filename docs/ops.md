@@ -218,6 +218,19 @@ formato de log estructurado, si `registrarRutasTareas` dejara de registrar la ru
 ej. un refactor que borre esa línea sin querer): sin esta alerta, el barrido completo deja de
 existir y nadie se entera hasta que un acuse lleva días pendiente.
 
+M1 (corrige NO-GO 2026-10-07): el filtro también incluye `ALERTA_REVERSION_PORUSO_USADO` —
+`server/notificaciones.ts` (`avisarUsoParcialPorUso`) ya lo emite, mismo formato de log
+estructurado (`severity:"ERROR"`, nunca uid/email), cuando se revierte una compra de Pago por uso
+de la que ya se habia usado parte del saldo (atribución FIFO por orden de llegada, `server/cuentas.ts`
+`atribucionPorUso`); la devolución del dinero de lo ya usado, si corresponde, sigue siendo manual.
+
+**Pendiente:** la métrica `certisend_alertas_acuse` (comando de abajo) ya se creó en producción
+ANTES de que existiera este marcador — hay que correr `gcloud logging metrics update
+certisend_alertas_acuse --log-filter='...'` (mismo filtro de abajo, ya con
+`ALERTA_REVERSION_PORUSO_USADO` incluido) para que la alerta de Cloud Monitoring también dispare
+con este marcador nuevo. No se ejecuta aquí (guardarraíl: sin `gcloud` de escritura en este
+entorno) — lo ejecuta el Brain.
+
 Crear la métrica basada en logs (nunca cambiar el texto de estos marcadores sin actualizar
 también este filtro):
 
@@ -227,7 +240,7 @@ gcloud logging metrics create certisend_alertas_acuse \
   --description="Acuses de compra atrasados/abandonados, fallos del barrido y reembolsos que requieren accion manual" \
   --log-filter='resource.type="cloud_run_revision"
 resource.labels.service_name="certisend-api"
-jsonPayload.message=~"ALERTA_ACUSE_(ATRASADO|ABANDONADO)|ALERTA_REEMBOLSO_REQUERIDO|BARRIDO_ACUSES_FALLO|RUTA_TAREAS_NO_REGISTRADA"'
+jsonPayload.message=~"ALERTA_ACUSE_(ATRASADO|ABANDONADO)|ALERTA_REEMBOLSO_REQUERIDO|ALERTA_REVERSION_PORUSO_USADO|BARRIDO_ACUSES_FALLO|RUTA_TAREAS_NO_REGISTRADA"'
 ```
 
 Crear la política de alerta (notifica por correo a `contacto@leonardoantolinez.com` — crear antes

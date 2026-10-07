@@ -115,12 +115,40 @@ export class FirestoreFalso {
   /**
    * M1 (correccion NO-GO vuelta 30, 2026-10-05): minimo necesario para probar los ENVOLTORIOS
    * REALES de server/cuentas.ts (p. ej. `activarPaqueteSiNoProcesado`, no solo su `...Tx`) contra
-   * este doble, via `_usarFirestoreParaPruebas`. Esos envoltorios solo hacen
-   * `db().collection(nombre).doc(id)` y `db().runTransaction(...)` — nunca `.where()`/`.get()`
-   * fuera de una transaccion — por eso esto NO intenta imitar consultas de Firestore.
+   * este doble, via `_usarFirestoreParaPruebas`. La mayoria de esos envoltorios solo hacen
+   * `db().collection(nombre).doc(id)` y `db().runTransaction(...)`.
+   *
+   * M3 (correccion NO-GO 2026-10-07): se agrega `.where(campo, "==", valor).get()` — minimo
+   * necesario para probar las funciones REALES `contarReservadosPaqueteVigentes`/
+   * `contarReservadosPorUsoVigentes`/`listarComprasPorUsoNoRevertidas` (server/cuentas.ts), que
+   * hacen UNA sola consulta `.where("uid","==",uid).get()` fuera de cualquier transaccion y
+   * filtran el resto en memoria. Solo soporta UN `.where()` con `"=="` — lo unico que esas
+   * funciones usan; no intenta imitar el resto de Firestore (orderBy/limit/startAfter siguen sin
+   * soportarse, igual que antes: esos casos se prueban inyectando la consulta, ver
+   * tests/acusePorUsoE2E.test.ts).
    */
-  collection(nombre: string): { doc(id: string): DocRefFalso } {
-    return { doc: (id: string) => this.doc(`${nombre}/${id}`) };
+  collection(nombre: string): {
+    doc(id: string): DocRefFalso;
+    where(campo: string, operador: "==", valor: any): { get(): Promise<{ docs: Array<{ id: string; data(): any }> }> };
+  } {
+    const almacen = this.almacen;
+    return {
+      doc: (id: string) => this.doc(`${nombre}/${id}`),
+      where(campo: string, operador: "==", valor: any) {
+        if (operador !== "==") throw new Error(`FirestoreFalso.where: operador no soportado "${operador}"`);
+        return {
+          async get() {
+            const docs: Array<{ id: string; data(): any }> = [];
+            for (const [path, guardado] of almacen) {
+              if (!path.startsWith(`${nombre}/`) || guardado.data === undefined) continue;
+              if (guardado.data[campo] !== valor) continue;
+              docs.push({ id: path.slice(nombre.length + 1), data: () => guardado.data });
+            }
+            return { docs };
+          },
+        };
+      },
+    };
   }
 
   /** Siembra un documento con datos iniciales, fuera de cualquier transaccion. */

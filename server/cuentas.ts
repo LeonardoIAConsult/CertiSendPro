@@ -103,8 +103,19 @@ export interface Cuenta {
    */
   reservadosPorUso: number;
   /** Ultimo pago de Mercado Pago que activo o renovo un plan (Tarea 6, 2026-10-05). `null` si la
-   * cuenta nunca ha pagado nada (sigue en Gratis desde que se creo). */
+   * cuenta nunca ha pagado nada (sigue en Gratis desde que se creo). OJO: desde Tarea 16A-1 este
+   * campo lo pisa TAMBIEN una compra Por Uso (`activarPorUsoSiNoProcesadoTx`) — por eso NUNCA basta
+   * para saber si el Paquete sigue activo; ver `pagoPaqueteId` abajo (G1, corrige NO-GO 2026-10-07). */
   ultimoPago: UltimoPago | null;
+  /**
+   * Id del pago de Mercado Pago que activo el Paquete VIGENTE (G1, corrige NO-GO 2026-10-07):
+   * `activarPaqueteSiNoProcesadoTx` es la UNICA funcion que lo escribe (al activar, con el
+   * `paymentId` nuevo) y `revertirPagoSiNoRevertidoTx` lo vuelve a `null` al revertir el Paquete
+   * activo. A diferencia de `ultimoPago` (que una compra Por Uso POSTERIOR tambien pisa), este
+   * campo es inmune a esa compra: es lo que `esPagoActivo`/`vigentePorOtroPago` usan para saber
+   * cual es el pago de Paquete activo de verdad. `undefined` (el campo ausente) en cuentas creadas
+   * ANTES de este fix — `resolverPagoPaqueteId` hace el fallback para esas. */
+  pagoPaqueteId?: string | null;
   actualizado: Timestamp;
 }
 
@@ -126,6 +137,7 @@ const CUENTA_GRATIS_BASE: Omit<Cuenta, "actualizado"> = {
   saldoPorUso: 0,
   reservadosPorUso: 0,
   ultimoPago: null,
+  pagoPaqueteId: null,
 };
 
 /**
@@ -177,12 +189,16 @@ export async function marcarProcesado(mpId: string): Promise<boolean> {
 
 export interface PreferenciaGuardada {
   uid: string;
-  /** Hoy solo puede ser "paquete" (Tarea 6); "Pro" desaparecio (decision del Brain 2026-10-06) y
-   * "porUso" (Tarea 16A-1) todavia no lo ofrece esta ruta de cobro (`server/cobroPaquete.ts`). */
+  /** "paquete" o "porUso" (Tarea 16A-2); "Pro" desaparecio (decision del Brain 2026-10-06) y nunca
+   * llego a ofrecerse por esta ruta. */
   plan: Plan;
   cop: number;
   trm: number;
   fechaTrm: string;
+  /** Cantidad de envios comprados — SOLO para `plan:"porUso"` (M4, corrige NO-GO 2026-10-07: antes
+   * `server/webhook.ts` ensanchaba este tipo a mano con `& { cantidad?: number }` en vez de
+   * declararlo aqui). `undefined` para una preferencia de Paquete. */
+  cantidad?: number;
   creado: Timestamp;
 }
 
@@ -350,6 +366,47 @@ export function sumarUnMes(fecha: Date): Date {
  * cubre tambien una segunda entrega del MISMO pago que ya se marco "requiere_reembolso": el
  * aviso a Leonardo solo se manda la primera vez).
  */
+/**
+ * G1 (corrige NO-GO 2026-10-07): resuelve el id del pago de Paquete activo de `cuenta`, con
+ * fallback para cuentas VIEJAS (activadas antes de que `pagoPaqueteId` existiera). `undefined`
+ * (campo ausente) es "cuenta vieja"; `null` es "ya migrada, pero sin Paquete activo" — las dos se
+ * tratan distinto.
+ *
+ * Fallback (cuenta vieja): se usa `cuenta.ultimoPago.id` SOLO si se puede confirmar que ESE pago
+ * es de tipo "paquete" — via `obtenerTipoPago` (inyectable, mismo patron de DI que
+ * `recalcularReservadosPaquete` de `reservarEnvioTx`), una consulta NORMAL de `pagosProcesados`
+ * (fuera de la transaccion: es seguro, porque `tipo` es INMUTABLE una vez que un pago se procesa
+ * — nunca cambia despues — asi que no hay ninguna ventana de inconsistencia que una lectura
+ * transaccional necesite proteger aqui). Un pago viejo sin `tipo` guardado (de antes de que
+ * existiera Pago por Uso) se interpreta como "paquete" — mismo criterio que
+ * `pagoProcesadoAcuseDesdeDoc` mas abajo.
+ *
+ * "Si no se puede saber, de forma conservadora" (instruccion del Brain): sin `obtenerTipoPago`
+ * inyectado, o si ese pago no tiene registro en `pagosProcesados` (no deberia pasar nunca — esa
+ * coleccion no se borra), se devuelve `null` en vez de asumir que es el Paquete. Es mas seguro
+ * equivocarse hacia "esto no es el pago activo" que hacia "si lo es": lo primero, en el peor caso,
+ * solo repite el bug original de G1 para un caso practicamente imposible; lo segundo podria
+ * revertir o bloquear la cuenta por un pago ajeno legitimo.
+ */
+async function resolverPagoPaqueteId(
+  cuenta: Cuenta | null,
+  obtenerTipoPago?: (paymentId: string) => Promise<string | undefined>
+): Promise<string | null> {
+  if (!cuenta) return null;
+  if (cuenta.pagoPaqueteId !== undefined) return cuenta.pagoPaqueteId;
+  if (!cuenta.ultimoPago || !obtenerTipoPago) return null; // nunca pago nada, o sin consulta inyectada: conservador.
+
+  const tipo = await obtenerTipoPago(cuenta.ultimoPago.id);
+  return tipo === "porUso" ? null : cuenta.ultimoPago.id;
+}
+
+/** Consulta real (fuera de cualquier transaccion): `pagosProcesados/{paymentId}.tipo`, o
+ * `undefined` si el pago no existe. Inyectada en produccion a `resolverPagoPaqueteId` (arriba). */
+export async function obtenerTipoPagoGuardado(paymentId: string): Promise<string | undefined> {
+  const snap = await db().collection("pagosProcesados").doc(String(paymentId)).get();
+  return snap.exists ? snap.data()?.tipo : undefined;
+}
+
 export async function activarPaqueteSiNoProcesadoTx(
   tx: TransaccionLike,
   pagoRef: any,
@@ -362,21 +419,34 @@ export async function activarPaqueteSiNoProcesadoTx(
     uid?: string;
     referenciaId?: string;
     fechaTrm?: string;
-  }
+  },
+  /** G1: inyectable para el fallback de `resolverPagoPaqueteId` en cuentas VIEJAS sin
+   * `pagoPaqueteId` — ver esa funcion. La produccion (`activarPaqueteSiNoProcesado`, mas abajo)
+   * SIEMPRE inyecta `obtenerTipoPagoGuardado`. */
+  obtenerTipoPago?: (paymentId: string) => Promise<string | undefined>
 ): Promise<"activado" | "repetido" | "requiere_reembolso"> {
   const pagoSnap = await tx.get(pagoRef);
   if (pagoSnap.exists) return "repetido";
 
   const cuentaSnap = await tx.get(cuentaRef); // lectura, no escritura: todavia no se hizo ningun tx.set/tx.update.
   const cuentaActual = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
-  const vigentePorOtroPago =
+
+  // G1 (corrige NO-GO 2026-10-07): antes comparaba contra `cuentaActual.ultimoPago.id`, que una
+  // compra Por Uso POSTERIOR al Paquete tambien pisa (`activarPorUsoSiNoProcesadoTx`) — eso podia
+  // dejar pasar un pago doble sin detectarlo. Ahora compara contra `pagoPaqueteId` (con fallback
+  // para cuentas viejas, ver `resolverPagoPaqueteId`); solo se calcula (lectura extra) cuando el
+  // resto de las condiciones YA indican que hay un Paquete vigente que proteger.
+  let vigentePorOtroPago = false;
+  if (
     cuentaActual !== null &&
     cuentaActual.plan === "paquete" &&
     cuentaActual.enviosRestantes > 0 &&
     cuentaActual.vence !== null &&
-    cuentaActual.vence.toMillis() > Date.now() &&
-    cuentaActual.ultimoPago !== null &&
-    cuentaActual.ultimoPago.id !== datos.paymentId;
+    cuentaActual.vence.toMillis() > Date.now()
+  ) {
+    const pagoPaqueteIdActual = await resolverPagoPaqueteId(cuentaActual, obtenerTipoPago);
+    vigentePorOtroPago = pagoPaqueteIdActual !== null && pagoPaqueteIdActual !== datos.paymentId;
+  }
 
   if (vigentePorOtroPago) {
     tx.set(pagoRef, {
@@ -419,6 +489,9 @@ export async function activarPaqueteSiNoProcesadoTx(
     saldoPorUso: cuentaActual?.saldoPorUso ?? 0,
     reservadosPorUso: cuentaActual?.reservadosPorUso ?? 0,
     ultimoPago: { id: datos.paymentId, cop: datos.cop, trm: datos.trm, fecha: datos.fecha },
+    // G1: ESTE es el unico lugar que escribe `pagoPaqueteId` — es lo que protege el Paquete de
+    // una compra Por Uso posterior pisando `ultimoPago` (ver el comentario del campo en `Cuenta`).
+    pagoPaqueteId: datos.paymentId,
     actualizado: Timestamp.now(),
   });
   return "activado";
@@ -526,7 +599,7 @@ export async function activarPaqueteSiNoProcesado(
   const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
   const cuentaRef = db().collection("cuentas").doc(uid);
   return db().runTransaction((tx) =>
-    activarPaqueteSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, uid, ...datos })
+    activarPaqueteSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, uid, ...datos }, obtenerTipoPagoGuardado)
   );
 }
 
@@ -825,11 +898,103 @@ export async function paginaPagosProcesados(
 // revertido lo lee de ahi.
 export type ResultadoReversion = "revertido" | "no_activo" | "ya_procesado" | "ignorado";
 
+// ── M1 (corrige NO-GO 2026-10-07, Terminos SS8.5/8.5-bis): atribucion de USO por compra Por Uso ──
+// Varias compras Por Uso de un mismo usuario caen en la MISMA bolsa (`cuenta.saldoPorUso`, sin
+// marca de "a cual compra pertenece cada unidad restante"). Al revertir UNA compra en concreto,
+// nunca se puede restar a ciegas su `cantidad` completa: si ya se uso parte del saldo (via
+// `confirmarEnvioExitosoTx`), restar la cantidad completa le quitaria a la cuenta unidades que en
+// realidad vinieron de OTRA compra, todavia vigente. Terminos SS8.5/8.5-bis fijan la regla: orden
+// de llegada, y en caso de duda, a favor del cliente — aqui eso se traduce en que el saldo que
+// SIGUE SIN USARSE se atribuye primero a las compras MAS RECIENTES (si hay que "inventar" cual
+// unidad se gasto, se asume que se gasto la mas vieja primero, nunca la mas nueva).
+
+export interface CompraPorUsoNoRevertida {
+  paymentId: string;
+  cantidad: number;
+  fecha: Timestamp;
+}
+
+export interface AtribucionPorUso {
+  paymentId: string;
+  cantidad: number;
+  /** Cuanto de ESTA compra sigue SIN usar (nunca mayor que `cantidad` ni que el saldo actual). */
+  noUsado: number;
+  /** `cantidad - noUsado`: cuanto de ESTA compra ya se gasto. */
+  usado: number;
+}
+
+/**
+ * Funcion PURA: dada la lista de compras Por Uso NO revertidas de un usuario, YA ORDENADAS por
+ * orden de llegada (ascendente: la mas vieja primero, la mas reciente al final — el mismo orden
+ * en que `listarComprasPorUsoNoRevertidas` las entrega), y el saldo ACTUAL de la cuenta, decide
+ * cuanto de CADA compra sigue sin usar.
+ *
+ * Algoritmo (orden de llegada, mas favorable al cliente en caso de duda): el saldo que queda se
+ * atribuye primero a las compras MAS RECIENTES — se recorre el arreglo de atras para adelante,
+ * asignandole a cada compra `min(cantidad, saldoQueQueda)` como "no usado" y restando eso del
+ * saldo que queda para la siguiente (mas vieja). Las compras mas viejas son las que "ya se
+ * gastaron" cuando el saldo no alcanza para cubrirlas todas.
+ *
+ * Devuelve el resultado en el MISMO orden que `comprasOrdenadas` (no se reordena la salida).
+ */
+export function atribucionPorUso(comprasOrdenadas: CompraPorUsoNoRevertida[], saldoActual: number): AtribucionPorUso[] {
+  let restante = Math.max(0, saldoActual);
+  const noUsadoPorIndice = new Array<number>(comprasOrdenadas.length);
+  for (let i = comprasOrdenadas.length - 1; i >= 0; i--) {
+    const compra = comprasOrdenadas[i];
+    const noUsado = Math.min(compra.cantidad, restante);
+    noUsadoPorIndice[i] = noUsado;
+    restante -= noUsado;
+  }
+  return comprasOrdenadas.map((compra, i) => ({
+    paymentId: compra.paymentId,
+    cantidad: compra.cantidad,
+    noUsado: noUsadoPorIndice[i],
+    usado: compra.cantidad - noUsadoPorIndice[i],
+  }));
+}
+
+/** Consulta real (fuera de cualquier transaccion, mismo patron que `contarReservadosPorUsoVigentes`):
+ * todas las compras Por Uso NO revertidas de `uid`, ordenadas por orden de llegada (ascendente). */
+export async function listarComprasPorUsoNoRevertidas(uid: string): Promise<CompraPorUsoNoRevertida[]> {
+  const snap = await db().collection("pagosProcesados").where("uid", "==", uid).get();
+  const compras: CompraPorUsoNoRevertida[] = [];
+  for (const doc of snap.docs) {
+    const data = doc.data();
+    if (data?.tipo === "porUso" && data?.revertido !== true && typeof data?.cantidad === "number" && data?.fecha) {
+      compras.push({ paymentId: doc.id, cantidad: data.cantidad, fecha: data.fecha });
+    }
+  }
+  compras.sort((a, b) => a.fecha.toMillis() - b.fecha.toMillis());
+  return compras;
+}
+
+/** Lee `pagosProcesados/{paymentId}.usadosAlRevertir` — cuanto de esa compra Por Uso YA se habia
+ * gastado en el momento de revertirla (0 si nada, o si el pago no existe/no es porUso). Lo usa
+ * `avisarReembolsoPaquete` (server/notificaciones.ts), DESPUES de que la transaccion de reversion
+ * ya aplico, para decidir si hay que alertar a Leonardo (`ALERTA_REVERSION_PORUSO_USADO`). */
+export async function obtenerUsadosAlRevertirPorUso(paymentId: string): Promise<number> {
+  const snap = await db().collection("pagosProcesados").doc(String(paymentId)).get();
+  const valor = snap.exists ? snap.data()?.usadosAlRevertir : undefined;
+  return typeof valor === "number" ? valor : 0;
+}
+
 export async function revertirPagoSiNoRevertidoTx(
   tx: TransaccionLike,
   pagoRef: any,
   cuentaRef: any,
-  paymentId: string
+  paymentId: string,
+  /** M1: consulta REAL de las demas compras Por Uso no revertidas de este usuario, para la
+   * atribucion FIFO (ver `atribucionPorUso` arriba) — inyectable, mismo patron que
+   * `recalcularReservadosPaquete` de `reservarEnvioTx`. Sin este parametro (pruebas que no
+   * necesitan FIFO entre varias compras), esta compra se trata como si fuera la UNICA pendiente —
+   * eso degenera exactamente a la resta simple de antes (`Math.max(0, saldo - cantidad)`); la
+   * funcion real (`revertirPagoSiNoRevertido`, mas abajo) SIEMPRE inyecta la consulta real. */
+  listarComprasPorUsoNoRevertidas?: (uid: string) => Promise<CompraPorUsoNoRevertida[]>,
+  /** G1: inyectable para el fallback de `resolverPagoPaqueteId` en cuentas VIEJAS sin
+   * `pagoPaqueteId` — ver esa funcion. La produccion (`revertirPagoSiNoRevertido`, mas abajo)
+   * SIEMPRE inyecta `obtenerTipoPagoGuardado`. */
+  obtenerTipoPago?: (paymentId: string) => Promise<string | undefined>
 ): Promise<ResultadoReversion> {
   const pagoSnap = await tx.get(pagoRef);
   if (!pagoSnap.exists) {
@@ -844,15 +1009,45 @@ export async function revertirPagoSiNoRevertidoTx(
   const cuenta = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
 
   if (pagoData?.tipo === "porUso") {
-    tx.update(pagoRef, { revertido: true });
+    const cantidadPago = typeof pagoData?.cantidad === "number" ? pagoData.cantidad : 0;
+    let noUsado = cantidadPago;
+    let usados = 0;
+
     if (cuenta) {
-      const cantidad = typeof pagoData?.cantidad === "number" ? pagoData.cantidad : 0;
-      tx.update(cuentaRef, { saldoPorUso: Math.max(0, (cuenta.saldoPorUso ?? 0) - cantidad) });
+      const uid = typeof pagoData?.uid === "string" ? pagoData.uid : null;
+      let compras: CompraPorUsoNoRevertida[];
+      if (uid && listarComprasPorUsoNoRevertidas) {
+        // Lectura FUERA de la transaccion (consulta normal), ANTES de cualquier escritura de esta
+        // funcion — mismo criterio que `recalcularReservadosPaquete`.
+        compras = await listarComprasPorUsoNoRevertidas(uid);
+        if (!compras.some((c) => c.paymentId === paymentId)) {
+          compras = [...compras, { paymentId, cantidad: cantidadPago, fecha: pagoData.fecha }];
+        }
+        compras = [...compras].sort((a, b) => a.fecha.toMillis() - b.fecha.toMillis());
+      } else {
+        compras = [{ paymentId, cantidad: cantidadPago, fecha: pagoData.fecha }];
+      }
+      const atribucion = atribucionPorUso(compras, cuenta.saldoPorUso ?? 0);
+      const laDeEstePago = atribucion.find((a) => a.paymentId === paymentId);
+      if (laDeEstePago) {
+        noUsado = laDeEstePago.noUsado;
+        usados = laDeEstePago.usado;
+      }
+    }
+
+    tx.update(pagoRef, { revertido: true, usadosAlRevertir: usados });
+    if (cuenta) {
+      tx.update(cuentaRef, { saldoPorUso: Math.max(0, (cuenta.saldoPorUso ?? 0) - noUsado) });
     }
     return "revertido";
   }
 
-  const esPagoActivo = (cuenta?.ultimoPago?.id ?? null) === paymentId;
+  // G1 (corrige NO-GO 2026-10-07): antes comparaba contra `cuenta.ultimoPago.id`, que una compra
+  // Por Uso POSTERIOR al Paquete tambien pisa — asi que un reembolso del Paquete despues de esa
+  // compra siempre daba "no_activo", aunque el Paquete siguiera activo. Ahora usa `pagoPaqueteId`
+  // (con fallback para cuentas viejas, ver `resolverPagoPaqueteId`), lectura ANTES de escribir.
+  const pagoPaqueteIdActual = await resolverPagoPaqueteId(cuenta, obtenerTipoPago);
+  const esPagoActivo = pagoPaqueteIdActual === paymentId;
 
   tx.update(pagoRef, { revertido: true });
   if (esPagoActivo) {
@@ -870,11 +1065,14 @@ export async function revertirPagoSiNoRevertidoTx(
   return "no_activo";
 }
 
-/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
+/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales, con la
+ * consulta REAL de compras Por Uso pendientes (M1) para la atribucion FIFO entre varias compras. */
 export async function revertirPagoSiNoRevertido(paymentId: string, uid: string): Promise<ResultadoReversion> {
   const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
   const cuentaRef = db().collection("cuentas").doc(uid);
-  return db().runTransaction((tx) => revertirPagoSiNoRevertidoTx(tx, pagoRef, cuentaRef, paymentId));
+  return db().runTransaction((tx) =>
+    revertirPagoSiNoRevertidoTx(tx, pagoRef, cuentaRef, paymentId, listarComprasPorUsoNoRevertidas, obtenerTipoPagoGuardado)
+  );
 }
 
 // ── Limites de lotes de envio en el servidor (Tarea 3, 2026-10-05) ──────────────────────────
@@ -1117,10 +1315,16 @@ export async function contarReservadosPorUsoVigentes(uid: string, ahora: Date): 
  * saldo, Firestore serializa/reintenta y nunca deja que ambos reserven por encima del cupo o del
  * saldo.
  */
-// Tarea 16A-1 (decision del Brain 2026-10-06): el camino `lote.planEfectivo === "paquete"` de
-// abajo es EXACTAMENTE el de antes (mismos mensajes de error, mismas lecturas/escrituras) — se
-// deja intacto para no arriesgar ninguna de las pruebas de M19/M23/M26/D4/D5/B23. "porUso" y
-// "mixto" son caminos NUEVOS que se agregan al lado, nunca reemplazan al de "paquete".
+// Tarea 16A-1 (decision del Brain 2026-10-06): "porUso" y "mixto" son caminos NUEVOS que se
+// agregan al lado del de "paquete" existente.
+//
+// B2 (corrige NO-GO 2026-10-07): el camino `lote.planEfectivo === "paquete"` ya NO rechaza de
+// inmediato si el Paquete vencio o se agoto A MITAD del lote (decidirLote decidio, al CREAR el
+// lote, que el Paquete alcanzaba para TODO el lote; pero puede vencer o agotarse ENTRE reservas de
+// un mismo lote largo — otro lote del mismo usuario consumiendo en paralelo, o el vencimiento
+// llegando a mitad del envio) — cae al saldo Por Uso si lo hay, exactamente igual que ya hacia un
+// lote "mixto". Por eso `fuenteDelLote` (mas abajo) ya no puede inferir la fuente solo del
+// `planEfectivo` ESTATICO del lote para "paquete": decide por los contadores REALES del lote.
 export async function reservarEnvioTx(
   tx: TransaccionLike,
   loteRef: any,
@@ -1156,28 +1360,49 @@ export async function reservarEnvioTx(
   const cuenta = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
 
   if (lote.planEfectivo === "paquete") {
-    // D5/B23: un Paquete VENCIDO nunca reserva, aunque `enviosRestantes` todavia marque saldo.
-    const vencido = !cuenta || cuenta.vence === null || cuenta.vence.toMillis() <= Date.now();
-    if (vencido) {
-      return { ok: false, error: "Tu Paquete ya vencio. Renueva para seguir enviando." };
+    // D5/B23: un Paquete VENCIDO (o agotado) no reserva del Paquete — pero, a diferencia de antes
+    // (B2, corrige NO-GO 2026-10-07), eso ya no rechaza el envio de inmediato: cae al saldo Por
+    // Uso si lo hay, igual que un lote "mixto" ya hacia. Mismo orden/criterio exacto que el bloque
+    // "mixto" de abajo (Paquete primero mientras le quede, Por Uso despues).
+    const paqueteVigente = !!cuenta && cuenta.vence !== null && cuenta.vence.toMillis() > Date.now();
+    let reservadosPaquete = cuenta?.reservadosPaquete ?? 0;
+    let disponiblePaquete = 0;
+    if (paqueteVigente && cuenta) {
+      if (cuenta.enviosRestantes <= reservadosPaquete && recalcularReservadosPaquete) {
+        // D4/M26: el contador de la cuenta dice que no hay saldo; antes de rechazar, se recalcula
+        // el numero REAL sumando los lotes Paquete no expirados del usuario (fuera de esta
+        // transaccion) y se vuelve a evaluar con ese numero.
+        reservadosPaquete = await recalcularReservadosPaquete(uid, new Date());
+      }
+      disponiblePaquete = Math.max(0, cuenta.enviosRestantes - reservadosPaquete);
     }
 
-    const restantes = cuenta.enviosRestantes;
-    let reservadosPaquete = cuenta.reservadosPaquete ?? 0;
-    if (restantes <= reservadosPaquete && recalcularReservadosPaquete) {
-      // D4/M26: el contador de la cuenta dice que no hay saldo; antes de rechazar, se recalcula
-      // el numero REAL sumando los lotes Paquete no expirados del usuario (fuera de esta
-      // transaccion) y se vuelve a evaluar con ese numero.
-      reservadosPaquete = await recalcularReservadosPaquete(uid, new Date());
-    }
-    if (restantes <= reservadosPaquete) {
-      return { ok: false, error: "Tu Paquete ya no tiene saldo disponible para este envio." };
+    if (disponiblePaquete > 0) {
+      tx.update(loteRef, { reservados: lote.reservados + 1, reservadosPaquete: (lote.reservadosPaquete ?? 0) + 1 });
+      // Se guarda `reservadosPaquete + 1`: si hubo recalculo (D4/M26), esta escritura tambien
+      // corrige el contador desincronizado de la cuenta, no solo desbloquea esta reserva.
+      tx.update(cuentaRef, { reservadosPaquete: reservadosPaquete + 1 });
+      return { ok: true, lote };
     }
 
-    tx.update(loteRef, { reservados: lote.reservados + 1, reservadosPaquete: (lote.reservadosPaquete ?? 0) + 1 });
-    // Se guarda `reservadosPaquete + 1`: si hubo recalculo (D4/M26), esta escritura tambien
-    // corrige el contador desincronizado de la cuenta, no solo desbloquea esta reserva.
-    tx.update(cuentaRef, { reservadosPaquete: reservadosPaquete + 1 });
+    let reservadosPorUso = cuenta?.reservadosPorUso ?? 0;
+    const saldoPorUso = cuenta?.saldoPorUso ?? 0;
+    if (saldoPorUso <= reservadosPorUso && recalcularReservadosPorUso) {
+      reservadosPorUso = await recalcularReservadosPorUso(uid, new Date());
+    }
+    if (saldoPorUso <= reservadosPorUso) {
+      // Ni el Paquete ni Por Uso alcanzan: mismo mensaje especifico que antes segun el motivo
+      // (vencimiento vs saldo agotado), para no romper los textos que M19/M23/M26/D5/B23 ya fijan.
+      return {
+        ok: false,
+        error: paqueteVigente
+          ? "Tu Paquete ya no tiene saldo disponible para este envio."
+          : "Tu Paquete ya vencio. Renueva para seguir enviando.",
+      };
+    }
+
+    tx.update(loteRef, { reservados: lote.reservados + 1, reservadosPorUso: (lote.reservadosPorUso ?? 0) + 1 });
+    tx.update(cuentaRef, { reservadosPorUso: reservadosPorUso + 1 });
     return { ok: true, lote };
   }
 
@@ -1263,11 +1488,17 @@ export async function reservarEnvio(
 // (`fuenteDelLote`) — la MISMA prioridad que usa `reservarEnvioTx` al reservar. Da igual que envio
 // exacto se confirme primero: al final de las `reservados` confirmaciones/liberaciones del lote,
 // el reparto por fuente que queda vivo es exactamente el que corresponde.
+//
+// B2 (corrige NO-GO 2026-10-07): un lote "paquete" PURO ya puede, igual que uno "mixto", haber
+// caido parcialmente al saldo Por Uso si el Paquete se agoto o vencio A MITAD del lote (ver
+// `reservarEnvioTx`) — por eso ya NO basta con el `planEfectivo` ESTATICO del lote (fijado una
+// sola vez en `crearLote`) para decidir la fuente de "paquete": se decide SIEMPRE por los
+// contadores REALES del lote, igual que ya hacia "mixto". "porUso" PURO si sigue siendo siempre
+// "porUso": `reservarEnvioTx` nunca reserva Paquete para un lote de ese tipo.
 function fuenteDelLote(lote: Lote, planEfectivo: PlanEfectivo): "paquete" | "porUso" | null {
-  if (planEfectivo === "paquete") return "paquete";
+  if (planEfectivo === "gratis") return null; // nunca toca la cuenta.
   if (planEfectivo === "porUso") return "porUso";
-  if (planEfectivo === "mixto") return (lote.reservadosPaquete ?? 0) > 0 ? "paquete" : "porUso";
-  return null; // "gratis": nunca toca la cuenta.
+  return (lote.reservadosPaquete ?? 0) > 0 ? "paquete" : "porUso"; // "paquete" o "mixto".
 }
 
 export async function confirmarEnvioExitosoTx(

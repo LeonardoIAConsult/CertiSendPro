@@ -344,10 +344,9 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
 
   // ── Pago por uso (Tarea 16A-2, decision del Brain 2026-10-06) ─────────────────────────────────
   if (esPorUso) {
-    // La preferencia guardada por create-preference (server/cobroPaquete.ts `crearCobroPorUso`)
-    // SI guarda `cantidad`, aunque el tipo `PreferenciaGuardada` (server/cuentas.ts) no la declare
-    // — se ensancha el tipo localmente aqui, sin tocar ese modulo.
-    const prefPorUso = preferencia as (PreferenciaGuardada & { cantidad?: number }) | null;
+    // M4 (corrige NO-GO 2026-10-07): `PreferenciaGuardada` (server/cuentas.ts) ya declara
+    // `cantidad?: number` directamente; ya no hace falta ensanchar el tipo a mano aqui.
+    const prefPorUso = preferencia;
     if (
       !prefPorUso ||
       prefPorUso.uid !== referencia.uid ||
