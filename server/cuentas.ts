@@ -51,7 +51,17 @@ export function _usarFirestoreParaPruebas(falso: any): void {
   dbInstancia = falso;
 }
 
-export type Plan = "gratis" | "paquete" | "pro";
+export type Plan = "gratis" | "paquete" | "porUso";
+
+/**
+ * Plan EFECTIVO aplicado a un LOTE o a una DECISION (Tarea 16A-1, decision del Brain 2026-10-06:
+ * se agrega el plan "Pago por uso" — US$0,15 por envio, saldo SIN vencimiento y ACUMULABLE; "Pro"
+ * desaparece). "mixto" se suma a los 3 valores de `Plan`: aparece cuando un lote de mas de 15
+ * certificados se reparte ENTRE el saldo del Paquete y el saldo Por Uso (ver `decidirLote`).
+ * "mixto" nunca es el plan REAL de una cuenta (`Cuenta.plan`), solo una etiqueta de reparto para
+ * un lote o una decision concretos.
+ */
+export type PlanEfectivo = Plan | "mixto";
 
 export interface Cuenta {
   plan: Plan;
@@ -70,6 +80,23 @@ export interface Cuenta {
    * este cambio: se lee siempre con `?? 0`.
    */
   reservadosPaquete: number;
+  /**
+   * Saldo del plan "Pago por uso" (Tarea 16A-1, decision del Brain 2026-10-06): envios comprados
+   * de a uno (hoy US$0,15 cada uno), SIN fecha de vencimiento y ACUMULABLE entre compras — a
+   * diferencia del Paquete (que REEMPLAZA la cuenta completa al activarse, "no se acumulan los
+   * sobrantes"), cada activacion SUMA a este saldo (`activarPorUsoSiNoProcesadoTx`) y nunca lo
+   * pisa. Puede faltar en cuentas creadas antes de este cambio: se lee siempre con `?? 0`, igual
+   * que `reservadosPaquete`.
+   */
+  saldoPorUso: number;
+  /**
+   * Mismo patron que `reservadosPaquete` (M23), para el saldo Por Uso: cupos reservados AHORA
+   * MISMO sumando TODOS los lotes abiertos de este usuario que consumen de esta fuente (lotes
+   * "porUso" o "mixto"). Se incrementa en `reservarEnvioTx` y se decrementa en
+   * `confirmarEnvioExitosoTx`/`liberarReservaTx`. Puede faltar en cuentas viejas: se lee siempre
+   * con `?? 0`.
+   */
+  reservadosPorUso: number;
   /** Ultimo pago de Mercado Pago que activo o renovo un plan (Tarea 6, 2026-10-05). `null` si la
    * cuenta nunca ha pagado nada (sigue en Gratis desde que se creo). */
   ultimoPago: UltimoPago | null;
@@ -91,16 +118,10 @@ const CUENTA_GRATIS_BASE: Omit<Cuenta, "actualizado"> = {
   renueva: false,
   mpSuscripcionId: null,
   reservadosPaquete: 0,
+  saldoPorUso: 0,
+  reservadosPorUso: 0,
   ultimoPago: null,
 };
-
-// NOTA para la Tarea 8 (suscripcion Pro, pendiente de implementar): igual que
-// `activarPaqueteSiNoProcesadoTx` hace para el Paquete (Tarea 6, de abajo), al activar un plan
-// "pro" el webhook DEBE escribir `vence` en la MISMA escritura (mismo tx.set) que `plan: "pro"`.
-// `decidirLote` solo trata "pro" como vigente si `vence` queda en el futuro (ver `vigente` abajo):
-// un `plan: "pro"` escrito sin `vence`, o con `vence` actualizado en un paso aparte, deja una
-// ventana donde la cuenta ya cobrada se trata como Gratis, o donde una falla a mitad de camino
-// deja "pro" con una fecha de vencimiento vieja o inexistente.
 
 /**
  * Devuelve la cuenta del usuario; si no existe todavia, la crea como Gratis.
@@ -151,7 +172,8 @@ export async function marcarProcesado(mpId: string): Promise<boolean> {
 
 export interface PreferenciaGuardada {
   uid: string;
-  /** Hoy solo puede ser "paquete" (Tarea 6); "pro" es la Tarea 8. */
+  /** Hoy solo puede ser "paquete" (Tarea 6); "Pro" desaparecio (decision del Brain 2026-10-06) y
+   * "porUso" (Tarea 16A-1) todavia no lo ofrece esta ruta de cobro (`server/cobroPaquete.ts`). */
   plan: Plan;
   cop: number;
   trm: number;
@@ -384,10 +406,85 @@ export async function activarPaqueteSiNoProcesadoTx(
     renueva: false, // pago unico (Tarea 6); "renovar cada mes" es la Tarea 7.
     mpSuscripcionId: null,
     reservadosPaquete: 0, // D4/requisito de la Tarea 6: nunca hereda reservas de un ciclo anterior.
+    // Tarea 16A-1 (decision del Brain 2026-10-06): este `tx.set` REEMPLAZA el documento completo
+    // (igual patron que GRAVE 1 de autorizaciones/aceptaciones, mas arriba) — sin esto, activar un
+    // Paquete borraria el saldo Por Uso de la cuenta, que es ACUMULABLE y vive en el MISMO
+    // documento. `cuentaActual` ya se leyo arriba (antes de cualquier escritura) para la
+    // comprobacion de `vigentePorOtroPago`.
+    saldoPorUso: cuentaActual?.saldoPorUso ?? 0,
+    reservadosPorUso: cuentaActual?.reservadosPorUso ?? 0,
     ultimoPago: { id: datos.paymentId, cop: datos.cop, trm: datos.trm, fecha: datos.fecha },
     actualizado: Timestamp.now(),
   });
   return "activado";
+}
+
+// ── Pago por uso (Tarea 16A-1, decision del Brain 2026-10-06): US$0,15 por envio, saldo SIN
+// vencimiento y ACUMULABLE entre compras. "Pro" desaparece (nunca se implemento su activacion). ──
+
+/**
+ * Cuerpo transaccional de la activacion del plan "Pago por uso". A diferencia del Paquete (que
+ * REEMPLAZA la cuenta completa con `tx.set`, "no se acumulan los sobrantes"), este saldo es
+ * ACUMULABLE y SIN VENCIMIENTO: cada activacion SUMA `cantidad` a `saldoPorUso` con `tx.update`
+ * (nunca `tx.set`), sin tocar ningun campo del Paquete (`plan`/`enviosRestantes`/`vence`/
+ * `renueva`/`mpSuscripcionId`/`reservadosPaquete`). Si la cuenta todavia no existe (primera compra
+ * de un usuario nuevo), se crea con `tx.set` sobre la base Gratis — unica vez que esta funcion usa
+ * `set` en vez de `update`, porque Firestore no permite `update` sobre un documento inexistente.
+ *
+ * Idempotencia EN LA MISMA TRANSACCION que la suma (mismo patron que `activarPaqueteSiNoProcesadoTx`:
+ * NO se usa `marcarProcesado`, que abre su propia transaccion aparte): `pagosProcesados/{paymentId}`
+ * se lee ANTES de cualquier escritura; si ya existe, se devuelve "repetido" sin sumar nada — dos
+ * avisos del mismo pago nunca se cuentan dos veces. `ultimoPago` SI se actualiza (igual que hace
+ * el Paquete): es el ultimo pago aprobado de cualquier tipo, Paquete o Por Uso.
+ *
+ * El pago se guarda con `tipo: "porUso"` y `cantidad` (en vez del `vence` que guarda el Paquete):
+ * `revertirPagoSiNoRevertidoTx` (mas abajo) los usa para saber RESTAR del saldo acumulado en vez
+ * de resetear la cuenta entera a Gratis — un reembolso de Por Uso no "reemplaza" nada, solo resta
+ * lo que ESE pago en concreto habia sumado.
+ */
+export async function activarPorUsoSiNoProcesadoTx(
+  tx: TransaccionLike,
+  pagoRef: any,
+  cuentaRef: any,
+  datos: { paymentId: string; uid: string; cantidad: number; cop: number; trm: number; fecha: Timestamp }
+): Promise<"activado" | "repetido"> {
+  const pagoSnap = await tx.get(pagoRef);
+  if (pagoSnap.exists) return "repetido";
+
+  const cuentaSnap = await tx.get(cuentaRef); // lectura, no escritura: todas las lecturas antes de escribir.
+  const cuentaActual = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
+  const saldoPorUsoNuevo = (cuentaActual?.saldoPorUso ?? 0) + datos.cantidad;
+  const ultimoPago: UltimoPago = { id: datos.paymentId, cop: datos.cop, trm: datos.trm, fecha: datos.fecha };
+
+  tx.set(pagoRef, {
+    procesadoEn: Timestamp.now(),
+    uid: datos.uid,
+    cop: datos.cop,
+    trm: datos.trm,
+    fecha: datos.fecha,
+    tipo: "porUso",
+    cantidad: datos.cantidad,
+  });
+
+  if (cuentaActual) {
+    tx.update(cuentaRef, { saldoPorUso: saldoPorUsoNuevo, ultimoPago });
+  } else {
+    tx.set(cuentaRef, { ...CUENTA_GRATIS_BASE, saldoPorUso: saldoPorUsoNuevo, ultimoPago, actualizado: Timestamp.now() });
+  }
+  return "activado";
+}
+
+/** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
+export async function activarPorUsoSiNoProcesado(
+  uid: string,
+  paymentId: string,
+  datos: { cantidad: number; cop: number; trm: number; fecha: Timestamp }
+): Promise<"activado" | "repetido"> {
+  const pagoRef = db().collection("pagosProcesados").doc(String(paymentId));
+  const cuentaRef = db().collection("cuentas").doc(uid);
+  return db().runTransaction((tx) =>
+    activarPorUsoSiNoProcesadoTx(tx, pagoRef, cuentaRef, { paymentId, uid, ...datos })
+  );
 }
 
 /** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
@@ -677,6 +774,14 @@ export async function paginaPagosProcesados(
 // el pago activo (el usuario ya compro o renovo de nuevo desde entonces), la cuenta NO SE TOCA.
 // Idempotente: `revertido` en el MISMO documento de `pagosProcesados/{paymentId}` evita procesar
 // dos veces el mismo evento de reembolso (Mercado Pago puede reintentar el aviso).
+//
+// Tarea 16A-1 (decision del Brain 2026-10-06): un pago `tipo: "porUso"` (los que guarda
+// `activarPorUsoSiNoProcesadoTx`) NUNCA sigue la regla de arriba — el saldo Por Uso es ACUMULABLE
+// y no tiene un "pago activo" unico que proteger, asi que revertirlo siempre RESTA la `cantidad`
+// que ESE pago en concreto habia sumado (minimo 0), sin tocar el Paquete ni resetear la cuenta a
+// Gratis. El dato de que fue "porUso" queda en `pagosProcesados/{paymentId}.tipo`, que la
+// reversion nunca borra (solo agrega `revertido:true`) — quien necesite saber el tipo del pago
+// revertido lo lee de ahi.
 export type ResultadoReversion = "revertido" | "no_activo" | "ya_procesado" | "ignorado";
 
 export async function revertirPagoSiNoRevertidoTx(
@@ -691,15 +796,34 @@ export async function revertirPagoSiNoRevertidoTx(
     // nuestro webhook): no hay cuenta que revertir ni evento propio que recordar.
     return "ignorado";
   }
-  if (pagoSnap.data()?.revertido === true) return "ya_procesado";
+  const pagoData = pagoSnap.data();
+  if (pagoData?.revertido === true) return "ya_procesado";
 
   const cuentaSnap = await tx.get(cuentaRef);
   const cuenta = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
+
+  if (pagoData?.tipo === "porUso") {
+    tx.update(pagoRef, { revertido: true });
+    if (cuenta) {
+      const cantidad = typeof pagoData?.cantidad === "number" ? pagoData.cantidad : 0;
+      tx.update(cuentaRef, { saldoPorUso: Math.max(0, (cuenta.saldoPorUso ?? 0) - cantidad) });
+    }
+    return "revertido";
+  }
+
   const esPagoActivo = (cuenta?.ultimoPago?.id ?? null) === paymentId;
 
   tx.update(pagoRef, { revertido: true });
   if (esPagoActivo) {
-    tx.set(cuentaRef, { ...CUENTA_GRATIS_BASE, actualizado: Timestamp.now() });
+    // Tarea 16A-1: este `tx.set` REEMPLAZA el documento completo (mismo riesgo que el `tx.set` de
+    // `activarPaqueteSiNoProcesadoTx`, arriba) — conserva el saldo Por Uso, que es ACUMULABLE y no
+    // tiene nada que ver con el Paquete que se esta revirtiendo.
+    tx.set(cuentaRef, {
+      ...CUENTA_GRATIS_BASE,
+      saldoPorUso: cuenta?.saldoPorUso ?? 0,
+      reservadosPorUso: cuenta?.reservadosPorUso ?? 0,
+      actualizado: Timestamp.now(),
+    });
     return "revertido";
   }
   return "no_activo";
@@ -717,6 +841,11 @@ export async function revertirPagoSiNoRevertido(paymentId: string, uid: string):
 // servidor responde segun el plan. `decidirLote` es una funcion PURA (sin Firestore) para
 // poder probarla con node:test; las funciones de abajo son las unicas que tocan la base de datos.
 
+// Tarea 16A-1 (decision del Brain 2026-10-06): "limite_gratis" ya NO lo produce `decidirLote` —
+// desde que existe Pago por uso, cualquier rechazo de un lote de mas de 15 es "saldo_insuficiente"
+// (ver la funcion abajo). Se conserva el valor en el tipo por compatibilidad con quien ya lo sabe
+// mostrar (src/utils/plan.ts, fuera de este archivo): nunca se borra en silencio un motivo que la
+// UI todavia entiende, solo deja de producirse.
 export type MotivoRechazoLote = "limite_gratis" | "saldo_insuficiente";
 
 export interface DecisionLote {
@@ -727,65 +856,113 @@ export interface DecisionLote {
   /**
    * Plan EFECTIVO aplicado a ESTE lote: lo que se guarda en `lotes/{loteId}` y lo que usan
    * `reservarEnvio`/`confirmarEnvioExitoso` para decidir si descuentan saldo. Nunca es el plan
-   * de la cuenta a secas (ver regla R3-1 abajo).
+   * de la cuenta a secas (ver regla R3-1 abajo). Puede ser "mixto" (Tarea 16A-1) cuando el lote
+   * se reparte entre el Paquete y el saldo Por Uso — ver `consumo`.
    */
-  planEfectivo: Plan;
+  planEfectivo: PlanEfectivo;
+  /**
+   * Reparto de ESTE lote entre las dos fuentes de saldo pagado (Tarea 16A-1): cuantos de los
+   * `cantidad` certificados se cobran del Paquete y cuantos del saldo Por Uso. `paquete + porUso`
+   * siempre suma `cantidad` cuando `permitido` es `true` y `planEfectivo` no es "gratis".
+   * `undefined` cuando el lote es Gratis: no hay reparto, no se consume nada.
+   */
+  consumo?: { paquete: number; porUso: number };
   enviosRestantes: number;
   vence: Timestamp | null;
 }
 
 const LIMITE_GRATIS = 15;
 
+/** `planEfectivo` que corresponde a un reparto de `cantidadPaquete` + `cantidadPorUso` unidades
+ * (ya sea el reparto REAL de un lote aceptado, o el disponible de uno rechazado): "mixto" si las
+ * dos fuentes aportan, "paquete"/"porUso" si solo una, "gratis" si ninguna. */
+function planEfectivoDeReparto(cantidadPaquete: number, cantidadPorUso: number): PlanEfectivo {
+  if (cantidadPaquete > 0 && cantidadPorUso > 0) return "mixto";
+  if (cantidadPaquete > 0) return "paquete";
+  if (cantidadPorUso > 0) return "porUso";
+  return "gratis";
+}
+
 /**
- * Decide si un lote de `cantidad` certificados cabe en el plan de `cuenta`, a la fecha `ahora`,
- * y que `planEfectivo` le corresponde a ESE lote.
+ * Decide si un lote de `cantidad` certificados cabe en el saldo de `cuenta`, a la fecha `ahora`,
+ * y como se reparte entre las dos fuentes pagadas (Tarea 16A-1, decision del Brain 2026-10-06:
+ * se agrega "Pago por uso" — US$0,15 por envio, saldo SIN vencimiento y ACUMULABLE; "Pro"
+ * desaparece y con el su via libre sin limite de cantidad).
  *
  * Regla R3-1 (decision del Brain, 2026-10-05, mas favorable al cliente — corrige M21): un lote
- * de 15 o menos SIEMPRE es Gratis, aunque la cuenta tenga un Paquete vigente con saldo: nunca
- * descuenta del saldo. Por eso esta comprobacion va ANTES de mirar el plan de la cuenta.
+ * de 15 o menos SIEMPRE es Gratis, aunque la cuenta tenga saldo pagado: nunca descuenta. Por eso
+ * esta comprobacion va ANTES de mirar el saldo de la cuenta.
  *
  * Para lotes de mas de 15:
- * - Pro vigente (vence > ahora): permitido sin limite de cantidad, planEfectivo "pro".
- * - Paquete vigente (vence > ahora) con saldo que alcanza (enviosRestantes >= cantidad):
- *   permitido, planEfectivo "paquete". Si el Paquete esta vigente pero el saldo NO alcanza,
- *   rechazo especifico "saldo_insuficiente" (hay plan pagado, solo no cabe ESTE lote).
- * - Cualquier otro caso — Paquete o Pro vencidos, `vence` null, o Paquete vigente con saldo 0 —
- *   se trata exactamente igual que Gratis: rechazado por "limite_gratis" (ya se sabe que
- *   cantidad > 15, porque el caso <= 15 se resolvio arriba).
+ * - `disponiblePaquete` = saldo vigente del Paquete (`plan === "paquete"` y `vence` en el futuro)
+ *   menos lo ya reservado por otros lotes abiertos (`reservadosPaquete`, M23) — 0 si el Paquete no
+ *   esta vigente.
+ * - `disponiblePorUso` = `saldoPorUso` menos lo ya reservado por otros lotes (`reservadosPorUso`)
+ *   — el saldo Por Uso NUNCA vence, asi que no hay comprobacion de fecha para el.
+ * - Si `disponiblePaquete + disponiblePorUso < cantidad`, se rechaza "saldo_insuficiente" (ya no
+ *   existe el "limite_gratis" de antes: con Pago por uso, cualquier faltante tiene el mismo motivo,
+ *   sea porque la cuenta nunca pago nada o porque el saldo pagado no alcanza para ESTE lote).
+ * - Si alcanza, se reparte PRIMERO contra el Paquete (hasta `disponiblePaquete`) y el resto contra
+ *   el saldo Por Uso — `consumo.paquete + consumo.porUso === cantidad`. `planEfectivo` es "mixto"
+ *   si las dos fuentes aportan, o el nombre de la unica que aporto.
  */
 export function decidirLote(cuenta: Cuenta, cantidad: number, ahora: Date): DecisionLote {
   const base = { plan: cuenta.plan, enviosRestantes: cuenta.enviosRestantes, vence: cuenta.vence };
-  const vigente = cuenta.vence !== null && cuenta.vence.toMillis() > ahora.getTime();
 
   if (cantidad <= LIMITE_GRATIS) {
     return { permitido: true, planEfectivo: "gratis", ...base };
   }
 
-  if (cuenta.plan === "pro" && vigente) {
-    return { permitido: true, planEfectivo: "pro", ...base };
+  const paqueteVigente = cuenta.plan === "paquete" && cuenta.vence !== null && cuenta.vence.toMillis() > ahora.getTime();
+  const disponiblePaquete = paqueteVigente ? Math.max(0, cuenta.enviosRestantes - (cuenta.reservadosPaquete ?? 0)) : 0;
+  const disponiblePorUso = Math.max(0, (cuenta.saldoPorUso ?? 0) - (cuenta.reservadosPorUso ?? 0));
+
+  if (disponiblePaquete + disponiblePorUso < cantidad) {
+    return {
+      permitido: false,
+      motivo: "saldo_insuficiente",
+      planEfectivo: planEfectivoDeReparto(disponiblePaquete, disponiblePorUso),
+      ...base,
+    };
   }
 
-  if (cuenta.plan === "paquete" && vigente && cuenta.enviosRestantes > 0) {
-    if (cuenta.enviosRestantes >= cantidad) return { permitido: true, planEfectivo: "paquete", ...base };
-    return { permitido: false, motivo: "saldo_insuficiente", planEfectivo: "paquete", ...base };
-  }
-
-  return { permitido: false, motivo: "limite_gratis", planEfectivo: "gratis", ...base };
+  const consumoPaquete = Math.min(disponiblePaquete, cantidad);
+  const consumoPorUso = cantidad - consumoPaquete;
+  return {
+    permitido: true,
+    planEfectivo: planEfectivoDeReparto(consumoPaquete, consumoPorUso),
+    consumo: { paquete: consumoPaquete, porUso: consumoPorUso },
+    ...base,
+  };
 }
 
 export interface Lote {
   uid: string;
   cantidad: number;
-  /** Plan EFECTIVO de este lote (de `decidirLote.planEfectivo`), no el plan de la cuenta. */
-  planEfectivo: Plan;
+  /** Plan EFECTIVO de este lote (de `decidirLote.planEfectivo`), no el plan de la cuenta. Puede
+   * ser "mixto" (Tarea 16A-1) cuando el lote se reparte entre el Paquete y el saldo Por Uso. */
+  planEfectivo: PlanEfectivo;
   enviados: number;
   /**
    * Cupos reservados para envios EN CURSO (M19, corregido vuelta 18): se reservan ANTES de
    * llamar a Gmail y se confirman (pasan a `enviados`) o se liberan segun el resultado. Un envio
    * nunca descuenta cupo/saldo hasta que Gmail confirmo, pero tampoco deja que envios paralelos
-   * se cuelen por encima del cupo mientras Gmail todavia esta en vuelo.
+   * se cuelen por encima del cupo mientras Gmail todavia esta en vuelo. Es el TOTAL (cualquier
+   * fuente, incluyendo Gratis); `reservadosPaquete`/`reservadosPorUso` de abajo son el desglose
+   * por fuente dentro de ese total.
    */
   reservados: number;
+  /**
+   * De las `reservados` de este lote, cuantas salieron del Paquete (Tarea 16A-1): necesario para
+   * que `confirmarEnvioExitosoTx`/`liberarReservaTx` sepan, en un lote "mixto", de que fuente
+   * restar — un envio reservado no lleva un identificador propio que lo amarre a su fuente, asi
+   * que se confirma/libera contra la fuente que el LOTE todavia tenga pendiente (ver esas
+   * funciones). En un lote "paquete" puro siempre es igual a `reservados`; en uno "gratis" o
+   * "porUso" puro se queda en 0 toda su vida.
+   */
+  reservadosPaquete: number;
+  /** Mismo patron que `reservadosPaquete`, para el saldo Por Uso. */
+  reservadosPorUso: number;
   creado: Timestamp;
   expira: Timestamp;
 }
@@ -804,7 +981,7 @@ const DURACION_LOTE_MS = 2 * 3600_000;
 export async function crearLote(
   uid: string,
   cantidad: number,
-  planEfectivo: Plan
+  planEfectivo: PlanEfectivo
 ): Promise<{ loteId: string; lote: Lote }> {
   const ref = db().collection("lotes").doc();
   const ahora = Timestamp.now();
@@ -814,6 +991,8 @@ export async function crearLote(
     planEfectivo,
     enviados: 0,
     reservados: 0,
+    reservadosPaquete: 0,
+    reservadosPorUso: 0,
     creado: ahora,
     expira: Timestamp.fromMillis(ahora.toMillis() + DURACION_LOTE_MS),
   };
@@ -834,23 +1013,45 @@ export interface TransaccionLike {
 }
 
 /**
- * Recalcula `reservadosPaquete` sumando `reservados` de TODOS los lotes Paquete NO expirados de
- * `uid` (D4/M26, decision del Brain 2026-10-05, corrige el contador de `cuentas/{uid}` cuando
- * quedo desincronizado — p. ej. una reserva que quedo huerfana sin liberarse). Es una consulta
- * NORMAL de Firestore (`.get()`, no `tx.get()`): corre FUERA de la transaccion a proposito, para
- * no violar "todas las lecturas antes de cualquier escritura" (ver G3 en `confirmarEnvioExitosoTx`)
- * ni atar el resultado al reintento optimista de la transaccion que la llama.
+ * Recalcula `reservadosPaquete` sumando `reservadosPaquete` de TODOS los lotes NO expirados de
+ * `uid` que consumen del Paquete ("paquete" o "mixto", Tarea 16A-1) — D4/M26, decision del Brain
+ * 2026-10-05, corrige el contador de `cuentas/{uid}` cuando quedo desincronizado (p. ej. una
+ * reserva que quedo huerfana sin liberarse). Es una consulta NORMAL de Firestore (`.get()`, no
+ * `tx.get()`): corre FUERA de la transaccion a proposito, para no violar "todas las lecturas antes
+ * de cualquier escritura" (ver G3 en `confirmarEnvioExitosoTx`) ni atar el resultado al reintento
+ * optimista de la transaccion que la llama.
+ *
+ * Filtra solo por `uid` (sin `where("planEfectivo", ...)`) para no depender de un indice
+ * compuesto nuevo por el agregado de "mixto": el filtro por fuente se hace en memoria. `lote.
+ * reservadosPaquete ?? lote.reservados` cubre un lote "paquete" PURO escrito antes de esta tarea
+ * (sin el campo nuevo, pero donde `reservados` ya era, por definicion, 100% Paquete).
  */
 export async function contarReservadosPaqueteVigentes(uid: string, ahora: Date): Promise<number> {
-  const snap = await db()
-    .collection("lotes")
-    .where("uid", "==", uid)
-    .where("planEfectivo", "==", "paquete")
-    .get();
+  const snap = await db().collection("lotes").where("uid", "==", uid).get();
   let total = 0;
   for (const doc of snap.docs) {
     const lote = doc.data() as Lote;
-    if (lote.expira.toMillis() > ahora.getTime()) total += lote.reservados;
+    const esFuentePaquete = lote.planEfectivo === "paquete" || lote.planEfectivo === "mixto";
+    if (esFuentePaquete && lote.expira.toMillis() > ahora.getTime()) {
+      total += lote.reservadosPaquete ?? lote.reservados ?? 0;
+    }
+  }
+  return total;
+}
+
+/** Mismo patron que `contarReservadosPaqueteVigentes`, para el saldo Por Uso (Tarea 16A-1):
+ * recalcula `reservadosPorUso` sumando `reservadosPorUso` de TODOS los lotes NO expirados de
+ * `uid` que consumen de esta fuente ("porUso" o "mixto"). El saldo Por Uso nunca vence, pero el
+ * LOTE si (`lote.expira`): una reserva de un lote expirado ya no cuenta. */
+export async function contarReservadosPorUsoVigentes(uid: string, ahora: Date): Promise<number> {
+  const snap = await db().collection("lotes").where("uid", "==", uid).get();
+  let total = 0;
+  for (const doc of snap.docs) {
+    const lote = doc.data() as Lote;
+    const esFuentePorUso = lote.planEfectivo === "porUso" || lote.planEfectivo === "mixto";
+    if (esFuentePorUso && lote.expira.toMillis() > ahora.getTime()) {
+      total += lote.reservadosPorUso ?? 0;
+    }
   }
   return total;
 }
@@ -875,12 +1076,17 @@ export async function contarReservadosPaqueteVigentes(uid: string, ahora: Date):
  * saldo, Firestore serializa/reintenta y nunca deja que ambos reserven por encima del cupo o del
  * saldo.
  */
+// Tarea 16A-1 (decision del Brain 2026-10-06): el camino `lote.planEfectivo === "paquete"` de
+// abajo es EXACTAMENTE el de antes (mismos mensajes de error, mismas lecturas/escrituras) — se
+// deja intacto para no arriesgar ninguna de las pruebas de M19/M23/M26/D4/D5/B23. "porUso" y
+// "mixto" son caminos NUEVOS que se agregan al lado, nunca reemplazan al de "paquete".
 export async function reservarEnvioTx(
   tx: TransaccionLike,
   loteRef: any,
   cuentaRef: any,
   uid: string,
-  recalcularReservadosPaquete?: (uid: string, ahora: Date) => Promise<number>
+  recalcularReservadosPaquete?: (uid: string, ahora: Date) => Promise<number>,
+  recalcularReservadosPorUso?: (uid: string, ahora: Date) => Promise<number>
 ): Promise<{ ok: true; lote: Lote } | { ok: false; error: string }> {
   const loteSnap = await tx.get(loteRef);
   if (!loteSnap.exists) {
@@ -897,13 +1103,18 @@ export async function reservarEnvioTx(
     return { ok: false, error: "Este lote de envio ya alcanzo su cupo autorizado." };
   }
 
-  let cuenta: Cuenta | null = null;
-  let reservadosPaqueteParaGuardar = 0;
-  if (lote.planEfectivo === "paquete") {
-    // Sigue siendo una lectura: todavia no se ejecuto ningun tx.update/tx.set en esta transaccion.
-    const cuentaSnap = await tx.get(cuentaRef);
-    cuenta = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
+  // Gratis nunca toca la cuenta (R3-1): ni lectura, ni descuento.
+  if (lote.planEfectivo === "gratis") {
+    tx.update(loteRef, { reservados: lote.reservados + 1 });
+    return { ok: true, lote };
+  }
 
+  // Unica lectura de la cuenta (todas las variantes de abajo la necesitan): sigue siendo una
+  // lectura, todavia no se ejecuto ningun tx.update/tx.set en esta transaccion.
+  const cuentaSnap = await tx.get(cuentaRef);
+  const cuenta = cuentaSnap.exists ? (cuentaSnap.data() as Cuenta) : null;
+
+  if (lote.planEfectivo === "paquete") {
     // D5/B23: un Paquete VENCIDO nunca reserva, aunque `enviosRestantes` todavia marque saldo.
     const vencido = !cuenta || cuenta.vence === null || cuenta.vence.toMillis() <= Date.now();
     if (vencido) {
@@ -921,20 +1132,66 @@ export async function reservarEnvioTx(
     if (restantes <= reservadosPaquete) {
       return { ok: false, error: "Tu Paquete ya no tiene saldo disponible para este envio." };
     }
-    reservadosPaqueteParaGuardar = reservadosPaquete;
+
+    tx.update(loteRef, { reservados: lote.reservados + 1, reservadosPaquete: (lote.reservadosPaquete ?? 0) + 1 });
+    // Se guarda `reservadosPaquete + 1`: si hubo recalculo (D4/M26), esta escritura tambien
+    // corrige el contador desincronizado de la cuenta, no solo desbloquea esta reserva.
+    tx.update(cuentaRef, { reservadosPaquete: reservadosPaquete + 1 });
+    return { ok: true, lote };
   }
 
-  tx.update(loteRef, { reservados: lote.reservados + 1 });
-  if (lote.planEfectivo === "paquete" && cuenta) {
-    // Se guarda `reservadosPaqueteParaGuardar + 1`: si hubo recalculo (D4/M26), esta escritura
-    // tambien corrige el contador desincronizado de la cuenta, no solo desbloquea esta reserva.
-    tx.update(cuentaRef, { reservadosPaquete: reservadosPaqueteParaGuardar + 1 });
+  if (lote.planEfectivo === "porUso") {
+    const saldo = cuenta?.saldoPorUso ?? 0;
+    let reservadosPorUso = cuenta?.reservadosPorUso ?? 0;
+    if (saldo <= reservadosPorUso && recalcularReservadosPorUso) {
+      reservadosPorUso = await recalcularReservadosPorUso(uid, new Date());
+    }
+    if (saldo <= reservadosPorUso) {
+      return { ok: false, error: "No tienes saldo Por Uso disponible para este envio." };
+    }
+
+    tx.update(loteRef, { reservados: lote.reservados + 1, reservadosPorUso: (lote.reservadosPorUso ?? 0) + 1 });
+    tx.update(cuentaRef, { reservadosPorUso: reservadosPorUso + 1 });
+    return { ok: true, lote };
   }
+
+  // "mixto" (Tarea 16A-1): primero el Paquete mientras le quede (vigente y con disponible real),
+  // luego el saldo Por Uso. Un Paquete vencido o agotado en un lote MIXTO nunca es un error (a
+  // diferencia del lote puramente "paquete" de arriba): simplemente no aporta, y porUso cubre el
+  // envio — `decidirLote` ya garantizo, al crear el lote, que entre las dos fuentes hay cupo.
+  const paqueteVigente = !!cuenta && cuenta.vence !== null && cuenta.vence.toMillis() > Date.now();
+  let reservadosPaquete = cuenta?.reservadosPaquete ?? 0;
+  let disponiblePaquete = 0;
+  if (paqueteVigente && cuenta) {
+    if (cuenta.enviosRestantes <= reservadosPaquete && recalcularReservadosPaquete) {
+      reservadosPaquete = await recalcularReservadosPaquete(uid, new Date());
+    }
+    disponiblePaquete = Math.max(0, cuenta.enviosRestantes - reservadosPaquete);
+  }
+
+  if (disponiblePaquete > 0) {
+    tx.update(loteRef, { reservados: lote.reservados + 1, reservadosPaquete: (lote.reservadosPaquete ?? 0) + 1 });
+    tx.update(cuentaRef, { reservadosPaquete: reservadosPaquete + 1 });
+    return { ok: true, lote };
+  }
+
+  let reservadosPorUso = cuenta?.reservadosPorUso ?? 0;
+  const saldoPorUso = cuenta?.saldoPorUso ?? 0;
+  if (saldoPorUso <= reservadosPorUso && recalcularReservadosPorUso) {
+    reservadosPorUso = await recalcularReservadosPorUso(uid, new Date());
+  }
+  if (saldoPorUso <= reservadosPorUso) {
+    return { ok: false, error: "No tienes saldo disponible para este envio." };
+  }
+
+  tx.update(loteRef, { reservados: lote.reservados + 1, reservadosPorUso: (lote.reservadosPorUso ?? 0) + 1 });
+  tx.update(cuentaRef, { reservadosPorUso: reservadosPorUso + 1 });
   return { ok: true, lote };
 }
 
 /** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales, con el
- * recalculo real (D4) por si el contador de la cuenta esta desincronizado. */
+ * recalculo real (D4) por si el contador de la cuenta esta desincronizado — para las dos fuentes
+ * (Tarea 16A-1). */
 export async function reservarEnvio(
   loteId: string,
   uid: string
@@ -942,7 +1199,7 @@ export async function reservarEnvio(
   const loteRef = db().collection("lotes").doc(loteId);
   const cuentaRef = db().collection("cuentas").doc(uid);
   return db().runTransaction((tx) =>
-    reservarEnvioTx(tx, loteRef, cuentaRef, uid, contarReservadosPaqueteVigentes)
+    reservarEnvioTx(tx, loteRef, cuentaRef, uid, contarReservadosPaqueteVigentes, contarReservadosPorUsoVigentes)
   );
 }
 
@@ -958,34 +1215,60 @@ export async function reservarEnvio(
  * exitoso de un Paquete. El usuario reintentaba (correo duplicado) y el saldo nunca bajaba.
  * Ahora las DOS lecturas (lote y, si aplica, cuenta) van primero; las escrituras, despues.
  */
+// Tarea 16A-1: `reservarEnvioTx` solo cuenta CUPOS por fuente, nunca amarra un envio individual a
+// la reserva que lo cubrio — asi que, para un lote "mixto", confirmar/liberar UN envio no sabe de
+// cual de las dos fuentes era ESE envio en particular. Se resuelve igual que una bolsa comun:
+// se confirma/libera contra la fuente que el LOTE todavia tenga pendiente, Paquete primero
+// (`fuenteDelLote`) — la MISMA prioridad que usa `reservarEnvioTx` al reservar. Da igual que envio
+// exacto se confirme primero: al final de las `reservados` confirmaciones/liberaciones del lote,
+// el reparto por fuente que queda vivo es exactamente el que corresponde.
+function fuenteDelLote(lote: Lote, planEfectivo: PlanEfectivo): "paquete" | "porUso" | null {
+  if (planEfectivo === "paquete") return "paquete";
+  if (planEfectivo === "porUso") return "porUso";
+  if (planEfectivo === "mixto") return (lote.reservadosPaquete ?? 0) > 0 ? "paquete" : "porUso";
+  return null; // "gratis": nunca toca la cuenta.
+}
+
 export async function confirmarEnvioExitosoTx(
   tx: TransaccionLike,
   loteRef: any,
   cuentaRef: any,
-  planEfectivo: Plan
+  planEfectivo: PlanEfectivo
 ): Promise<void> {
   const loteSnap = await tx.get(loteRef);
-  const cuentaSnap = planEfectivo === "paquete" ? await tx.get(cuentaRef) : null; // lectura, no escritura.
+  const cuentaSnap = planEfectivo === "gratis" ? null : await tx.get(cuentaRef); // lectura, no escritura.
 
   if (!loteSnap.exists) return; // el lote desaparecio entre la reserva y el envio: nada que confirmar.
   const lote = loteSnap.data() as Lote;
+  const fuente = fuenteDelLote(lote, planEfectivo);
+
   tx.update(loteRef, {
     enviados: lote.enviados + 1,
     reservados: Math.max(0, lote.reservados - 1),
+    ...(fuente === "paquete" ? { reservadosPaquete: Math.max(0, (lote.reservadosPaquete ?? 0) - 1) } : {}),
+    ...(fuente === "porUso" ? { reservadosPorUso: Math.max(0, (lote.reservadosPorUso ?? 0) - 1) } : {}),
   });
-  if (planEfectivo === "paquete" && cuentaSnap && cuentaSnap.exists) {
+
+  if (fuente && cuentaSnap && cuentaSnap.exists) {
     const cuenta = cuentaSnap.data() as Cuenta;
-    // M23: la reserva se CONSUME (sale de `reservadosPaquete` ademas de bajar el saldo), para
-    // que otro lote del mismo usuario pueda volver a reservar ese cupo si queda saldo.
-    tx.update(cuentaRef, {
-      enviosRestantes: Math.max(0, cuenta.enviosRestantes - 1),
-      reservadosPaquete: Math.max(0, (cuenta.reservadosPaquete ?? 0) - 1),
-    });
+    if (fuente === "paquete") {
+      // M23: la reserva se CONSUME (sale de `reservadosPaquete` ademas de bajar el saldo), para
+      // que otro lote del mismo usuario pueda volver a reservar ese cupo si queda saldo.
+      tx.update(cuentaRef, {
+        enviosRestantes: Math.max(0, cuenta.enviosRestantes - 1),
+        reservadosPaquete: Math.max(0, (cuenta.reservadosPaquete ?? 0) - 1),
+      });
+    } else {
+      tx.update(cuentaRef, {
+        saldoPorUso: Math.max(0, (cuenta.saldoPorUso ?? 0) - 1),
+        reservadosPorUso: Math.max(0, (cuenta.reservadosPorUso ?? 0) - 1),
+      });
+    }
   }
 }
 
 /** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
-export async function confirmarEnvioExitoso(loteId: string, uid: string, planEfectivo: Plan): Promise<void> {
+export async function confirmarEnvioExitoso(loteId: string, uid: string, planEfectivo: PlanEfectivo): Promise<void> {
   const loteRef = db().collection("lotes").doc(loteId);
   const cuentaRef = db().collection("cuentas").doc(uid);
   await db().runTransaction((tx) => confirmarEnvioExitosoTx(tx, loteRef, cuentaRef, planEfectivo));
@@ -994,19 +1277,31 @@ export async function confirmarEnvioExitoso(loteId: string, uid: string, planEfe
 /**
  * Cuerpo transaccional de la liberacion: cuando Gmail FALLO (nunca se envio de verdad), resta 1
  * de `reservados` sin tocar `enviados` ni el saldo, para que ese envio fallido no deje el cupo
- * bloqueado hasta que el lote expire. Si el lote era Paquete, tambien libera el cupo reservado a
- * nivel de cuenta (M23: `reservadosPaquete`), para que otro lote del mismo usuario pueda usarlo.
+ * bloqueado hasta que el lote expire. Si el lote consumia del Paquete o del saldo Por Uso,
+ * tambien libera el cupo reservado a nivel de cuenta (M23/Tarea 16A-1), para que otro lote del
+ * mismo usuario pueda usarlo. A diferencia de `confirmarEnvioExitosoTx`, lee el `planEfectivo`
+ * del propio lote (nunca lo recibe de quien llama) — `fuenteDelLote` resuelve "mixto" igual en
+ * los dos casos.
  */
 export async function liberarReservaTx(tx: TransaccionLike, loteRef: any, cuentaRef: any): Promise<void> {
   const loteSnap = await tx.get(loteRef);
   if (!loteSnap.exists) return;
   const lote = loteSnap.data() as Lote;
-  const cuentaSnap = lote.planEfectivo === "paquete" ? await tx.get(cuentaRef) : null; // lectura, no escritura.
+  const fuente = fuenteDelLote(lote, lote.planEfectivo);
+  const cuentaSnap = fuente ? await tx.get(cuentaRef) : null; // lectura, no escritura.
 
-  tx.update(loteRef, { reservados: Math.max(0, lote.reservados - 1) });
-  if (lote.planEfectivo === "paquete" && cuentaSnap && cuentaSnap.exists) {
+  tx.update(loteRef, {
+    reservados: Math.max(0, lote.reservados - 1),
+    ...(fuente === "paquete" ? { reservadosPaquete: Math.max(0, (lote.reservadosPaquete ?? 0) - 1) } : {}),
+    ...(fuente === "porUso" ? { reservadosPorUso: Math.max(0, (lote.reservadosPorUso ?? 0) - 1) } : {}),
+  });
+  if (fuente && cuentaSnap && cuentaSnap.exists) {
     const cuenta = cuentaSnap.data() as Cuenta;
-    tx.update(cuentaRef, { reservadosPaquete: Math.max(0, (cuenta.reservadosPaquete ?? 0) - 1) });
+    if (fuente === "paquete") {
+      tx.update(cuentaRef, { reservadosPaquete: Math.max(0, (cuenta.reservadosPaquete ?? 0) - 1) });
+    } else {
+      tx.update(cuentaRef, { reservadosPorUso: Math.max(0, (cuenta.reservadosPorUso ?? 0) - 1) });
+    }
   }
 }
 

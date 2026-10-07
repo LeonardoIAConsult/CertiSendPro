@@ -18,6 +18,8 @@ function cuenta(parcial: Partial<Cuenta>): Cuenta {
     renueva: false,
     mpSuscripcionId: null,
     reservadosPaquete: 0,
+    saldoPorUso: 0,
+    reservadosPorUso: 0,
     ultimoPago: null,
     actualizado: Timestamp.fromDate(ahora),
     ...parcial,
@@ -49,7 +51,7 @@ test("plan gratis, aunque vence/enviosRestantes digan otra cosa -> false", () =>
   assert.equal(tienePaqueteVigenteConSaldo(c, ahora), false);
 });
 
-test("plan pro vigente con saldo -> false (este bloqueo es solo para Paquete)", () => {
-  const c = cuenta({ plan: "pro", vence: futuro, enviosRestantes: 50 });
+test("plan porUso con saldo -> false (este bloqueo es solo para Paquete)", () => {
+  const c = cuenta({ plan: "gratis", saldoPorUso: 500, vence: futuro, enviosRestantes: 50 });
   assert.equal(tienePaqueteVigenteConSaldo(c, ahora), false);
 });
