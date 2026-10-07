@@ -18,6 +18,7 @@
 import {
   enviarCorreo as enviarCorreoReal,
   construirCorreoConfirmacionCompra,
+  construirCorreoConfirmacionCompraPorUso,
   construirAvisoVentaLeonardo,
   construirAvisoReembolsoLeonardo,
   construirAvisoBloqueoProveedorLeonardo,
@@ -26,6 +27,7 @@ import {
   tienePlaceholderPendiente,
   type DatosCorreo,
   type DatosConfirmacionCompra,
+  type DatosConfirmacionCompraPorUso,
 } from "./avisos";
 import {
   reclamarEnvioCorreo as reclamarEnvioCorreoReal,
@@ -98,7 +100,11 @@ export const depsNotificarActivacionReales: NotificarActivacionDeps = {
  */
 async function intentarEnviarUnDestinatario(
   paymentId: string,
-  deps: NotificarActivacionDeps,
+  // Pick (no `NotificarActivacionDeps` completo): esta funcion nunca toca `construirCorreoComprador`
+  // ni `obtenerAceptacion`, asi que el tipo mas angosto le permite recibir tanto
+  // `NotificarActivacionDeps` (Paquete) como `NotificarActivacionPorUsoDeps` (Tarea 16A-2) —
+  // sus `construirCorreoComprador` tienen formas incompatibles entre si, pero esta funcion no las usa.
+  deps: Pick<NotificarActivacionDeps, "reclamarEnvioCorreo" | "enviarCorreo" | "marcarCorreoEnviado" | "liberarReclamoCorreo">,
   destinatario: DestinatarioCorreo,
   correo: DatosCorreo,
   ahora: Date
@@ -236,6 +242,105 @@ export async function notificarActivacionPaquete(
   }
 }
 
+// ── Pago por uso: confirmacion de compra + aviso de venta (Tarea 16A-2, decision del Brain
+// 2026-10-06) ────────────────────────────────────────────────────────────────────────────────────
+// Mismo patron EXACTO que `notificarActivacionPaquete` (reclamo transaccional POR DESTINATARIO,
+// bloqueo si el correo trae un dato pendiente, nunca lanza) — solo cambia el correo que se
+// construye para el comprador (`construirCorreoConfirmacionCompraPorUso`: cantidad en vez de
+// vencimiento, "tu saldo no vence") y que el aviso de venta a Leonardo lleva la cantidad comprada.
+
+export interface DatosNotificarActivacionPorUso {
+  uid: string;
+  paymentId: string;
+  /** Id de `preferencias/{id}`/`aceptaciones/{id}` (el mismo, ver server/cobroPaquete.ts). */
+  referenciaId: string;
+  cantidad: number;
+  cop: number;
+  trm: number;
+  fechaTrm: string;
+  fechaPago: Date;
+}
+
+export interface NotificarActivacionPorUsoDeps {
+  reclamarEnvioCorreo(paymentId: string, destinatario: DestinatarioCorreo, ahora: Date): Promise<boolean>;
+  marcarCorreoEnviado(paymentId: string, destinatario: DestinatarioCorreo, reclamadoEn: Date): Promise<void>;
+  liberarReclamoCorreo(paymentId: string, destinatario: DestinatarioCorreo, reclamadoEn: Date): Promise<void>;
+  obtenerAceptacion(id: string): Promise<{ email: string | null; idioma: Idioma } | null>;
+  enviarCorreo(datos: DatosCorreo): Promise<boolean>;
+  /** Compone el correo de confirmacion al comprador — inyectable (por defecto,
+   * `construirCorreoConfirmacionCompraPorUso` real) por el mismo motivo que su equivalente del
+   * Paquete. */
+  construirCorreoComprador(datos: DatosConfirmacionCompraPorUso): { asunto: string; texto: string };
+}
+
+export const depsNotificarActivacionPorUsoReales: NotificarActivacionPorUsoDeps = {
+  reclamarEnvioCorreo: reclamarEnvioCorreoReal,
+  marcarCorreoEnviado: marcarCorreoEnviadoReal,
+  liberarReclamoCorreo: liberarReclamoCorreoReal,
+  obtenerAceptacion: obtenerAceptacionReal,
+  enviarCorreo: enviarCorreoReal,
+  construirCorreoComprador: construirCorreoConfirmacionCompraPorUso,
+};
+
+export async function notificarActivacionPorUso(
+  datos: DatosNotificarActivacionPorUso,
+  ahora: Date = new Date(),
+  deps: NotificarActivacionPorUsoDeps = depsNotificarActivacionPorUsoReales
+): Promise<void> {
+  try {
+    const aceptacion = await deps.obtenerAceptacion(datos.referenciaId);
+
+    if (aceptacion?.email) {
+      const correoComprador = deps.construirCorreoComprador({
+        paraEmail: aceptacion.email,
+        idioma: aceptacion.idioma,
+        cantidad: datos.cantidad,
+        cop: datos.cop,
+        trm: datos.trm,
+        fechaTrm: datos.fechaTrm,
+        fechaPago: datos.fechaPago,
+        refMp: datos.paymentId,
+        enlaceTerminos: enlaceTerminos(),
+      });
+
+      if (tienePlaceholderPendiente(correoComprador.texto)) {
+        console.error(
+          `[NOTIFICACIONES] acuse de compra porUso BLOQUEADO (dato pendiente en el correo). paymentId=${datos.paymentId}`
+        );
+        const avisoBloqueo = construirAvisoBloqueoProveedorLeonardo({ uid: datos.uid, paymentId: datos.paymentId });
+        await intentarEnviarUnDestinatario(
+          datos.paymentId,
+          deps,
+          "bloqueoProveedor",
+          { para: CORREO_LEONARDO, ...avisoBloqueo },
+          ahora
+        );
+      } else {
+        await intentarEnviarUnDestinatario(
+          datos.paymentId,
+          deps,
+          "comprador",
+          { para: aceptacion.email, ...correoComprador },
+          ahora
+        );
+      }
+    } else {
+      console.warn(`[NOTIFICACIONES] sin correo de comprador para paymentId=${datos.paymentId} (aceptacion ausente o sin email).`);
+    }
+
+    const avisoVenta = construirAvisoVentaLeonardo({
+      uid: datos.uid,
+      paymentId: datos.paymentId,
+      cop: datos.cop,
+      plan: "porUso",
+      cantidad: datos.cantidad,
+    });
+    await intentarEnviarUnDestinatario(datos.paymentId, deps, "leonardo", { para: CORREO_LEONARDO, ...avisoVenta }, ahora);
+  } catch (error: any) {
+    console.error(`[NOTIFICACIONES] fallo al notificar la activacion porUso. paymentId=${datos.paymentId}:`, error?.message || error);
+  }
+}
+
 export interface AvisarReembolsoDeps {
   revertirPago(paymentId: string, uid: string): Promise<ResultadoReversion>;
   enviarCorreo(datos: DatosCorreo): Promise<boolean>;
@@ -270,7 +375,8 @@ async function avisarReversionAlComprador(
   datos: { paymentId: string; referenciaId: string; status: string },
   cuentaRevertida: boolean,
   ahora: Date,
-  deps: AvisarReembolsoDeps
+  deps: AvisarReembolsoDeps,
+  plan: "paquete" | "porUso" = "paquete"
 ): Promise<{ correoComprador: string | null; avisoEnviado: boolean }> {
   try {
     const aceptacion = await deps.obtenerAceptacion(datos.referenciaId);
@@ -290,6 +396,7 @@ async function avisarReversionAlComprador(
       status: datos.status,
       cuentaRevertida,
       fecha: ahora,
+      plan,
     });
     const ok = await deps.enviarCorreo({ para: correoComprador, asunto, texto, idEnvio: `${datos.paymentId}:reversionComprador` });
     await cerrarReclamoConReintento(datos.paymentId, deps, "reversionComprador", ok, ahora);
@@ -318,7 +425,7 @@ async function avisarReversionAlComprador(
  * escribirle a mano).
  */
 export async function avisarReembolsoPaquete(
-  datos: { uid: string; paymentId: string; status: string; referenciaId: string },
+  datos: { uid: string; paymentId: string; status: string; referenciaId: string; plan?: "paquete" | "porUso" },
   deps: AvisarReembolsoDeps = depsAvisarReembolsoReales,
   ahora: Date = new Date()
 ): Promise<void> {
@@ -326,7 +433,8 @@ export async function avisarReembolsoPaquete(
   if (resultado === "ya_procesado" || resultado === "ignorado") return;
 
   const cuentaRevertida = resultado === "revertido";
-  const { correoComprador, avisoEnviado } = await avisarReversionAlComprador(datos, cuentaRevertida, ahora, deps);
+  const plan = datos.plan ?? "paquete";
+  const { correoComprador, avisoEnviado } = await avisarReversionAlComprador(datos, cuentaRevertida, ahora, deps, plan);
 
   const { asunto, texto } = construirAvisoReembolsoLeonardo({
     uid: datos.uid,
@@ -335,6 +443,7 @@ export async function avisarReembolsoPaquete(
     cuentaRevertida,
     correoComprador,
     avisoCompradorEnviado: avisoEnviado,
+    plan,
   });
   try {
     await deps.enviarCorreo({ para: CORREO_LEONARDO, asunto, texto, idEnvio: `${datos.paymentId}:reembolso` });
@@ -479,7 +588,11 @@ async function emitirAlertaTiempoUnaVez(
   mensaje: "ALERTA_ACUSE_ATRASADO" | "ALERTA_ACUSE_ABANDONADO",
   construirAviso: (d: { uid: string; paymentId: string; horas: number }) => { asunto: string; texto: string },
   ahora: Date,
-  deps: ReintentarAcuseDeps
+  // Pick (no `ReintentarAcuseDeps` completo): esta funcion nunca toca `construirCorreoComprador`
+  // ni `obtenerEstadoCorreoComprador`, y el tipo mas angosto le permite recibir TANTO
+  // `ReintentarAcuseDeps` (Paquete) COMO `ReintentarAcusePorUsoDeps` (Tarea 16A-2) — sus
+  // `construirCorreoComprador` tienen formas incompatibles entre si, pero esta funcion no las usa.
+  deps: Pick<ReintentarAcuseDeps, "reclamarEnvioCorreo" | "enviarCorreo" | "marcarCorreoEnviado">
 ): Promise<void> {
   const reclamado = await deps.reclamarEnvioCorreo(datos.paymentId, destinatario, ahora);
   if (!reclamado) return; // ya se emitio antes para este pago (esta u otra entrega).
@@ -561,5 +674,94 @@ export async function reintentarAcusePendiente(
     await emitirAlertaTiempoUnaVez(datos, horas, "acuse20h", "ALERTA_ACUSE_ATRASADO", construirAvisoAcuse20hLeonardo, ahora, deps);
   } catch (error: any) {
     console.error(`[NOTIFICACIONES] fallo el reintento del acuse pendiente. paymentId=${datos.paymentId}:`, error?.message || error);
+  }
+}
+
+// ── Reintento del acuse — Pago por uso (Tarea 16A-2, decision del Brain 2026-10-06) ─────────────
+// Mismo mecanismo (por antigüedad, alerta a 20h/48h) que `reintentarAcusePendiente`, pero
+// reconstruyendo el acuse desde `pagosProcesados/{paymentId}` para un pago `tipo:"porUso"` (que
+// guarda `cantidad` en vez de `vence` — ver `activarPorUsoSiNoProcesadoTx`, server/cuentas.ts).
+//
+// NOTA DE ALCANCE (Tarea 16A-2): esta funcion es el bloque constructor — PROBADA de forma directa
+// con datos de `pagosProcesados` ya reconstruidos. Cablearla dentro del barrido programado
+// (`server/tareasFondo.ts` `barrerTodosLosPagosPendientes`/`datosReintentoDesdePago`, que hoy solo
+// lee los campos del Paquete via `pagoProcesadoAcuseDesdeDoc` en server/cuentas.ts) requiere tocar
+// esos dos archivos, FUERA de los archivos permitidos de esta orden (Paso 16A-2: server.ts,
+// server/cobroPaquete.ts, server/webhook.ts, server/notificaciones.ts, server/avisos.ts,
+// shared/textosCasillas.ts, tests/). Queda pendiente como Tarea 16A-3, anotada en el ledger del
+// plan — hoy el acuse en linea de un pago porUso (webhook, inmediato) SI queda cableado de punta a
+// punta; solo el reintento del barrido de 30 min para un porUso pendiente no activa esta funcion.
+
+export interface DatosReintentoAcusePorUsoPendiente {
+  paymentId: string;
+  uid: string;
+  referenciaId: string | null;
+  cantidad: number;
+  cop: number;
+  trm: number;
+  fechaTrm: string | null;
+  /** Fecha DEL PAGO (nunca de cuando se detecto el pendiente). */
+  fecha: Date;
+  revertido?: boolean;
+}
+
+export interface ReintentarAcusePorUsoDeps extends NotificarActivacionPorUsoDeps {
+  obtenerEstadoCorreoComprador(paymentId: string): Promise<string | null>;
+}
+
+const depsReintentarAcusePorUsoReales: ReintentarAcusePorUsoDeps = {
+  ...depsNotificarActivacionPorUsoReales,
+  obtenerEstadoCorreoComprador: obtenerEstadoCorreoCompradorReal,
+};
+
+/** Mismo criterio por antiguedad que `reintentarAcusePendiente` (>=48h: deja de reintentar y
+ * alerta "abandonado"; [20h,48h): reintenta e alerta "atrasado" si sigue sin salir; <20h: solo
+ * reintenta), aplicado a un pago `tipo:"porUso"`. Nunca lanza. */
+export async function reintentarAcusePorUsoPendiente(
+  datos: DatosReintentoAcusePorUsoPendiente,
+  ahora: Date = new Date(),
+  deps: ReintentarAcusePorUsoDeps = depsReintentarAcusePorUsoReales
+): Promise<void> {
+  try {
+    if (datos.revertido === true) {
+      console.warn(`[NOTIFICACIONES] G3: pago porUso ${datos.paymentId} revertido; no se reintenta el acuse.`);
+      return;
+    }
+
+    if (!datos.referenciaId || !datos.fechaTrm) {
+      console.warn(`[NOTIFICACIONES] pago porUso ${datos.paymentId} sin referenciaId/fechaTrm guardados; no se puede reintentar el acuse automaticamente.`);
+      return;
+    }
+
+    const horas = (ahora.getTime() - datos.fecha.getTime()) / 3600_000;
+
+    if (horas >= CUARENTA_Y_OCHO_HORAS_MS / 3600_000) {
+      await emitirAlertaTiempoUnaVez(datos, horas, "acuse48h", "ALERTA_ACUSE_ABANDONADO", construirAvisoAcuseAbandonadoLeonardo, ahora, deps);
+      return;
+    }
+
+    await notificarActivacionPorUso(
+      {
+        uid: datos.uid,
+        paymentId: datos.paymentId,
+        referenciaId: datos.referenciaId,
+        cantidad: datos.cantidad,
+        cop: datos.cop,
+        trm: datos.trm,
+        fechaTrm: datos.fechaTrm,
+        fechaPago: datos.fecha,
+      },
+      ahora,
+      deps
+    );
+
+    if (horas < VEINTE_HORAS_MS / 3600_000) return;
+
+    const estadoActual = await deps.obtenerEstadoCorreoComprador(datos.paymentId);
+    if (estadoActual === "enviado") return;
+
+    await emitirAlertaTiempoUnaVez(datos, horas, "acuse20h", "ALERTA_ACUSE_ATRASADO", construirAvisoAcuse20hLeonardo, ahora, deps);
+  } catch (error: any) {
+    console.error(`[NOTIFICACIONES] fallo el reintento del acuse porUso pendiente. paymentId=${datos.paymentId}:`, error?.message || error);
   }
 }

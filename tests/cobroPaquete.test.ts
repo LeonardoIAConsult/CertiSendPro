@@ -9,9 +9,10 @@
 //   - sin TRM disponible -> 503, tampoco se crea nada.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { crearCobroPaquete, type RespuestaCrearPreferenciaMP } from "../server/cobroPaquete";
+import { crearCobroPaquete, crearCobroPorUso, planCobroValido, type RespuestaCrearPreferenciaMP } from "../server/cobroPaquete";
 import { copDesdeUsd } from "../server/trm";
 import { TERMINOS_VERSION, TEXTO_CASILLA_RETRACTO } from "../server/cuentas";
+import { TEXTO_CASILLA_RETRACTO_POR_USO } from "../shared/textosCasillas";
 import { FirestoreFalso } from "./_fakeFirestore";
 
 /** Arma las dependencias inyectadas de produccion (guardarPreferencia/guardarAceptacion) sobre
@@ -242,4 +243,163 @@ test("sin Paquete vigente (tienePaqueteVigente=false) -> sigue el flujo normal (
   const { opts } = opcionesBase({ tienePaqueteVigente: async () => false });
   const resultado = await crearCobroPaquete(opts);
   assert.equal(resultado.httpStatus, 200);
+});
+
+// ── Tarea 16A-2 (decision del Brain 2026-10-06): planCobroValido — "pro" desaparece de todo lo
+// vendible; solo "paquete"/"porUso" son planes validos ───────────────────────────────────────────
+
+test('planCobroValido: "paquete" y "porUso" son validos; "pro" y cualquier otro valor -> invalido', () => {
+  assert.equal(planCobroValido("paquete"), true);
+  assert.equal(planCobroValido("porUso"), true);
+  assert.equal(planCobroValido("pro"), false);
+  assert.equal(planCobroValido(undefined), false);
+  assert.equal(planCobroValido("otra-cosa"), false);
+  assert.equal(planCobroValido(null), false);
+});
+
+// ── crearCobroPorUso (Tarea 16A-2): US$0,15 por envio, minimo 50, maximo 5000, entero ───────────
+
+const COP_50_POR_USO = copDesdeUsd(0.15 * 50, 4123);
+
+function opcionesPorUsoBase(overrides: Partial<Parameters<typeof crearCobroPorUso>[0]> = {}) {
+  const db = new FirestoreFalso();
+  const orden: string[] = [];
+  const deps = construirDependencias(db, orden);
+  return {
+    db,
+    orden,
+    opts: {
+      uid: "uid-1",
+      email: "cliente@test.com",
+      cantidad: 50,
+      aceptaTerminos: true,
+      aceptaRetracto: true,
+      copMostrado: COP_50_POR_USO,
+      idioma: "es",
+      modalidad: "unico",
+      obtenerTrm: async () => ({ valor: 4123, fechaDesde: "2026-10-05" }),
+      copDesdeUsd,
+      usdUnidad: 0.15,
+      minimoCantidad: 50,
+      maximoCantidad: 5000,
+      generarId: () => "ref-1",
+      log: () => {},
+      ...deps,
+      ...overrides,
+    },
+  };
+}
+
+test("crearCobroPorUso: cantidad=49 (bajo el minimo de 50) -> 400, nada se crea", async () => {
+  const { orden, opts } = opcionesPorUsoBase({ cantidad: 49, copMostrado: copDesdeUsd(0.15 * 49, 4123) });
+  const resultado = await crearCobroPorUso(opts);
+  assert.equal(resultado.httpStatus, 400);
+  assert.deepEqual(orden, []);
+});
+
+test("crearCobroPorUso: cantidad=5001 (sobre el maximo de 5000) -> 400, nada se crea", async () => {
+  const { orden, opts } = opcionesPorUsoBase({ cantidad: 5001, copMostrado: copDesdeUsd(0.15 * 5001, 4123) });
+  const resultado = await crearCobroPorUso(opts);
+  assert.equal(resultado.httpStatus, 400);
+  assert.deepEqual(orden, []);
+});
+
+test("crearCobroPorUso: cantidad=50 (el minimo exacto) -> 200, COP == copDesdeUsd(7.5) y external_reference correcto", async () => {
+  let externalReferenceRecibida = "";
+  const { db, opts } = opcionesPorUsoBase({
+    crearPreferenciaMP: async ({ cop, externalReference }: any) => {
+      externalReferenceRecibida = externalReference;
+      return { ok: true, status: 200, json: async () => ({ init_point: "https://mp.test/init-point" }) };
+    },
+  });
+  const resultado = await crearCobroPorUso(opts);
+
+  assert.equal(resultado.httpStatus, 200);
+  const copEsperado = copDesdeUsd(7.5, 4123);
+  assert.equal(copEsperado, COP_50_POR_USO);
+  assert.equal((resultado.body as any).cop, copEsperado);
+  assert.equal((resultado.body as any).cantidad, 50);
+  assert.equal(externalReferenceRecibida, `CERTISEND|uid-1|porUso|50|${copEsperado}|ref-1`);
+
+  const preferencia = db.leer("preferencias/ref-1") as any;
+  assert.equal(preferencia.plan, "porUso");
+  assert.equal(preferencia.cantidad, 50);
+  assert.equal(preferencia.cop, copEsperado);
+
+  const aceptacion = db.leer("aceptaciones/ref-1") as any;
+  assert.equal(aceptacion.plan, "porUso");
+  assert.equal(aceptacion.textoRetracto, TEXTO_CASILLA_RETRACTO_POR_USO);
+});
+
+test("crearCobroPorUso: cantidad=5000 (el maximo exacto) -> 200", async () => {
+  const { opts } = opcionesPorUsoBase({ cantidad: 5000, copMostrado: copDesdeUsd(0.15 * 5000, 4123) });
+  const resultado = await crearCobroPorUso(opts);
+  assert.equal(resultado.httpStatus, 200);
+});
+
+test("crearCobroPorUso: cantidad decimal (no entera) -> 400", async () => {
+  const { orden, opts } = opcionesPorUsoBase({ cantidad: 50.5 });
+  const resultado = await crearCobroPorUso(opts);
+  assert.equal(resultado.httpStatus, 400);
+  assert.deepEqual(orden, []);
+});
+
+test("crearCobroPorUso: cantidad como texto (no numero) -> 400 (nunca se confia en un texto numerico para la cantidad)", async () => {
+  const { orden, opts } = opcionesPorUsoBase({ cantidad: "50" as any });
+  const resultado = await crearCobroPorUso(opts);
+  assert.equal(resultado.httpStatus, 400);
+  assert.deepEqual(orden, []);
+});
+
+test("crearCobroPorUso: sin aceptaTerminos/aceptaRetracto -> 400, nada se crea", async () => {
+  const { orden, opts } = opcionesPorUsoBase({ aceptaTerminos: false });
+  const resultado = await crearCobroPorUso(opts);
+  assert.equal(resultado.httpStatus, 400);
+  assert.deepEqual(orden, []);
+});
+
+test("crearCobroPorUso: copMostrado distinto del recalculado -> 409 con copNuevo, nada se crea", async () => {
+  const { orden, opts } = opcionesPorUsoBase({ copMostrado: COP_50_POR_USO - 1 });
+  const resultado = await crearCobroPorUso(opts);
+  assert.equal(resultado.httpStatus, 409);
+  assert.equal((resultado.body as any).copNuevo, COP_50_POR_USO);
+  assert.deepEqual(orden, []);
+});
+
+// Mutacion documentada (punto 1 del Paso 16A-2): el COP de N envios debe salir de
+// `copDesdeUsd(usdUnidad * cantidad, trm)`, NUNCA de multiplicar un COP unitario ya redondeado por
+// N — esta prueba falla si alguien cambia la formula a `copDesdeUsd(usdUnidad, trm) * cantidad`
+// (el redondeo por unidad, multiplicado 333 veces, da un numero distinto del redondeo del total).
+test("crearCobroPorUso: el COP sale de redondear el TOTAL (usdUnidad*cantidad), nunca de multiplicar el unitario ya redondeado", async () => {
+  const cantidad = 333;
+  const trm = 4123.37; // decimal real, para que el redondeo por unidad SI difiera del total.
+  const copUnitarioRedondeado = copDesdeUsd(0.15, trm);
+  const copTotalCorrecto = copDesdeUsd(0.15 * cantidad, trm);
+  assert.notEqual(
+    copUnitarioRedondeado * cantidad,
+    copTotalCorrecto,
+    "con esta TRM, las dos formulas deben dar numeros distintos (si no, la prueba no prueba nada)"
+  );
+
+  const { opts } = opcionesPorUsoBase({
+    cantidad,
+    copMostrado: copTotalCorrecto,
+    obtenerTrm: async () => ({ valor: trm, fechaDesde: "2026-10-05" }),
+  });
+  const resultado = await crearCobroPorUso(opts);
+  assert.equal(resultado.httpStatus, 200, "el cliente mostro el COP correcto (del total), debe coincidir");
+  assert.equal((resultado.body as any).cop, copTotalCorrecto);
+});
+
+// ── Comprar porUso con un Paquete vigente SI esta permitido (a diferencia del Paquete, nunca hay
+// un chequeo de "ya tienes uno vigente" en crearCobroPorUso) ───────────────────────────────────
+
+test("crearCobroPorUso: no existe ningun chequeo de Paquete vigente -> 200 sin importar el estado de otro plan", async () => {
+  // A diferencia de crearCobroPaquete, CrearCobroPorUsoOpts ni siquiera recibe un
+  // `tienePaqueteVigente`: la ausencia misma de esa dependencia es la prueba de que esta funcion
+  // nunca puede bloquear por esa razon.
+  const { opts } = opcionesPorUsoBase();
+  assert.equal((opts as any).tienePaqueteVigente, undefined, "crearCobroPorUso no debe depender de tienePaqueteVigente");
+  const resultado = await crearCobroPorUso(opts);
+  assert.equal(resultado.httpStatus, 200, "comprar porUso con (o sin) un Paquete vigente siempre sigue el flujo normal");
 });

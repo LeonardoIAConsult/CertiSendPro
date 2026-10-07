@@ -81,6 +81,17 @@ export interface ProcesarWebhookMPOpts {
     paymentId: string,
     datos: { cop: number; trm: number; fecha: Timestamp; referenciaId: string; fechaTrm: string }
   ): Promise<"activado" | "repetido" | "requiere_reembolso">;
+  /**
+   * Tarea 16A-2 (decision del Brain 2026-10-06): activa de forma idempotente el plan "Pago por
+   * uso" (suma `cantidad` al saldo, SIN vencimiento, ACUMULABLE — ver
+   * `activarPorUsoSiNoProcesado`, server/cuentas.ts). A diferencia del Paquete, nunca hay
+   * "requiere_reembolso": el saldo Por uso no tiene un "pago activo" unico que proteger.
+   */
+  activarPorUso(
+    uid: string,
+    paymentId: string,
+    datos: { cantidad: number; cop: number; trm: number; fecha: Timestamp }
+  ): Promise<"activado" | "repetido">;
   /** Para construir el Timestamp de la fecha del pago sin importar firebase-admin aqui (se inyecta
    * desde server.ts/los tests, que ya tienen el Timestamp real o uno falso). */
   timestampDesdeFecha(fecha: Date): Timestamp;
@@ -107,13 +118,38 @@ export interface ProcesarWebhookMPOpts {
     fechaVencimiento: Date;
   }): Promise<void>;
   /**
+   * Tarea 16A-2: equivalente de `notificarActivacion` para el plan "Pago por uso" — correo de
+   * confirmacion al comprador (cantidad, sin vencimiento) + aviso de venta a Leonardo. Mismas
+   * garantias (idempotente por destinatario, nunca lanza — tambien envuelta en try/catch abajo).
+   */
+  notificarActivacionPorUso(datos: {
+    uid: string;
+    paymentId: string;
+    referenciaId: string;
+    cantidad: number;
+    cop: number;
+    trm: number;
+    fechaTrm: string;
+    fechaPago: Date;
+  }): Promise<void>;
+  /**
    * Tarea 9 (2026-10-05): ante `status` "refunded"/"charged_back" sobre un `paymentId` que YA
    * activo algo aqui, revierte la cuenta a Gratis SI ese pago era el activo (y avisa a Leonardo
    * en los dos casos, activo o no) — ver `server/cuentas.ts` `revertirPagoSiNoRevertidoTx` y
    * `server/notificaciones.ts` `avisarReembolsoPaquete`. Idempotente y, igual que
    * `notificarActivacion`, nunca debe lanzar (tambien envuelta en try/catch abajo).
+   *
+   * Tarea 16A-2: `plan` (derivado del `external_reference`, nunca leido de otra parte) le dice a
+   * `avisarReembolsoPaquete` que variante de correo usar para el comprador — "tu saldo se ajustó"
+   * (porUso) en vez de "volviste a Gratis" (paquete, comportamiento EXISTENTE sin cambios).
    */
-  procesarReembolso(datos: { uid: string; paymentId: string; status: string; referenciaId: string }): Promise<void>;
+  procesarReembolso(datos: {
+    uid: string;
+    paymentId: string;
+    status: string;
+    referenciaId: string;
+    plan?: "paquete" | "porUso";
+  }): Promise<void>;
   /**
    * Medio 4 (pago doble con 2 preferencias, correccion vuelta 31, 2026-10-06): se llama cuando
    * `activarPaquete` devuelve "requiere_reembolso" — avisa a Leonardo (log
@@ -158,18 +194,33 @@ export function extraerAvisoWebhookMP(crudo: AvisoWebhookCrudo): { tipo: string;
   return { tipo, paymentId };
 }
 
-/** Separa `CERTISEND|<uid>|<plan>|<cop>|<idAleatorio>`. `null` si no tiene el prefijo o la forma
- * esperada (pago de Faro u otro producto que comparte la misma cuenta de Mercado Pago). */
+/** Separa `CERTISEND|<uid>|<plan>|<cop>|<idAleatorio>` (paquete/pro, 5 partes) o
+ * `CERTISEND|<uid>|porUso|<cantidad>|<cop>|<idAleatorio>` (porUso, 6 partes — Tarea 16A-2, decision
+ * del Brain 2026-10-06). `null` si no tiene el prefijo o ninguna de las dos formas esperadas (pago
+ * de Faro u otro producto que comparte la misma cuenta de Mercado Pago, o una referencia
+ * manipulada con un numero de partes invalido). */
 function parsearExternalReference(
   externalReference: string
-): { uid: string; plan: string; cop: number; referenciaId: string } | null {
+): { uid: string; plan: string; cop: number; referenciaId: string; cantidad?: number } | null {
   if (!externalReference.startsWith("CERTISEND|")) return null;
   const partes = externalReference.split("|");
-  if (partes.length !== 5) return null;
-  const [, uid, plan, copTexto, referenciaId] = partes;
-  const cop = Number(copTexto);
-  if (!uid || !plan || !referenciaId || !Number.isFinite(cop)) return null;
-  return { uid, plan, cop, referenciaId };
+
+  if (partes.length === 5) {
+    const [, uid, plan, copTexto, referenciaId] = partes;
+    const cop = Number(copTexto);
+    if (!uid || !plan || !referenciaId || !Number.isFinite(cop)) return null;
+    return { uid, plan, cop, referenciaId };
+  }
+
+  if (partes.length === 6) {
+    const [, uid, plan, cantidadTexto, copTexto, referenciaId] = partes;
+    const cop = Number(copTexto);
+    const cantidad = Number(cantidadTexto);
+    if (!uid || !plan || !referenciaId || !Number.isFinite(cop) || !Number.isInteger(cantidad)) return null;
+    return { uid, plan, cop, referenciaId, cantidad };
+  }
+
+  return null;
 }
 
 /**
@@ -224,8 +275,11 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
     // No empieza con "CERTISEND|": es de Faro (misma cuenta de Mercado Pago) u otro producto.
     return { httpStatus: 200, razon: "external_reference no es de CertiSend" };
   }
-  if (referencia.plan !== "paquete") {
-    // "pro" es la Tarea 8: hoy no hay nada que activar para ese plan via este webhook.
+  const esPaquete = referencia.plan === "paquete";
+  const esPorUso = referencia.plan === "porUso";
+  if (!esPaquete && !esPorUso) {
+    // "pro" desaparecio (decision del Brain 2026-10-06, Tarea 16A-2): hoy no hay nada que activar
+    // para ningun plan distinto de "paquete"/"porUso" via este webhook.
     return { httpStatus: 200, razon: `plan "${referencia.plan}" no se activa aqui (Tarea 8 pendiente)` };
   }
 
@@ -251,7 +305,13 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
     statusDetailCrudo === "charged_back";
   if (esReembolsoOContracargo) {
     try {
-      await opts.procesarReembolso({ uid: referencia.uid, paymentId, status: status || statusDetailCrudo, referenciaId: referencia.referenciaId });
+      await opts.procesarReembolso({
+        uid: referencia.uid,
+        paymentId,
+        status: status || statusDetailCrudo,
+        referenciaId: referencia.referenciaId,
+        plan: esPorUso ? "porUso" : "paquete",
+      });
     } catch (error: any) {
       opts.log(`[MP WEBHOOK] fallo al revertir el pago (se reintenta, la reversion es idempotente). paymentId=${paymentId}: ${error?.message || error}`);
       return { httpStatus: 500, razon: "fallo al procesar reembolso/contracargo" };
@@ -276,6 +336,53 @@ export async function procesarWebhookMP(opts: ProcesarWebhookMPOpts): Promise<Re
   }
 
   const preferencia = await opts.obtenerPreferencia(referencia.referenciaId);
+
+  // ── Pago por uso (Tarea 16A-2, decision del Brain 2026-10-06) ─────────────────────────────────
+  if (esPorUso) {
+    // La preferencia guardada por create-preference (server/cobroPaquete.ts `crearCobroPorUso`)
+    // SI guarda `cantidad`, aunque el tipo `PreferenciaGuardada` (server/cuentas.ts) no la declare
+    // — se ensancha el tipo localmente aqui, sin tocar ese modulo.
+    const prefPorUso = preferencia as (PreferenciaGuardada & { cantidad?: number }) | null;
+    if (
+      !prefPorUso ||
+      prefPorUso.uid !== referencia.uid ||
+      prefPorUso.plan !== "porUso" ||
+      prefPorUso.cop !== referencia.cop ||
+      prefPorUso.cantidad !== referencia.cantidad
+    ) {
+      // Cubre tambien una `cantidad` manipulada en el external_reference contra la preferencia
+      // real: nunca se activa con un numero (monto o cantidad) que no se puede probar.
+      opts.log(`[MP WEBHOOK] preferencia porUso no coincide o no existe. paymentId=${paymentId} uid=${referencia.uid}`);
+      return { httpStatus: 200, razon: "la preferencia guardada no coincide" };
+    }
+
+    const fechaPagoPorUso = pago?.date_approved ? new Date(pago.date_approved) : new Date();
+    const resultadoPorUso = await opts.activarPorUso(referencia.uid, paymentId, {
+      cantidad: referencia.cantidad!,
+      cop: referencia.cop,
+      trm: prefPorUso.trm,
+      fecha: opts.timestampDesdeFecha(fechaPagoPorUso),
+    });
+
+    try {
+      await opts.notificarActivacionPorUso({
+        uid: referencia.uid,
+        paymentId,
+        referenciaId: referencia.referenciaId,
+        cantidad: referencia.cantidad!,
+        cop: referencia.cop,
+        trm: prefPorUso.trm,
+        fechaTrm: prefPorUso.fechaTrm,
+        fechaPago: fechaPagoPorUso,
+      });
+    } catch (error: any) {
+      opts.log(`[MP WEBHOOK] fallo al notificar la activacion porUso (no afecta el pago, ya quedo activado). paymentId=${paymentId}: ${error?.message || error}`);
+    }
+
+    return { httpStatus: 200, razon: resultadoPorUso === "activado" ? "activado" : "pago ya procesado (idempotencia)" };
+  }
+
+  // ── Paquete (comportamiento EXISTENTE, sin cambios) ────────────────────────────────────────────
   if (
     !preferencia ||
     preferencia.uid !== referencia.uid ||

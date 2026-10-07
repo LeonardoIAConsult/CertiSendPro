@@ -375,6 +375,78 @@ export function construirCorreoConfirmacionCompra(
   };
 }
 
+// ── Correo de confirmacion de compra al comprador — Pago por uso (Tarea 16A-2, decision del Brain
+// 2026-10-06) ────────────────────────────────────────────────────────────────────────────────────
+// Misma fidelidad/estructura que `construirCorreoConfirmacionCompra` (Paquete): precio total y
+// final sin cargos adicionales, TRM + fecha, y como pedir devolucion (5 dias habiles, Ley 1480).
+// Difiere en que: (1) no hay vigencia/vencimiento que mostrar (el saldo Por uso NO vence); (2) el
+// calculo cita la cantidad de envios comprados, no un plan fijo; (3) la devolucion aplica a "esta
+// compra" (nunca al saldo acumulado total, que puede incluir compras anteriores ya usadas).
+
+export interface DatosConfirmacionCompraPorUso {
+  paraEmail: string;
+  idioma: "es" | "en";
+  cantidad: number;
+  cop: number;
+  trm: number;
+  fechaTrm: string;
+  fechaPago: Date;
+  refMp: string;
+  enlaceTerminos: string;
+}
+
+export function construirCorreoConfirmacionCompraPorUso(
+  datos: DatosConfirmacionCompraPorUso
+): { asunto: string; texto: string } {
+  const copTexto = formatearCop(datos.cop);
+  const fechaPagoTexto = formatearFechaBogotaDDMMAAAA(datos.fechaPago);
+  const fechaLimiteDevolucion = formatearFechaBogotaDDMMAAAA(sumarDiasHabiles(datos.fechaPago, 5));
+
+  if (datos.idioma === "en") {
+    return {
+      asunto: `Confirmation of your CertiSend Pro purchase — Pay-per-send — COP $${copTexto}`,
+      texto:
+        `Hello,\n\n` +
+        `We received and confirmed your payment. This email is the receipt for your purchase; please keep it.\n\n` +
+        `PURCHASE SUMMARY\n` +
+        `Plan: Pay-per-send (${datos.cantidad} sends)\n` +
+        `What it includes: ${datos.cantidad} sends added to your balance. Your balance never expires and adds up with any future purchase.\n` +
+        `Price paid: COP $${copTexto}, total and final price, with no additional charges\n` +
+        `Calculation: US$0.15 x ${datos.cantidad} sends x TRM ${datos.trm} (official rate, effective ${datos.fechaTrm}), rounded to the peso\n` +
+        `Payment date: ${fechaPagoTexto}\n` +
+        `Mercado Pago reference: ${datos.refMp}\n\n` +
+        `YOUR BALANCE\n` +
+        `Your balance was credited on ${fechaPagoTexto} and never expires.\n\n` +
+        `HOW TO REQUEST A REFUND\n` +
+        `If you make no send from this specific purchase, you can request a full refund of this payment until ${fechaLimiteDevolucion} (five business days after payment) by writing to contacto@leonardoantolinez.com with reference ${datos.refMp}.\n\n` +
+        `Something wrong? If you don't recognize this charge, write to contacto@leonardoantolinez.com with the reference above.\n\n` +
+        `Terms and Conditions: ${datos.enlaceTerminos}\n\n` +
+        pieProveedor("en"),
+    };
+  }
+
+  return {
+    asunto: `Confirmación de tu compra en CertiSend Pro — Pago por uso — $${copTexto} COP`,
+    texto:
+      `Hola:\n\n` +
+      `Recibimos y confirmamos tu pago. Este correo es el acuse de recibo de tu compra; guárdalo como comprobante.\n\n` +
+      `RESUMEN DE LA COMPRA\n` +
+      `Plan: Pago por uso (${datos.cantidad} envíos)\n` +
+      `Qué incluye: ${datos.cantidad} envíos sumados a tu saldo. Tu saldo NO vence y se acumula con cualquier compra futura.\n` +
+      `Precio pagado: $${copTexto} COP, precio total y final, sin cargos adicionales\n` +
+      `Cálculo: US$0,15 × ${datos.cantidad} envíos × TRM ${datos.trm} (certificada por la Superintendencia Financiera, vigente el ${datos.fechaTrm}), redondeado al peso\n` +
+      `Fecha del pago: ${fechaPagoTexto}\n` +
+      `Referencia de Mercado Pago: ${datos.refMp}\n\n` +
+      `TU SALDO\n` +
+      `Tu saldo quedó activo el ${fechaPagoTexto} y NO vence.\n\n` +
+      `¿CÓMO PEDIR UNA DEVOLUCIÓN?\n` +
+      `Si no usas ningún envío de esta compra en particular, puedes pedir la devolución completa de este pago hasta el ${fechaLimiteDevolucion} (cinco días hábiles después del pago) escribiendo a contacto@leonardoantolinez.com con la referencia ${datos.refMp}.\n\n` +
+      `¿Algo no está bien? Si no reconoces este cobro, escríbenos a contacto@leonardoantolinez.com con la referencia anterior.\n\n` +
+      `Términos y Condiciones: ${datos.enlaceTerminos}\n\n` +
+      pieProveedor("es"),
+  };
+}
+
 // ── Aviso de reversion al COMPRADOR (Medio 1, vuelta 35; F1 Abogado_LAP ronda 5/verificacion
 // ronda 5, 2026-10-06) ───────────────────────────────────────────────────────────────────────
 // Terminos sec. 9.2 exige que, ante un reembolso/contracargo reportado por Mercado Pago, se
@@ -392,12 +464,41 @@ export function construirAvisoReversionComprador(datos: {
   status: string;
   cuentaRevertida: boolean;
   fecha: Date;
+  /** Tarea 16A-2 (decision del Brain 2026-10-06): por defecto "paquete" (comportamiento EXISTENTE,
+   * sin cambios). "porUso" cambia de variante por completo ("se ajustó tu saldo", nunca "volviste
+   * a Gratis" — ese plan ni siquiera tiene un Paquete que perder). */
+  plan?: "paquete" | "porUso";
 }): {
   asunto: string;
   texto: string;
 } {
   const refMp = datos.paymentId;
   const fechaTexto = formatearFechaBogotaDDMMAAAA(datos.fecha);
+  const plan = datos.plan ?? "paquete";
+
+  if (plan === "porUso") {
+    const tipoEvento = datos.status === "charged_back";
+    if (datos.idioma === "en") {
+      return {
+        asunto: `We adjusted your CertiSend Pro Pay-per-send balance`,
+        texto:
+          `Hello: Mercado Pago informed us of a ${tipoEvento ? "chargeback" : "refund"} of payment ` +
+          `${refMp}. Because of this, we adjusted your Pay-per-send balance on ${fechaTexto} (we ` +
+          `subtracted exactly what this specific payment had added; the rest of your balance is not ` +
+          `affected). If you don't recognize this, write to ${PROVEEDOR_CORREO} with reference ${refMp}.\n\n` +
+          pieProveedor("en"),
+      };
+    }
+    return {
+      asunto: `Ajustamos tu saldo de Pago por uso en CertiSend Pro`,
+      texto:
+        `Hola: Mercado Pago nos informó un ${tipoEvento ? "contracargo" : "reembolso"} del pago ${refMp}. ` +
+        `Por eso ajustamos tu saldo de Pago por uso desde el ${fechaTexto} (restamos exactamente lo que ` +
+        `este pago en concreto había sumado; el resto de tu saldo no se ve afectado). Si no reconoces ` +
+        `este movimiento, escríbenos a ${PROVEEDOR_CORREO} con la referencia ${refMp}.\n\n` +
+        pieProveedor("es"),
+    };
+  }
 
   if (datos.idioma === "en") {
     const tipo = datos.status === "charged_back" ? "chargeback" : "refund";
@@ -451,11 +552,15 @@ export function construirAvisoVentaLeonardo(datos: {
   paymentId: string;
   cop: number;
   plan: string;
+  /** Tarea 16A-2: solo tiene sentido para "porUso" (cuantos envios compro); opcional, no rompe a
+   * quien ya llama esta funcion sin este dato (Paquete). */
+  cantidad?: number;
 }): { asunto: string; texto: string } {
+  const sufijoCantidad = datos.cantidad ? ` (${datos.cantidad} envíos)` : "";
   return {
-    asunto: `[CertiSend] Nueva venta — ${datos.plan} — $${formatearCop(datos.cop)} COP`,
+    asunto: `[CertiSend] Nueva venta — ${datos.plan}${sufijoCantidad} — $${formatearCop(datos.cop)} COP`,
     texto:
-      `Plan: ${datos.plan}\n` +
+      `Plan: ${datos.plan}${sufijoCantidad}\n` +
       `Monto: $${formatearCop(datos.cop)} COP\n` +
       `uid: ${datos.uid}\n` +
       `paymentId: ${datos.paymentId}`,
@@ -474,10 +579,16 @@ export function construirAvisoReembolsoLeonardo(datos: {
   cuentaRevertida: boolean;
   correoComprador: string | null;
   avisoCompradorEnviado: boolean;
+  /** Tarea 16A-2: por defecto "paquete" (texto EXISTENTE, sin cambios). */
+  plan?: "paquete" | "porUso";
 }): { asunto: string; texto: string } {
-  const accion = datos.cuentaRevertida
-    ? "Se revirtió la cuenta a Gratis (era el pago activo)."
-    : "La cuenta NO se tocó (este pago ya no era el activo).";
+  const plan = datos.plan ?? "paquete";
+  const accion =
+    plan === "porUso"
+      ? "Se ajustó el saldo de Pago por uso (se restó lo que este pago había sumado)."
+      : datos.cuentaRevertida
+        ? "Se revirtió la cuenta a Gratis (era el pago activo)."
+        : "La cuenta NO se tocó (este pago ya no era el activo).";
   const avisoComprador = datos.avisoCompradorEnviado
     ? `El comprador (${datos.correoComprador ?? "correo no encontrado"}) YA fue notificado automáticamente (Términos sec. 9.2).`
     : `El comprador (${datos.correoComprador ?? "correo no encontrado"}) todavía NO fue notificado — ` +

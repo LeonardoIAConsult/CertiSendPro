@@ -153,7 +153,16 @@ const DATOS_REINTENTO_BASE: DatosReintentoAcusePendiente = {
 
 test("reintentarAcusePendiente reintenta un reclamo atascado y el acuse SI sale al comprador", async () => {
   const db = new FirestoreFalso();
-  const haceOnceMin = Timestamp.fromDate(new Date(Date.now() - (UMBRAL_RECLAMO_ATASCADO_MS + 60_000)));
+  // Fix (Paso 16A-2, hallazgo incidental): `new Date()`/`Date.now()` reales aqui eran una bomba de
+  // tiempo — una vez que el reloj real cruzara las 48h desde `DATOS_REINTENTO_BASE.fecha`
+  // (2026-10-05T15:00Z), esta prueba empezaba a caer en la rama ">=48h abandona" en vez de la rama
+  // "reintenta y envia" que de verdad quiere probar. Mismo patron que el resto del archivo: un
+  // `ahora` RELATIVO a `DATOS_REINTENTO_BASE.fecha` (nunca el reloj real), bien dentro de la
+  // ventana <20h — y el reclamo sembrado se marca "atascado" relativo a ESE MISMO `ahora`, no a
+  // `Date.now()` real (si no, el reclamo atascado podria dejar de parecer atascado o viceversa
+  // segun cuando corra la prueba).
+  const ahora2h = new Date(DATOS_REINTENTO_BASE.fecha.getTime() + 2 * 3600_000);
+  const haceOnceMin = Timestamp.fromDate(new Date(ahora2h.getTime() - (UMBRAL_RECLAMO_ATASCADO_MS + 60_000)));
   db.seed("pagosProcesados/pago-1", {
     procesadoEn: Timestamp.now(),
     correoComprador: "reclamado",
@@ -161,7 +170,7 @@ test("reintentarAcusePendiente reintenta un reclamo atascado y el acuse SI sale 
   });
   const { deps, correosEnviados } = depsReintentoConFirestoreFalso(db, "pago-1");
 
-  await reintentarAcusePendiente(DATOS_REINTENTO_BASE, new Date(), deps);
+  await reintentarAcusePendiente(DATOS_REINTENTO_BASE, ahora2h, deps);
 
   const paraComprador = correosEnviados.filter((c) => c.para === "comprador@test.com");
   assert.equal(paraComprador.length, 1, "el acuse SI debe salir al comprador tras el reintento");
@@ -187,7 +196,11 @@ test("reintentarAcusePendiente sin referenciaId/fechaTrm guardados (pago viejo) 
 
 test("dos reintentos CASI SIMULTANEOS del mismo reclamo atascado producen 1 solo correo al comprador", async () => {
   const db = new FirestoreFalso();
-  const haceOnceMin = Timestamp.fromDate(new Date(Date.now() - (UMBRAL_RECLAMO_ATASCADO_MS + 60_000)));
+  // Mismo fix que la prueba anterior: `ahora` RELATIVO a `DATOS_REINTENTO_BASE.fecha` (nunca el
+  // reloj real), bien dentro de la ventana <20h, y el reclamo sembrado "atascado" relativo a ESE
+  // MISMO `ahora`.
+  const ahora = new Date(DATOS_REINTENTO_BASE.fecha.getTime() + 2 * 3600_000);
+  const haceOnceMin = Timestamp.fromDate(new Date(ahora.getTime() - (UMBRAL_RECLAMO_ATASCADO_MS + 60_000)));
   db.seed("pagosProcesados/pago-1", {
     procesadoEn: Timestamp.now(),
     correoComprador: "reclamado",
@@ -195,7 +208,6 @@ test("dos reintentos CASI SIMULTANEOS del mismo reclamo atascado producen 1 solo
   });
   const { deps, correosEnviados } = depsReintentoConFirestoreFalso(db, "pago-1");
 
-  const ahora = new Date();
   await Promise.all([
     reintentarAcusePendiente(DATOS_REINTENTO_BASE, ahora, deps),
     reintentarAcusePendiente(DATOS_REINTENTO_BASE, ahora, deps),

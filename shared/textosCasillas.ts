@@ -103,6 +103,32 @@ export function textoAceptacionTerminosUso(idioma: Idioma = "es"): string {
   );
 }
 
+// ── Casilla de retracto para Pago por uso (Tarea 16A-2, decision del Brain 2026-10-06) ──────────
+// REVISAR ABOGADO: mismo criterio legal que TEXTO_CASILLA_RETRACTO del Paquete (Ley 1480 de 2011,
+// articulo 47, numeral 1), adaptado a que Pago por uso no "empieza un servicio" sino que ACTIVA un
+// saldo de inmediato, y que la devolucion completa aplica por COMPRA (no por el saldo acumulado
+// total, que puede incluir compras anteriores ya usadas): si no se ha usado ningun envio de ESA
+// compra en particular, procede la devolucion completa de ESE pago dentro de los 5 dias habiles
+// siguientes. Pendiente de que un abogado colegiado confirme la redaccion antes de publicar.
+export const TEXTO_CASILLA_RETRACTO_POR_USO =
+  "Quiero que mi saldo se active de inmediato al confirmarse mi pago. Sé que, por eso, no procede " +
+  "el derecho de retracto de 5 días hábiles (Ley 1480 de 2011, artículo 47, numeral 1). Conservo " +
+  "los reembolsos y la reversión del pago que la ley me reconoce y, si no he usado ningún envío de " +
+  "esta compra, puedo pedir su devolución completa dentro de los 5 días hábiles siguientes al pago.";
+
+/** Traduccion fiel de `TEXTO_CASILLA_RETRACTO_POR_USO`. */
+export const TEXTO_CASILLA_RETRACTO_POR_USO_EN =
+  "I want my balance to be activated immediately once my payment is confirmed. I understand that, " +
+  "for this reason, the 5-business-day right of withdrawal does not apply (Colombian Law 1480 of " +
+  "2011, article 47, item 1). I keep the refunds and payment reversal rights the law grants me, " +
+  "and, if I have made no sends from this purchase, I can request a full refund within 5 business " +
+  "days after payment.";
+
+/** Texto EXACTO de la casilla de retracto de Pago por uso en el idioma pedido. */
+export function textoCasillaRetractoPorUso(idioma: Idioma = "es"): string {
+  return idioma === "en" ? TEXTO_CASILLA_RETRACTO_POR_USO_EN : TEXTO_CASILLA_RETRACTO_POR_USO;
+}
+
 export function textoAutorizacionDatos(idioma: Idioma, nombreProveedor: string | null | undefined): string {
   const nombre = nombreProveedor && nombreProveedor.trim() ? nombreProveedor.trim() : "[dato pendiente]";
   if (idioma === "en") {

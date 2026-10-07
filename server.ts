@@ -20,6 +20,7 @@ import {
   guardarPreferencia,
   obtenerPreferencia,
   activarPaqueteSiNoProcesado,
+  activarPorUsoSiNoProcesado,
   guardarAceptacion,
   tienePaqueteVigenteConSaldo,
   guardarAutorizacionDatos,
@@ -43,7 +44,7 @@ import {
 import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta, decidirAceptacionUsoRuta, decidirAccesoSesionPdf } from "./server/decisionesRuta";
 import { trmHoy, copDesdeUsd } from "./server/trm";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
-import { crearCobroPaquete } from "./server/cobroPaquete";
+import { crearCobroPaquete, crearCobroPorUso, planCobroValido } from "./server/cobroPaquete";
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
 import {
   enviarCorreo,
@@ -54,10 +55,12 @@ import {
 } from "./server/avisos";
 import {
   notificarActivacionPaquete,
+  notificarActivacionPorUso,
   avisarReembolsoPaquete,
   avisarPagoDobleRequiereReembolso,
   CORREO_LEONARDO,
   depsNotificarActivacionReales,
+  depsNotificarActivacionPorUsoReales,
   depsAvisarReembolsoReales,
   depsAvisarPagoDobleReales,
 } from "./server/notificaciones";
@@ -789,9 +792,12 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
 // TRM oficial del dia (Superfinanciera, datos.gov.co 32sa-8pi3), igual que Faro.
 // Las claves son el `plan` que acepta esta ruta y el que viaja en `external_reference`
 // (`CERTISEND|<uid>|<plan>|<cop>|<idAleatorio>`), nunca el titulo mostrado en el checkout.
+// Tarea 16A-2 (decision del Brain 2026-10-06): Pago por uso — US$0,15 por envio, minimo 50,
+// maximo 5000, entero; saldo SIN vencimiento y ACUMULABLE. "Pro" desaparece de todo lo vendible
+// (nunca se implemento su activacion; la Tarea 8 queda sin efecto).
 const PLANES_USD = {
   paquete: { usd: 15, titulo: "CertiSend — Paquete de 150 envíos" },
-  pro: { usd: 29, titulo: "CertiSend Pro Monthly" },
+  porUso: { usdUnidad: 0.15, minimo: 50, maximo: 5000 },
 } as const;
 
 // Version vigente de la Politica de Privacidad (docs/legal/privacidad.plantilla.md, "Versión:
@@ -862,24 +868,25 @@ app.post("/api/mercadopago/create-preference", exigirAuth, limitarCobroPorUid, l
   try {
     // `amount`/`currency`/`planName` del cliente se ignoran a proposito. `aceptaTerminos` y
     // `aceptaRetracto` son las DOS casillas sin marcar del checkout (Tarea 14): las valida
-    // `crearCobroPaquete`, mas abajo, para que la prueba "sin casilla no crea nada" sea real.
-    // `copMostrado`/`idioma`/`modalidad` son del checkout (M28, corrige vuelta 24): el servidor
-    // SIEMPRE recalcula el cop con la TRM de este momento; `copMostrado` solo se usa para
-    // comparar (409 si no coincide, ver crearCobroPaquete), nunca para fijar el precio.
-    const { plan, aceptaTerminos, aceptaRetracto, copMostrado, idioma, modalidad } = req.body as {
+    // `crearCobroPaquete`/`crearCobroPorUso`, mas abajo, para que la prueba "sin casilla no crea
+    // nada" sea real. `copMostrado`/`idioma`/`modalidad` son del checkout (M28, corrige vuelta
+    // 24): el servidor SIEMPRE recalcula el cop con la TRM de este momento; `copMostrado` solo se
+    // usa para comparar (409 si no coincide), nunca para fijar el precio. `cantidad` (Tarea 16A-2)
+    // solo aplica a `plan:"porUso"`.
+    const { plan, cantidad, aceptaTerminos, aceptaRetracto, copMostrado, idioma, modalidad } = req.body as {
       plan?: string;
+      cantidad?: unknown;
       aceptaTerminos?: unknown;
       aceptaRetracto?: unknown;
       copMostrado?: unknown;
       idioma?: unknown;
       modalidad?: unknown;
     };
-    if (plan === "pro") {
-      // Pro es suscripcion (Tarea 8); todavia no existe que activar cuando MP confirme el cobro.
-      return res.status(501).json({ error: "Pro llega pronto. Escribenos a contacto@leonardoantolinez.com." });
-    }
-    if (plan !== "paquete") {
-      return res.status(400).json({ error: "Plan no valido" });
+    // Tarea 16A-2 (decision del Brain 2026-10-06): "pro" desaparece de todo lo vendible (antes
+    // tenia su propio 501 "Pro llega pronto"); cualquier plan que no sea "paquete" o "porUso"
+    // responde 400, igual que cualquier otro valor invalido.
+    if (!planCobroValido(plan)) {
+      return res.status(400).json({ error: "Plan no válido" });
     }
 
     // Verify v2 (ad80fd6, hallazgo Medio): `handlePagarPaquete` en LandingPage.tsx reusa el flujo
@@ -887,7 +894,8 @@ app.post("/api/mercadopago/create-preference", exigirAuth, limitarCobroPorUid, l
     // casillas previas al login (autorizacion de datos T11 + aceptacion de Terminos O2) ya se
     // hayan marcado — un usuario con sesion de Firebase vieja (de antes de O2) podia llegar aqui
     // sin ninguna de las dos. Mismo gate EXACTO que /api/lote/iniciar, con los mismos motivos
-    // ("autorizacion"/"terminos") para que el cliente sepa que modal reabrir.
+    // ("autorizacion"/"terminos") para que el cliente sepa que modal reabrir. Aplica a los DOS
+    // planes por igual.
     const decisionAutorizacionCobro = await decidirAutorizacionLoteRuta(req.uid!, AUTORIZACION_DATOS_VERSION, { obtenerAutorizacionDatos });
     if (decisionAutorizacionCobro.ok === false) {
       return res.status(decisionAutorizacionCobro.httpStatus).json({
@@ -910,9 +918,67 @@ app.post("/api/mercadopago/create-preference", exigirAuth, limitarCobroPorUid, l
       return res.status(503).json({ error: "Pagos no disponibles en este momento." });
     }
 
-    const { usd, titulo } = PLANES_USD.paquete;
     const base = process.env.APP_URL || "http://localhost:3000";
     const ahora = Date.now();
+
+    if (plan === "porUso") {
+      const { usdUnidad, minimo, maximo } = PLANES_USD.porUso;
+      const resultado = await crearCobroPorUso({
+        uid: req.uid!,
+        email: req.email ?? null,
+        cantidad,
+        aceptaTerminos,
+        aceptaRetracto,
+        copMostrado,
+        idioma,
+        modalidad,
+        // Comprar porUso con un Paquete vigente SI esta permitido (decision del Brain
+        // 2026-10-06): a diferencia del Paquete, aqui NO hay chequeo de "ya tienes uno vigente".
+        obtenerTrm: trmHoy,
+        copDesdeUsd,
+        usdUnidad,
+        minimoCantidad: minimo,
+        maximoCantidad: maximo,
+        generarId: randomUUID,
+        guardarPreferencia,
+        guardarAceptacion,
+        log: console.error,
+        crearPreferenciaMP: async ({ cop, externalReference, cantidad: cantidadValidada }) => {
+          const response = await fetch("https://api.mercadopago.com/checkout/preferences", {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${mpAccessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              items: [{
+                title: `CertiSend · ${cantidadValidada} envíos (pago por uso)`,
+                quantity: 1,
+                unit_price: cop,
+                currency_id: "COP",
+              }],
+              external_reference: externalReference,
+              notification_url: `${PUBLIC_BASE_URL}/api/mp/webhook?src=certisend`,
+              back_urls: {
+                success: `${base}/?pago=ok`,
+                failure: `${base}/?pago=error`,
+                pending: `${base}/?pago=pendiente`,
+              },
+              auto_return: "approved",
+              expires: true,
+              expiration_date_from: new Date(ahora).toISOString(),
+              expiration_date_to: new Date(ahora + 2 * 3600_000).toISOString(),
+              statement_descriptor: "CERTISEND PRO",
+            }),
+          });
+          return { ok: response.ok, status: response.status, json: () => response.json() };
+        },
+      });
+      return res.status(resultado.httpStatus).json(resultado.body);
+    }
+
+    // plan === "paquete" (comportamiento EXISTENTE, sin cambios).
+    const { usd, titulo } = PLANES_USD.paquete;
 
     const resultado = await crearCobroPaquete({
       uid: req.uid!,
@@ -1040,6 +1106,9 @@ const enviarCorreoInline = (datos: Parameters<typeof enviarCorreo>[0]) =>
   enviarCorreo(datos, { timeoutMs: TIMEOUT_CORREO_INLINE_MS });
 const notificarActivacionEnLinea = (datos: Parameters<typeof notificarActivacionPaquete>[0]) =>
   notificarActivacionPaquete(datos, new Date(), { ...depsNotificarActivacionReales, enviarCorreo: enviarCorreoInline });
+// Tarea 16A-2: equivalente de arriba para "Pago por uso" (mismo timeout corto de 8s inline).
+const notificarActivacionPorUsoEnLinea = (datos: Parameters<typeof notificarActivacionPorUso>[0]) =>
+  notificarActivacionPorUso(datos, new Date(), { ...depsNotificarActivacionPorUsoReales, enviarCorreo: enviarCorreoInline });
 const avisarReembolsoEnLinea = (datos: Parameters<typeof avisarReembolsoPaquete>[0]) =>
   avisarReembolsoPaquete(datos, { ...depsAvisarReembolsoReales, enviarCorreo: enviarCorreoInline });
 const avisarPagoDobleEnLinea = (datos: Parameters<typeof avisarPagoDobleRequiereReembolso>[0]) =>
@@ -1073,13 +1142,19 @@ app.post("/api/mp/webhook", limitarWebhookMP, async (req, res) => {
       },
       obtenerPreferencia,
       activarPaquete: activarPaqueteSiNoProcesado,
+      // Tarea 16A-2: activacion idempotente de "Pago por uso" (suma al saldo, sin vencimiento).
+      activarPorUso: activarPorUsoSiNoProcesado,
       timestampDesdeFecha: (fecha) => Timestamp.fromDate(fecha),
       log: (linea) => console.log(linea),
       // Tarea 5: correo de confirmacion al comprador + aviso de venta a Leonardo (idempotente,
       // nunca lanza — ver server/notificaciones.ts). M-4: timeout corto (8s), ver arriba.
       notificarActivacion: notificarActivacionEnLinea,
+      // Tarea 16A-2: equivalente de arriba para "Pago por uso".
+      notificarActivacionPorUso: notificarActivacionPorUsoEnLinea,
       // Tarea 9: reembolso/contracargo -> revierte a Gratis si era el pago activo + avisa a
-      // Leonardo (idempotente, nunca lanza). M-4: timeout corto (8s), ver arriba.
+      // Leonardo (idempotente, nunca lanza). M-4: timeout corto (8s), ver arriba. Tarea 16A-2:
+      // `avisarReembolsoEnLinea` ya recibe el `plan` que manda `procesarWebhookMP` (server/webhook.ts)
+      // y elige la variante de correo correcta ("tu saldo se ajustó" vs "volviste a Gratis").
       procesarReembolso: avisarReembolsoEnLinea,
       // Medio 4 (pago doble con 2 preferencias, 2026-10-06): aviso a Leonardo cuando un pago no
       // se activa por ya existir un Paquete vigente de OTRO pago (idempotente, nunca lanza).
@@ -1156,14 +1231,18 @@ app.get("/api/precios", async (_req, res) => {
       return res.status(503).json({ error: "No podemos calcular el precio de hoy; intenta más tarde." });
     }
     const usdPaquete = PLANES_USD.paquete.usd;
-    const usdPro = PLANES_USD.pro.usd;
+    const { usdUnidad, minimo, maximo } = PLANES_USD.porUso;
     res.setHeader("Cache-Control", "public, max-age=300");
     res.json({
       trm: trm.valor,
       fechaDesde: trm.fechaDesde,
       fechaHasta: trm.fechaHasta,
       paquete: { usd: usdPaquete, cop: copDesdeUsd(usdPaquete, trm.valor) },
-      pro: { usd: usdPro, cop: copDesdeUsd(usdPro, trm.valor) },
+      // Tarea 16A-2 (decision del Brain 2026-10-06): "pro" desaparece; Pago por uso lo reemplaza
+      // en la vitrina de precios. `copPorUnidadReferencia` es solo INFORMATIVO (p. ej. "~$X COP
+      // por envío" en la UI): el cobro real de N envios SIEMPRE se calcula sobre el total en USD
+      // (ver server/cobroPaquete.ts `crearCobroPorUso`), nunca multiplicando este valor por N.
+      porUso: { usdUnidad, minimo, maximo, copPorUnidadReferencia: copDesdeUsd(usdUnidad, trm.valor) },
       // M30 (corrige vuelta 24): la UI no tiene otra forma de saber si `create-preference` esta
       // encendido (PAGOS_ACTIVOS es una variable de servidor, nunca expuesta al bundle del
       // cliente) — sin este campo, el panel de pago del Paquete seguiria ofreciendo "Pagar"
@@ -1192,6 +1271,10 @@ app.get("/api/cuenta", exigirAuth, async (req, res) => {
       enviosRestantes: cuenta.enviosRestantes,
       vence: cuenta.vence ? cuenta.vence.toDate().toISOString() : null,
       renueva: cuenta.renueva,
+      // Tarea 16A-2 (decision del Brain 2026-10-06): saldo del plan "Pago por uso" — SIN
+      // vencimiento, ACUMULABLE. `?? 0` para cuentas creadas antes de este campo (mismo patron que
+      // `server/cuentas.ts`).
+      saldoPorUso: cuenta.saldoPorUso ?? 0,
       // G6 (NO-GO del REVISOR_EXTERNO_LAP sobre la Tarea 10, 2026-10-05): el sondeo del regreso
       // de Mercado Pago necesita saber si YA llego un pago NUEVO (no solo que la cuenta tenga
       // algun plan vigente de una compra anterior). Solo id+fecha: nunca el monto ni datos del

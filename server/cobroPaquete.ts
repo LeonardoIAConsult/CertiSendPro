@@ -11,6 +11,18 @@
 // necesitan Firestore ni fetch inyectado para probarse, por eso se quedan en la ruta HTTP.
 import type { Idioma, Modalidad, Plan } from "./cuentas";
 import { TERMINOS_VERSION, normalizarIdioma, textoCasillaRetracto, textoCasillaTerminos } from "./cuentas";
+import { textoCasillaRetractoPorUso } from "../shared/textosCasillas";
+
+/**
+ * Tarea 16A-2 (decision del Brain 2026-10-06): los UNICOS dos planes vendibles por
+ * `POST /api/mercadopago/create-preference` son "paquete" y "porUso" ("pro" desaparece de todo lo
+ * vendible — nunca se implemento su activacion). Funcion PURA, para que `server.ts` pueda
+ * rechazar con 400 sin tener que repetir esta comparacion inline (y para poder probarla con
+ * node:test sin arrancar Express).
+ */
+export function planCobroValido(plan: unknown): plan is "paquete" | "porUso" {
+  return plan === "paquete" || plan === "porUso";
+}
 
 export interface TrmDelDia {
   valor: number;
@@ -175,5 +187,157 @@ export async function crearCobroPaquete(opts: CrearCobroPaqueteOpts): Promise<Re
   return {
     httpStatus: 200,
     body: { success: true, initPoint: data.init_point, cop, usd: opts.usdPaquete, trm: trm.valor, fechaTrm: trm.fechaDesde },
+  };
+}
+
+// ── Pago por uso (Tarea 16A-2, decision del Brain 2026-10-06): US$0,15 por envio, minimo 50,
+// maximo 5000, entero; saldo SIN vencimiento y ACUMULABLE. A diferencia del Paquete, comprar
+// porUso con un Paquete vigente SI esta permitido (no hay 409 de recompra: no hay dependencia
+// `tienePaqueteVigente` en esta funcion a proposito). ─────────────────────────────────────────────
+
+export interface CrearCobroPorUsoOpts {
+  uid: string;
+  email: string | null;
+  /** Cantidad de envios que el navegador pide comprar (M28-like: se valida AQUI, nunca se confia
+   * en que ya venga validada). */
+  cantidad: unknown;
+  aceptaTerminos: unknown;
+  aceptaRetracto: unknown;
+  /** El monto en COP que el navegador mostraba al marcar las casillas — mismo chequeo de "cambio
+   * de precio" que el Paquete (409 con `copNuevo` si no coincide con lo recalculado aqui). */
+  copMostrado: unknown;
+  idioma: unknown;
+  /** Hoy solo existe "unico" (no hay "Pago por uso recurrente"); cualquier otro valor se rechaza. */
+  modalidad: unknown;
+  obtenerTrm(): Promise<TrmDelDia | null>;
+  copDesdeUsd(usd: number, trmValor: number): number;
+  /** US$0,15 (decision del Brain 2026-10-06). */
+  usdUnidad: number;
+  minimoCantidad: number;
+  maximoCantidad: number;
+  generarId(): string;
+  guardarPreferencia(
+    id: string,
+    datos: { uid: string; plan: Plan; cop: number; trm: number; fechaTrm: string; cantidad: number }
+  ): Promise<void>;
+  guardarAceptacion(
+    id: string,
+    datos: {
+      uid: string;
+      email: string | null;
+      versionTerminos: string;
+      plan: Plan;
+      modalidad: Modalidad;
+      idioma: Idioma;
+      cop: number;
+      trm: number;
+      preferenciaId: string;
+      textoCasilla: string;
+      textoRetracto: string;
+    }
+  ): Promise<void>;
+  crearPreferenciaMP(payload: {
+    cop: number;
+    externalReference: string;
+    cantidad: number;
+  }): Promise<RespuestaCrearPreferenciaMP>;
+  log(linea: string): void;
+}
+
+export type ResultadoCrearCobroPorUso =
+  | {
+      httpStatus: 200;
+      body: { success: true; initPoint: string; cop: number; cantidad: number; trm: number; fechaTrm: string };
+    }
+  | { httpStatus: 409; body: { error: string; copNuevo: number } }
+  | { httpStatus: number; body: { error: string } };
+
+export async function crearCobroPorUso(opts: CrearCobroPorUsoOpts): Promise<ResultadoCrearCobroPorUso> {
+  if (opts.aceptaTerminos !== true || opts.aceptaRetracto !== true) {
+    return {
+      httpStatus: 400,
+      body: {
+        error:
+          "Debes marcar las casillas de los Términos y Condiciones y de inicio inmediato del servicio (sin derecho de retracto) antes de pagar.",
+      },
+    };
+  }
+
+  const modalidad: Modalidad = opts.modalidad === "renovable" ? "renovable" : "unico";
+  if (modalidad !== "unico") {
+    return { httpStatus: 400, body: { error: "Esa modalidad todavía no está disponible. Elige pago único." } };
+  }
+  const idioma = normalizarIdioma(opts.idioma);
+
+  // La cantidad debe ser un entero real dentro de [minimoCantidad, maximoCantidad] — nunca un
+  // texto numerico ni un decimal (a diferencia de `copMostrado`, que si acepta texto numerico: la
+  // cantidad decide CUANTO se cobra, no solo se compara contra lo mostrado).
+  const cantidad = opts.cantidad;
+  if (
+    typeof cantidad !== "number" ||
+    !Number.isInteger(cantidad) ||
+    cantidad < opts.minimoCantidad ||
+    cantidad > opts.maximoCantidad
+  ) {
+    return {
+      httpStatus: 400,
+      body: {
+        error: `La cantidad de envíos debe ser un número entero entre ${opts.minimoCantidad} y ${opts.maximoCantidad}.`,
+      },
+    };
+  }
+
+  const trm = await opts.obtenerTrm();
+  if (!trm) {
+    return { httpStatus: 503, body: { error: "No podemos calcular el precio de hoy; intenta más tarde." } };
+  }
+
+  // El COP de N envios se calcula SIEMPRE sobre el total en USD (usdUnidad * cantidad), nunca
+  // multiplicando un COP unitario ya redondeado por N — eso multiplicaria N veces el redondeo de
+  // una sola unidad en vez de redondear UNA vez el total (decision del Brain 2026-10-06, Paso
+  // 16A-2, punto 1).
+  const cop = opts.copDesdeUsd(opts.usdUnidad * cantidad, trm.valor);
+
+  const copMostradoNum = Number(opts.copMostrado);
+  if (!Number.isFinite(copMostradoNum) || copMostradoNum !== cop) {
+    return { httpStatus: 409, body: { error: "El precio cambió; revisa el nuevo monto", copNuevo: cop } };
+  }
+
+  const referenciaId = opts.generarId();
+  const externalReference = `CERTISEND|${opts.uid}|porUso|${cantidad}|${cop}|${referenciaId}`;
+
+  await opts.guardarPreferencia(referenciaId, {
+    uid: opts.uid,
+    plan: "porUso",
+    cop,
+    trm: trm.valor,
+    fechaTrm: trm.fechaDesde,
+    cantidad,
+  });
+  await opts.guardarAceptacion(referenciaId, {
+    uid: opts.uid,
+    email: opts.email,
+    versionTerminos: TERMINOS_VERSION,
+    plan: "porUso",
+    modalidad,
+    idioma,
+    cop,
+    trm: trm.valor,
+    preferenciaId: referenciaId,
+    textoCasilla: textoCasillaTerminos(cop, idioma),
+    textoRetracto: textoCasillaRetractoPorUso(idioma),
+  });
+
+  const respuestaMP = await opts.crearPreferenciaMP({ cop, externalReference, cantidad });
+  if (!respuestaMP.ok) {
+    const cuerpo = await respuestaMP.json().catch(() => ({}));
+    opts.log(`[MERCADO PAGO] error al crear preferencia porUso (status=${respuestaMP.status}): ${JSON.stringify(cuerpo)}`);
+    return { httpStatus: 500, body: { error: "No se pudo iniciar el pago con Mercado Pago." } };
+  }
+
+  const data = await respuestaMP.json();
+  return {
+    httpStatus: 200,
+    body: { success: true, initPoint: data.init_point, cop, cantidad, trm: trm.valor, fechaTrm: trm.fechaDesde },
   };
 }

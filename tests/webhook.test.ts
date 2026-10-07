@@ -97,6 +97,8 @@ function logMudo(linea: string) {
 export const llamadasNotificarActivacion: any[] = [];
 export const llamadasProcesarReembolso: any[] = [];
 export const llamadasAvisarPagoDoble: any[] = [];
+export const llamadasActivarPorUso: any[] = [];
+export const llamadasNotificarActivacionPorUso: any[] = [];
 
 function construirOpts(overrides: Partial<{
   tipo: string;
@@ -108,7 +110,13 @@ function construirOpts(overrides: Partial<{
     paymentId: string,
     datos: { cop: number; trm: number; fecha: Timestamp; referenciaId: string; fechaTrm: string }
   ) => Promise<"activado" | "repetido" | "requiere_reembolso">;
+  activarPorUso: (
+    uid: string,
+    paymentId: string,
+    datos: { cantidad: number; cop: number; trm: number; fecha: Timestamp }
+  ) => Promise<"activado" | "repetido">;
   notificarActivacion: (datos: any) => Promise<void>;
+  notificarActivacionPorUso: (datos: any) => Promise<void>;
   procesarReembolso: (datos: any) => Promise<void>;
   avisarPagoDoble: (datos: any) => Promise<void>;
 }>) {
@@ -118,10 +126,17 @@ function construirOpts(overrides: Partial<{
     obtenerPago: async () => pagoOk({}),
     obtenerPreferencia: async () => preferenciaBase(),
     activarPaquete: async () => "activado" as const,
+    activarPorUso: async (...args: any[]) => {
+      llamadasActivarPorUso.push(args);
+      return "activado" as const;
+    },
     timestampDesdeFecha: (fecha: Date) => Timestamp.fromDate(fecha),
     log: logMudo,
     notificarActivacion: async (datos: any) => {
       llamadasNotificarActivacion.push(datos);
+    },
+    notificarActivacionPorUso: async (datos: any) => {
+      llamadasNotificarActivacionPorUso.push(datos);
     },
     procesarReembolso: async (datos: any) => {
       llamadasProcesarReembolso.push(datos);
@@ -643,7 +658,7 @@ for (const status of ["refunded", "charged_back"]) {
     assert.equal(resultado.httpStatus, 200);
     assert.equal(activarPaqueteLlamado, false, `un pago "${status}" nunca debe intentar activar nada`);
     assert.equal(llamadasProcesarReembolso.length, 1);
-    assert.deepEqual(llamadasProcesarReembolso[0], { uid: "uid-1", paymentId: "pago-1", status, referenciaId: "ref-1" });
+    assert.deepEqual(llamadasProcesarReembolso[0], { uid: "uid-1", paymentId: "pago-1", status, referenciaId: "ref-1", plan: "paquete" });
   });
 }
 

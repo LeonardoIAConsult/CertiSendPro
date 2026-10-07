@@ -20,6 +20,7 @@ import {
   TERMINOS_VERSION as VERSION_SERVIDOR,
 } from "../server/cuentas";
 import { textoTerminos, textoRetracto, TERMINOS_VERSION as VERSION_CLIENTE } from "../src/utils/checkout";
+import { textoCasillaRetractoPorUso } from "../shared/textosCasillas";
 
 const MONTOS = [49102, 61845];
 const IDIOMAS = ["es", "en"] as const;
@@ -57,6 +58,32 @@ for (const idioma of IDIOMAS) {
     assert.match(texto, new RegExp(`versi[oó]n ${VERSION_SERVIDOR}\\b`, "i"));
   });
 }
+
+// ── Tarea 16A-2 (decision del Brain 2026-10-06): casilla de retracto de "Pago por uso" — distinta
+// de la del Paquete (T5): el saldo se activa de inmediato (nunca "empieza un servicio") y la
+// devolucion aplica a ESTA compra (nunca al "Paquete"). El cliente (src/utils/checkout.ts)
+// TODAVIA no tiene su propio wrapper para este texto (Paso 16A-2 no toca src/): esta prueba solo
+// cubre el lado compartido/servidor, igual que indica el punto 3 de la orden.
+test("textoCasillaRetractoPorUso (ES): dice que el saldo se activa de inmediato y que la devolucion aplica a ESTA compra", () => {
+  const texto = textoCasillaRetractoPorUso("es");
+  assert.match(texto, /saldo se active de inmediato/);
+  assert.match(texto, /esta compra/);
+  assert.match(texto, /5 días hábiles/);
+  assert.doesNotMatch(texto, /Paquete/);
+});
+
+test("textoCasillaRetractoPorUso (EN): mismo contenido, en ingles, nunca mezclado con ES", () => {
+  const texto = textoCasillaRetractoPorUso("en");
+  assert.match(texto, /activated immediately/);
+  assert.match(texto, /this purchase/);
+  assert.match(texto, /5 business/);
+  assert.doesNotMatch(texto, /saldo/);
+});
+
+test("textoCasillaRetractoPorUso: distinto del texto de retracto del Paquete (nunca una copia)", () => {
+  assert.notEqual(textoCasillaRetractoPorUso("es"), textoCasillaRetracto("es"));
+  assert.notEqual(textoCasillaRetractoPorUso("en"), textoCasillaRetracto("en"));
+});
 
 // ── Mutacion (documentada, no comiteada): si `src/utils/checkout.ts` volviera a tener su propio
 // texto hardcodeado en vez de delegar a `shared/textosCasillas.ts` (p. ej. revirtiendo

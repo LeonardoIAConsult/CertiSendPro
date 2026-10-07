@@ -114,3 +114,23 @@ const bloqueHealth = extraerBloque(`app.get("/api/health",`, `app.get("/api/prec
 test("GET /api/health: `listo` es exactamente huella && proveedor (minimo para operar con pagos apagados)", () => {
   assert.match(bloqueHealth, /listo:\s*huella\s*&&\s*proveedor/);
 });
+
+// ── Tarea 16A-2 (decision del Brain 2026-10-06): GET /api/precios incluye porUso y ya NO incluye
+// pro ("pro" desaparece de todo lo vendible) ────────────────────────────────────────────────────
+const bloquePrecios = extraerBloque(`app.get("/api/precios",`, `app.get("/api/cuenta",`);
+
+test("GET /api/precios: incluye porUso (usdUnidad/minimo/maximo/copPorUnidadReferencia)", () => {
+  assert.match(bloquePrecios, /porUso:\s*\{\s*usdUnidad,\s*minimo,\s*maximo,\s*copPorUnidadReferencia/);
+});
+
+test("GET /api/precios: ya no incluye pro (ni la clave de respuesta ni PLANES_USD.pro)", () => {
+  assert.doesNotMatch(bloquePrecios, /\bpro:/);
+  assert.doesNotMatch(bloquePrecios, /PLANES_USD\.pro\b/);
+});
+
+// ── Tarea 16A-2: GET /api/cuenta expone saldoPorUso ─────────────────────────────────────────────
+const bloqueCuenta = extraerBloque(`app.get("/api/cuenta",`, `app.get("/api/autorizacion-datos",`);
+
+test("GET /api/cuenta: expone saldoPorUso (cuenta.saldoPorUso ?? 0)", () => {
+  assert.match(bloqueCuenta, /saldoPorUso:\s*cuenta\.saldoPorUso\s*\?\?\s*0/);
+});

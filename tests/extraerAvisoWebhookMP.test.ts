@@ -34,9 +34,11 @@ test("extraerAvisoWebhookMP: tipo=merchant_order, llevado a procesarWebhookMP, s
     },
     obtenerPreferencia: async () => null,
     activarPaquete: async () => "activado",
+    activarPorUso: async () => "activado",
     timestampDesdeFecha: (f: Date) => Timestamp.fromDate(f),
     log: () => {},
     notificarActivacion: async () => {},
+    notificarActivacionPorUso: async () => {},
     procesarReembolso: async () => {},
     avisarPagoDoble: async () => {},
   });
