@@ -51,21 +51,16 @@ export interface TranslationDict {
   planFreeFeature2: string;
   planFreeFeature3: string;
 
-  // Pro no se vende en v1 (decision de Leonardo, 2026-10-05): planProPrice reemplaza el precio
-  // falso ("$29 USD / mes", nunca cobrado — Tarea 8 del plan no existe todavia) por el estado
-  // real: "Próximamente · escríbenos". proContactar es el texto del boton de ese plan (mailto,
-  // igual que siempre funciono este boton; solo cambia la etiqueta).
-  planProName: string;
-  planProPrice: string;
-  planProFeature1: string;
-  planProFeature2: string;
-  planProFeature3: string;
-  proContactar: string;
-
   // Paquete (Tarea 11, cobro real con planes, 2026-10-05): planPayGoPrice se retira — el precio
   // real en COP del dia se calcula en LandingPage.tsx con /api/precios (nunca un "$0,10 USD por
-  // envio" fijo, H5); planPayGoPriceCargando es el texto mientras ese precio no ha llegado.
+  // envio" fijo, H5); planPayGoPriceCargando es el texto mientras ese precio no ha llegado (lo
+  // reusa tambien la tarjeta de Pago por uso: el mensaje es generico, "calculando el precio").
+  // Paso 16B (decision de Leonardo 2026-10-06): "Pro" desaparece de la UI — planPaqueteUsdGrande
+  // es el precio principal en USD, grande ("US$15 · 150 envíos"); precioCopHoyNota/
+  // precioCopPorEnvioNota (abajo, seccion Pricing/Checkout) son la linea en COP, siempre visible
+  // y mas chica, justo debajo.
   planPayGoName: string;
+  planPaqueteUsdGrande: string;
   planPayGoPriceCargando: string;
   planPayGoPriceError: string;
   planPayGoFeature1: string;
@@ -73,6 +68,21 @@ export interface TranslationDict {
   planPayGoFeature3: string;
   planPayGoFeature4: string;
   planPayGoFeature5: string;
+
+  // Pago por uso (Paso 16B, decision de Leonardo 2026-10-06): US$0,15 por envío, mínimo 50,
+  // máximo 5000 por compra, saldo SIN vencimiento y ACUMULABLE. planPagoPorUsoUsdGrande es el
+  // precio principal en USD, grande ("US$0,15 / envío"); planPagoPorUsoMinimoNota usa {minimo}
+  // (reemplazado en LandingPage.tsx con `precios.porUso.minimo`).
+  planPagoPorUsoName: string;
+  planPagoPorUsoUsdGrande: string;
+  planPagoPorUsoMinimoNota: string;
+  planPagoPorUsoFeature1: string;
+  planPagoPorUsoFeature2: string;
+  planPagoPorUsoFeature3: string;
+  planPagoPorUsoFeature4: string;
+  // Boton de la tarjeta cuando `pagosActivos` esta encendido (abre el panel); con pagos apagados
+  // la tarjeta sigue usando `buyNow` (mailto), igual que el Paquete.
+  buyPorUso: string;
 
   // FAQ Section
   faqTitle: string;
@@ -92,19 +102,22 @@ export interface TranslationDict {
   footerText: string;
   footerRights: string;
 
-  // Limites de plan al enviar un lote (Tarea 3, cobro real con planes, 2026-10-05).
-  // batchLimitSaldo usa los marcadores {restantes} y {lote}, reemplazados en App.tsx.
+  // Limites de plan al enviar un lote (Tarea 3, cobro real con planes, 2026-10-05). Paso 16B:
+  // batchLimitSaldo ahora menciona las DOS fuentes de saldo pagado ({paquete}/{porUso}/{total}),
+  // nunca solo una — reemplazados en src/utils/plan.ts (`formatearMotivoRechazoLote`).
   batchLimitFree: string;
   batchLimitSaldo: string;
   // Opciones cuando se rechaza un lote (Tarea 10): dividirlo o ver los planes disponibles.
   batchLimitOpciones: string;
 
   // Vista "Mi plan" (Tarea 10, cobro real con planes, 2026-10-05). miPlanPaquete usa {restantes}
-  // y {fecha}; miPlanPro usa {fecha} (reemplazados en src/utils/plan.ts).
+  // y {fecha} (reemplazados en src/utils/plan.ts). Paso 16B: miPlanSaldoPorUso usa {saldo} — se
+  // muestra APARTE del Paquete (las dos fuentes son independientes, nunca una sustituye a la
+  // otra); "Pro" desaparece (miPlanPro se retira).
   miPlanGratis: string;
   miPlanPaquete: string;
   miPlanPaqueteNota: string;
-  miPlanPro: string;
+  miPlanSaldoPorUso: string;
 
   // Volver de Mercado Pago (Tarea 10): estados del sondeo contra /api/cuenta.
   pagoConfirmando: string;
@@ -133,6 +146,24 @@ export interface TranslationDict {
   checkoutErrorGenerico: string;
   checkoutSinPrecios: string;
 
+  // Linea "Se cobra $X COP a la TRM del DD/MM" (Paso 16B, punto 1): siempre visible, mas chica,
+  // justo debajo del precio grande en USD. precioCopHoyNota es el TOTAL (Paquete, o el total del
+  // panel de Pago por uso); precioCopPorEnvioNota es el valor POR UNIDAD (solo la tarjeta de
+  // Pago por uso, antes de elegir cantidad) — ambos usan {cop} y {fecha}.
+  precioCopHoyNota: string;
+  precioCopPorEnvioNota: string;
+
+  // Panel de checkout de "Pago por uso" (Paso 16B, 2026-10-07): selector de cantidad (50-5000,
+  // enteros, botones +/-10), total en vivo en USD y COP, mismas casillas que el Paquete pero con
+  // `textoCasillaRetractoPorUso`. checkoutCantidadInvalida usa {minimo}/{maximo}.
+  checkoutPorUsoTitle: string;
+  checkoutCantidadLabel: string;
+  checkoutCantidadInvalida: string;
+  checkoutPorUsoTotalUsd: string;
+  // Reemplaza, SOLO en el panel de Pago por uso, a `checkoutVencimientoNota` (que habla del
+  // vencimiento del Paquete): el saldo Por uso nunca vence (R3 del punto 2 del encargo).
+  checkoutSaldoNoVenceNota: string;
+
   // O3 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto; T1/T3/T6 de
   // docs/legal/textos-checkout.md): "precio total, sin cargos adicionales" (tarjeta Y panel de
   // pago), "pago único" y el vencimiento con la perdida de los envios no usados — Terminos
@@ -145,10 +176,6 @@ export interface TranslationDict {
   checkoutPagoUnicoNota: string;
   checkoutVencimientoNota: string;
   checkoutMercadoPagoNota: string;
-
-  // Verify v2 (ad80fd6, hallazgo Bajo): "Próximamente" de la tarjeta de Pro estaba escrito fijo
-  // en LandingPage.tsx en vez de venir de translations.ts.
-  proximamenteBadge: string;
 }
 
 export type Lang = "es" | "en";
@@ -207,16 +234,8 @@ export const translations: Record<Lang, TranslationDict> = {
     planFreeFeature2: "Asunto y cuerpo del correo personalizados",
     planFreeFeature3: "Lectura de nombres con IA",
 
-    // Pro no se vende en v1 (decision de Leonardo, 2026-10-05): sin precio ni "escaneo
-    // prioritario"/"24/7" (no existen); el boton manda un correo, igual que siempre.
-    planProName: "Plan Pro Ilimitado",
-    planProPrice: "Próximamente · escríbenos",
-    planProFeature1: "Certificados ilimitados por lote",
-    planProFeature2: "Asunto y cuerpo del correo personalizados",
-    planProFeature3: "Soporte prioritario por correo",
-    proContactar: "Escríbenos",
-
     planPayGoName: "Paquete",
+    planPaqueteUsdGrande: "US$15 · 150 envíos",
     planPayGoPriceCargando: "Calculando el precio de hoy…",
     planPayGoPriceError: "Escríbenos para el precio de hoy",
     planPayGoFeature1: "150 envíos con éxito para lotes de más de 15",
@@ -224,6 +243,15 @@ export const translations: Record<Lang, TranslationDict> = {
     planPayGoFeature3: "Válidos 1 mes o hasta gastarlos; no se acumulan",
     planPayGoFeature4: "Pago único",
     planPayGoFeature5: "Los envíos que fallan no se descuentan",
+
+    planPagoPorUsoName: "Pago por uso",
+    planPagoPorUsoUsdGrande: "US$0,15 / envío",
+    planPagoPorUsoMinimoNota: "mínimo {minimo} envíos · tu saldo no vence",
+    planPagoPorUsoFeature1: "Compra entre 50 y 5.000 envíos",
+    planPagoPorUsoFeature2: "Tu saldo nunca vence y se acumula entre compras",
+    planPagoPorUsoFeature3: "Los lotes de 15 o menos siguen siendo gratis",
+    planPagoPorUsoFeature4: "Pago único, sin suscripción",
+    buyPorUso: "Comprar saldo",
 
     faqTitle: "Preguntas Frecuentes",
     faqSub: "Resolvemos tus dudas sobre el funcionamiento y la seguridad de la plataforma.",
@@ -241,13 +269,13 @@ export const translations: Record<Lang, TranslationDict> = {
 
     autorizacionDatosRequerida: "Marca la casilla de autorización de datos para continuar.",
     batchLimitFree: "El plan Gratis permite hasta 15 certificados por lote. Puedes dividirlo o escribirnos.",
-    batchLimitSaldo: "Tienes {restantes} envíos y el lote es de {lote}.",
+    batchLimitSaldo: "Tienes {paquete} del Paquete y {porUso} de Pago por uso ({total} en total) y el lote es de {lote}.",
     batchLimitOpciones: "Puedes dividir el lote en partes de 15 o menos, o escribirnos a contacto@leonardoantolinez.com para ver los planes.",
 
     miPlanGratis: "Plan Gratis · hasta 15 certificados por lote",
     miPlanPaquete: "Paquete · te quedan {restantes} envíos · vencen el {fecha}",
     miPlanPaqueteNota: "Los lotes de 15 certificados o menos no gastan tu saldo.",
-    miPlanPro: "Pro · envíos ilimitados · hasta {fecha}",
+    miPlanSaldoPorUso: "Saldo por uso: {saldo} envíos (no vence)",
 
     pagoConfirmando: "Estamos confirmando tu pago…",
     pagoActivo: "¡Pago confirmado! Tu plan ya está activo.",
@@ -268,13 +296,20 @@ export const translations: Record<Lang, TranslationDict> = {
     checkoutErrorGenerico: "No se pudo iniciar el pago con Mercado Pago.",
     checkoutSinPrecios: "No podemos calcular el precio de hoy; intenta más tarde.",
 
+    precioCopHoyNota: "Se cobra ${cop} COP a la TRM del {fecha}.",
+    precioCopPorEnvioNota: "Se cobra ~${cop} COP por envío a la TRM del {fecha}.",
+
+    checkoutPorUsoTitle: "Pago por uso",
+    checkoutCantidadLabel: "Cantidad de envíos",
+    checkoutCantidadInvalida: "Ingresa un número entero entre {minimo} y {maximo}.",
+    checkoutPorUsoTotalUsd: "Total US${usd}",
+    checkoutSaldoNoVenceNota: "Importante: este saldo no vence y se acumula con compras futuras. Los envíos que no uses quedan disponibles para siempre.",
+
     checkoutPrecioTotalSinCargos: "Total a pagar hoy · precio total, sin cargos adicionales.",
     checkoutPrecioDeHoySinCargos: "Precio de hoy · precio total, sin cargos adicionales.",
     checkoutPagoUnicoNota: "Pago único: no se renueva y no habrá más cobros. Se activa cuando Mercado Pago confirme el pago.",
     checkoutVencimientoNota: "Importante: tus 150 envíos vencen un mes después de confirmarse el pago o cuando los gastes, lo que ocurra primero. Los envíos que no uses se pierden y no se acumulan.",
     checkoutMercadoPagoNota: "Pagas con Mercado Pago. CertiSend no ve ni guarda los datos de tu tarjeta.",
-
-    proximamenteBadge: "Próximamente",
   },
   en: {
     appName: "CertiSend Pro",
@@ -324,16 +359,8 @@ export const translations: Record<Lang, TranslationDict> = {
     planFreeFeature2: "Custom subject and body",
     planFreeFeature3: "AI name reading",
 
-    // Pro is not for sale in v1 (Leonardo's decision, 2026-10-05): no price, and no "priority
-    // scanning"/"24/7" (they don't exist); the button emails us, same as it always did.
-    planProName: "Unlimited Pro Plan",
-    planProPrice: "Coming soon · email us",
-    planProFeature1: "Unlimited certificates per batch",
-    planProFeature2: "Custom subject and body",
-    planProFeature3: "Priority email support",
-    proContactar: "Email us",
-
     planPayGoName: "Bundle",
+    planPaqueteUsdGrande: "US$15 · 150 sends",
     planPayGoPriceCargando: "Calculating today's price…",
     planPayGoPriceError: "Write to us for today's price",
     planPayGoFeature1: "150 successful sends for batches over 15",
@@ -341,6 +368,15 @@ export const translations: Record<Lang, TranslationDict> = {
     planPayGoFeature3: "Valid for 1 month or until used up; unused sends do not roll over",
     planPayGoFeature4: "One-time payment",
     planPayGoFeature5: "Failed sends are never deducted",
+
+    planPagoPorUsoName: "Pay-as-you-go",
+    planPagoPorUsoUsdGrande: "US$0.15 / send",
+    planPagoPorUsoMinimoNota: "minimum {minimo} sends · your balance never expires",
+    planPagoPorUsoFeature1: "Buy between 50 and 5,000 sends",
+    planPagoPorUsoFeature2: "Your balance never expires and rolls over between purchases",
+    planPagoPorUsoFeature3: "Batches of 15 or fewer stay free",
+    planPagoPorUsoFeature4: "One-time payment, no subscription",
+    buyPorUso: "Buy balance",
 
     faqTitle: "Frequently Asked Questions",
     faqSub: "Answering your common questions about how the platform works and its security.",
@@ -358,13 +394,13 @@ export const translations: Record<Lang, TranslationDict> = {
 
     autorizacionDatosRequerida: "Check the data-authorization box to continue.",
     batchLimitFree: "The Free plan allows up to 15 certificates per batch. You can split it or email us.",
-    batchLimitSaldo: "You have {restantes} sends left and this batch has {lote}.",
+    batchLimitSaldo: "You have {paquete} from the Bundle and {porUso} from Pay-as-you-go ({total} total) and this batch has {lote}.",
     batchLimitOpciones: "You can split the batch into parts of 15 or fewer, or email us at contacto@leonardoantolinez.com to see the plans.",
 
     miPlanGratis: "Free plan · up to 15 certificates per batch",
     miPlanPaquete: "Bundle · {restantes} sends left · expires {fecha}",
     miPlanPaqueteNota: "Batches of 15 or fewer never spend your balance.",
-    miPlanPro: "Pro · unlimited sends · until {fecha}",
+    miPlanSaldoPorUso: "Pay-as-you-go balance: {saldo} sends (never expires)",
 
     pagoConfirmando: "We're confirming your payment…",
     pagoActivo: "Payment confirmed! Your plan is now active.",
@@ -384,6 +420,15 @@ export const translations: Record<Lang, TranslationDict> = {
     checkoutErrorGenerico: "We couldn't start the payment with Mercado Pago.",
     checkoutSinPrecios: "We couldn't get today's price; please try again later.",
 
+    precioCopHoyNota: "Charged as COP ${cop} at today's exchange rate ({fecha}).",
+    precioCopPorEnvioNota: "Charged as ~COP ${cop} per send at today's exchange rate ({fecha}).",
+
+    checkoutPorUsoTitle: "Pay-as-you-go",
+    checkoutCantidadLabel: "Number of sends",
+    checkoutCantidadInvalida: "Enter a whole number between {minimo} and {maximo}.",
+    checkoutPorUsoTotalUsd: "Total US${usd}",
+    checkoutSaldoNoVenceNota: "Important: this balance never expires and rolls over with future purchases. Unused sends stay available forever.",
+
     // O3 (sin "even if you renew": v1 solo tiene el Paquete de pago único, nunca renovable — ver
     // el dictamen, que pide quitar esa clausula de la frase EN de T6).
     checkoutPrecioTotalSinCargos: "Total due today · total price, no additional charges.",
@@ -391,7 +436,5 @@ export const translations: Record<Lang, TranslationDict> = {
     checkoutPagoUnicoNota: "One-time payment: it does not renew and there will be no further charges. It's activated once Mercado Pago confirms the payment.",
     checkoutVencimientoNota: "Important: your 150 sends expire one month after the payment is confirmed or when used up, whichever comes first. Unused sends are lost and do not carry over.",
     checkoutMercadoPagoNota: "Payment is processed by Mercado Pago. CertiSend never sees or stores your card details.",
-
-    proximamenteBadge: "Coming soon",
   }
 };

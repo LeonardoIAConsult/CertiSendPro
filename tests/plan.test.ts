@@ -1,7 +1,8 @@
-// Pruebas de la logica PURA de la Tarea 10 (cobro real con planes, 2026-10-05): el texto del
-// plan que ve el usuario y el estado del sondeo al volver de Mercado Pago. Corren con el test
-// runner nativo de Node (node:test) via tsx; no tocan React ni red — src/utils/plan.ts no
-// depende de nada externo, solo de la cuenta/fecha/parametro de la URL.
+// Pruebas de la logica PURA de la Tarea 10 (cobro real con planes, 2026-10-05) y del Paso 16B
+// (frontend de los 3 planes, 2026-10-07): el texto del plan que ve el usuario y el estado del
+// sondeo al volver de Mercado Pago. Corren con el test runner nativo de Node (node:test) via tsx;
+// no tocan React ni red — src/utils/plan.ts no depende de nada externo, solo de la
+// cuenta/fecha/parametro de la URL.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { translations } from "../src/utils/translations";
@@ -16,6 +17,7 @@ import {
   leerPaymentId,
   leerStatusMp,
   planActivo,
+  planVigenteConSaldo,
   LIMITE_SONDEO_MS,
   type CuentaInfo,
   type ResultadoFetchCuenta,
@@ -24,15 +26,16 @@ import {
 const ahora = new Date("2026-10-05T12:00:00Z");
 
 function cuenta(parcial: Partial<CuentaInfo>): CuentaInfo {
-  return { plan: "gratis", enviosRestantes: 0, vence: null, renueva: false, ultimoPago: null, ...parcial };
+  return { plan: "gratis", enviosRestantes: 0, vence: null, renueva: false, saldoPorUso: 0, ultimoPago: null, ...parcial };
 }
 
-// ── formatearEstadoPlan: Gratis, Paquete con fecha, Paquete vencido, Pro ────────────────────
+// ── formatearEstadoPlan: Gratis, Paquete con fecha, Paquete vencido, saldo Por uso (Paso 16B) ──
 
-test("Gratis: texto exacto del spec, sin nota", () => {
+test("Gratis: texto exacto del spec, sin nota, sin saldo por uso", () => {
   const r = formatearEstadoPlan(cuenta({ plan: "gratis" }), "es", ahora);
   assert.equal(r.titulo, "Plan Gratis · hasta 15 certificados por lote");
   assert.equal(r.nota, undefined);
+  assert.equal(r.saldoPorUsoTexto, undefined);
 });
 
 test("Paquete vigente con saldo: titulo con restantes+fecha y nota de los lotes <=15", () => {
@@ -61,34 +64,46 @@ test("Paquete vigente pero SIN saldo (0 restantes): se muestra como Gratis", () 
   assert.equal(r.titulo, "Plan Gratis · hasta 15 certificados por lote");
 });
 
-test("Pro: titulo con fecha corta (DD/MM, sin año)", () => {
-  const vence = new Date(ahora.getTime() + 15 * 24 * 3600_000).toISOString();
-  const r = formatearEstadoPlan(cuenta({ plan: "pro", vence }), "es", ahora);
-  assert.match(r.titulo, /^Pro · envíos ilimitados · hasta \d{2}\/\d{2}$/);
-});
-
-test("Pro sin fecha de vencimiento: se trata como Gratis (igual que decidirLote en el servidor, NUNCA activo sin vence)", () => {
-  const r = formatearEstadoPlan(cuenta({ plan: "pro", vence: null }), "es", ahora);
-  assert.equal(r.titulo, "Plan Gratis · hasta 15 certificados por lote");
-});
-
 test("Paquete sin fecha de vencimiento: tambien se trata como Gratis", () => {
   const r = formatearEstadoPlan(cuenta({ plan: "paquete", enviosRestantes: 100, vence: null }), "es", ahora);
   assert.equal(r.titulo, "Plan Gratis · hasta 15 certificados por lote");
 });
 
+// ── Paso 16B: saldo "Pago por uso" en formatearEstadoPlan — APARTE del Paquete, nunca sustituye ─
+
+test("Paso 16B: solo saldoPorUso (sin Paquete) -> titulo Gratis, pero saldoPorUsoTexto con el numero", () => {
+  const r = formatearEstadoPlan(cuenta({ plan: "gratis", saldoPorUso: 137 }), "es", ahora);
+  assert.equal(r.titulo, "Plan Gratis · hasta 15 certificados por lote");
+  assert.equal(r.saldoPorUsoTexto, "Saldo por uso: 137 envíos (no vence)");
+});
+
+test("Paso 16B: Paquete vigente CON saldo Por uso a la vez -> las dos aparecen, ninguna sustituye a la otra", () => {
+  const vence = new Date(ahora.getTime() + 20 * 24 * 3600_000).toISOString();
+  const r = formatearEstadoPlan(cuenta({ plan: "paquete", enviosRestantes: 10, vence, saldoPorUso: 50 }), "es", ahora);
+  assert.match(r.titulo, /^Paquete · te quedan 10 envíos/);
+  assert.equal(r.saldoPorUsoTexto, "Saldo por uso: 50 envíos (no vence)");
+});
+
+test("Paso 16B: saldoPorUso en 0 -> saldoPorUsoTexto undefined (nada que mostrar)", () => {
+  const r = formatearEstadoPlan(cuenta({ plan: "gratis", saldoPorUso: 0 }), "es", ahora);
+  assert.equal(r.saldoPorUsoTexto, undefined);
+});
+
+test("EN: saldo por uso traducido", () => {
+  const r = formatearEstadoPlan(cuenta({ plan: "gratis", saldoPorUso: 5 }), "en", ahora);
+  assert.equal(r.saldoPorUsoTexto, "Pay-as-you-go balance: 5 sends (never expires)");
+});
+
 // Regresion (hallazgo de /code-review sobre el primer commit de esta tarea): formatearEstadoPlan
 // y planActivo usaban DOS copias distintas del criterio de vigencia y se contradecian para un
-// Paquete/Pro sin `vence` (una decia Gratis, la otra decia activo para siempre). Ahora comparten
-// el mismo `planVigenteConSaldo` interno; esta prueba fija que nunca puedan volver a divergir.
-test("formatearEstadoPlan y planActivo SIEMPRE coinciden en si un plan de pago sin `vence` esta vigente", () => {
-  for (const plan of ["paquete", "pro"] as const) {
-    const c = cuenta({ plan, enviosRestantes: 100, vence: null });
-    const mostradoComoGratis = formatearEstadoPlan(c, "es", ahora).titulo === "Plan Gratis · hasta 15 certificados por lote";
-    const activo = planActivo(c, ahora);
-    assert.equal(mostradoComoGratis, !activo, `plan=${plan}: formatearEstadoPlan y planActivo deben coincidir`);
-    assert.equal(activo, false, `plan=${plan} sin vence nunca debe ser "activo" (mismo criterio que decidirLote)`);
-  }
+// Paquete sin `vence` (una decia Gratis, la otra decia activo para siempre). Ahora comparten el
+// mismo `planVigenteConSaldo`; esta prueba fija que nunca puedan volver a divergir.
+test("formatearEstadoPlan y planActivo SIEMPRE coinciden en si un Paquete sin `vence` esta vigente", () => {
+  const c = cuenta({ plan: "paquete", enviosRestantes: 100, vence: null });
+  const mostradoComoGratis = formatearEstadoPlan(c, "es", ahora).titulo === "Plan Gratis · hasta 15 certificados por lote";
+  const activo = planActivo(c, ahora);
+  assert.equal(mostradoComoGratis, !activo, "formatearEstadoPlan y planActivo deben coincidir");
+  assert.equal(activo, false, "un Paquete sin vence nunca debe ser \"activo\" (mismo criterio que decidirLote)");
 });
 
 // G6 (NO-GO del REVISOR_EXTERNO_LAP sobre la Tarea 10): planActivo NO miraba el saldo del
@@ -107,10 +122,36 @@ test("EN: Gratis traducido", () => {
   assert.equal(r.titulo, "Free plan · up to 15 certificates per batch");
 });
 
+// ── planVigenteConSaldo (Paso 16B): mismo criterio que decidirLote del servidor — Paquete
+// vigente (fecha + saldo) O saldoPorUso > 0 (nunca vence) ──────────────────────────────────────
+
+test("planVigenteConSaldo: Gratis sin ningun saldo -> false", () => {
+  assert.equal(planVigenteConSaldo(cuenta({ plan: "gratis" }), ahora), false);
+});
+
+test("planVigenteConSaldo: solo saldoPorUso > 0 (sin Paquete) -> true", () => {
+  assert.equal(planVigenteConSaldo(cuenta({ plan: "gratis", saldoPorUso: 1 }), ahora), true);
+});
+
+test("planVigenteConSaldo: Paquete vigente con saldo Y saldoPorUso en 0 -> true", () => {
+  const vence = new Date(ahora.getTime() + 1000).toISOString();
+  assert.equal(planVigenteConSaldo(cuenta({ plan: "paquete", vence, enviosRestantes: 1, saldoPorUso: 0 }), ahora), true);
+});
+
+test("planVigenteConSaldo: Paquete vencido Y saldoPorUso en 0 -> false", () => {
+  const vence = new Date(ahora.getTime() - 1000).toISOString();
+  assert.equal(planVigenteConSaldo(cuenta({ plan: "paquete", vence, enviosRestantes: 50, saldoPorUso: 0 }), ahora), false);
+});
+
+test("planVigenteConSaldo: Paquete vencido PERO saldoPorUso > 0 -> true (el saldo Por uso nunca vence)", () => {
+  const vence = new Date(ahora.getTime() - 1000).toISOString();
+  assert.equal(planVigenteConSaldo(cuenta({ plan: "paquete", vence, enviosRestantes: 50, saldoPorUso: 3 }), ahora), true);
+});
+
 // ── formatearMotivoRechazoLote: motivo + opciones (dividir el lote o ver planes) ────────────
 
 test("limite_gratis: mensaje claro + opciones, en español", () => {
-  const msg = formatearMotivoRechazoLote("limite_gratis", undefined, 16, "es");
+  const msg = formatearMotivoRechazoLote("limite_gratis", undefined, undefined, 16, "es");
   assert.match(msg, /Gratis permite hasta 15/);
   assert.match(msg, /dividir el lote/);
   assert.match(msg, /planes/);
@@ -118,16 +159,29 @@ test("limite_gratis: mensaje claro + opciones, en español", () => {
 
 // B27: batchLimitFree ofrecia "pasar a Paquete o Pro" (Pro todavia no se vende). El texto nuevo
 // ya no promete un plan inexistente.
-test("limite_gratis: ya NO ofrece pasar a Paquete o Pro (Pro todavia no se vende)", () => {
-  const msg = formatearMotivoRechazoLote("limite_gratis", undefined, 16, "es");
+test("limite_gratis: ya NO ofrece pasar a Paquete o Pro (Pro ya no existe)", () => {
+  const msg = formatearMotivoRechazoLote("limite_gratis", undefined, undefined, 16, "es");
   assert.doesNotMatch(msg, /pasa(r)? a Paquete o Pro/i);
   assert.doesNotMatch(msg, /upgrade to the Bundle or Pro/i);
 });
 
-test('saldo_insuficiente: "tienes 40, el lote es de 60" (spec, texto exacto de los numeros)', () => {
-  const msg = formatearMotivoRechazoLote("saldo_insuficiente", 40, 60, "es");
-  assert.match(msg, /Tienes 40 envíos y el lote es de 60\./);
+// Paso 16B: saldo_insuficiente ahora menciona las DOS fuentes de saldo pagado (Paquete + Por
+// uso) y el total, nunca solo una.
+test('saldo_insuficiente: menciona el Paquete, el saldo Por uso Y el total, con los numeros exactos', () => {
+  const msg = formatearMotivoRechazoLote("saldo_insuficiente", 10, 30, 60, "es");
+  assert.match(msg, /Tienes 10 del Paquete y 30 de Pago por uso \(40 en total\) y el lote es de 60\./);
   assert.match(msg, /dividir el lote/);
+});
+
+test("saldo_insuficiente: enviosRestantes/saldoPorUso undefined -> se tratan como 0, nunca NaN", () => {
+  const msg = formatearMotivoRechazoLote("saldo_insuficiente", undefined, undefined, 60, "es");
+  assert.match(msg, /Tienes 0 del Paquete y 0 de Pago por uso \(0 en total\) y el lote es de 60\./);
+  assert.doesNotMatch(msg, /NaN/);
+});
+
+test("saldo_insuficiente EN: mismo texto en ingles, con los numeros exactos", () => {
+  const msg = formatearMotivoRechazoLote("saldo_insuficiente", 10, 30, 60, "en");
+  assert.match(msg, /You have 10 from the Bundle and 30 from Pay-as-you-go \(40 total\) and this batch has 60\./);
 });
 
 // ── decidirEstadoSondeo: confirmando / activo / revision / rechazado ────────────────────────
@@ -307,6 +361,26 @@ test('ORACULO 2 (G8): el webhook ya activo el Paquete ANTES de la primera lectur
   assert.equal(estado, "activo");
 });
 
+// Paso 16B: la misma carrera (G8), pero activada por un pago de "Pago por uso" en vez del
+// Paquete — el sondeo debe marcar "activo" igual, con `saldoPorUso` como UNICA fuente de saldo.
+test('Paso 16B: el payment_id coincide y la cuenta SOLO tiene saldoPorUso (sin Paquete vigente) -> "activo"', () => {
+  const cuentaActivadaPorUso = cuenta({
+    plan: "gratis",
+    saldoPorUso: 137,
+    ultimoPago: { id: "pago-porUso-1", fecha: ahora.toISOString() },
+  });
+  const estado = decidirEstadoSondeo({
+    pago: "ok",
+    paymentId: "pago-porUso-1",
+    statusMp: "approved",
+    lectura: lecturaOk(cuentaActivadaPorUso),
+    authReady: true,
+    msTranscurridos: 0,
+    ahora,
+  });
+  assert.equal(estado, "activo");
+});
+
 // ORACULO escenario 3: el `ultimoPago.id` de la cuenta NO coincide con el `payment_id` de la URL
 // (p. ej. el usuario tiene un Paquete vigente de OTRO pago, y esta visita trae un `payment_id`
 // distinto que todavia no se proceso) -> nunca "activo".
@@ -331,7 +405,7 @@ test("ORACULO 3: payment_id de la URL distinto del ultimoPago.id de la cuenta ->
 
 // El payment_id SI coincide, pero el plan quedo sin saldo (p. ej. alguna inconsistencia) -> no
 // basta con que el pago coincida, tambien tiene que estar activo de verdad (planActivo).
-test("payment_id coincide pero el Paquete quedo sin saldo -> NO activo", () => {
+test("payment_id coincide pero el Paquete quedo sin saldo NI saldoPorUso -> NO activo", () => {
   const cuentaSinSaldo = cuenta({
     plan: "paquete",
     enviosRestantes: 0,
@@ -454,7 +528,8 @@ test("ejecutarRevisionSondeo: webhook adelantado (G8) con un leerCuenta falso ->
 
 test("ejecutarRevisionSondeo: sin payment_id en la URL, aunque leerCuenta devuelva un plan vigente -> nunca activo, no detiene antes del limite", async () => {
   const cuentaVigente = cuenta({
-    plan: "pro",
+    plan: "paquete",
+    enviosRestantes: 150,
     vence: new Date(ahora.getTime() + 30 * 24 * 3600_000).toISOString(),
   });
   const { estado, detener } = await ejecutarRevisionSondeo({
@@ -566,9 +641,10 @@ test("G6: planActivo: Paquete con vence en el futuro pero SIN saldo (0) NO esta 
   assert.equal(planActivo(cuenta({ plan: "paquete", vence, enviosRestantes: 0 }), ahora), false);
 });
 
-test("planActivo: Pro con vence en el futuro esta activo (no necesita saldo)", () => {
-  const vence = new Date(ahora.getTime() + 1000).toISOString();
-  assert.equal(planActivo(cuenta({ plan: "pro", vence, enviosRestantes: 0 }), ahora), true);
+// Paso 16B: planActivo con SOLO saldoPorUso (sin ningun Paquete) -> activo, el saldo Por uso
+// nunca necesita fecha de vencimiento.
+test("Paso 16B: planActivo: solo saldoPorUso > 0 (plan=gratis, sin Paquete) -> activo", () => {
+  assert.equal(planActivo(cuenta({ plan: "gratis", saldoPorUso: 1 }), ahora), true);
 });
 
 test("leerPagoParam: lee ok/pendiente/error y descarta cualquier otro valor", () => {

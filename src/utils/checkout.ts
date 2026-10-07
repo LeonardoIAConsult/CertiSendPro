@@ -7,7 +7,9 @@ import {
   TERMINOS_VERSION,
   textoCasillaTerminos,
   textoCasillaRetracto,
+  textoCasillaRetractoPorUso,
 } from "../../shared/textosCasillas";
+import { copDesdeUsd } from "../../shared/precios";
 
 /** Version de los Terminos y Condiciones citada en la casilla T4 (`docs/legal/textos-checkout.md`
  * v1.2). Re-exportada por compatibilidad: lo que antes era una constante duplicada a mano con
@@ -34,6 +36,73 @@ export function textoTerminos(montoCop: number, idioma: "es" | "en"): string {
  * (M31), misma razon que `textoTerminos` arriba. */
 export function textoRetracto(idioma: "es" | "en"): string {
   return textoCasillaRetracto(idioma);
+}
+
+/** Texto de la casilla de retracto del panel de "Pago por uso" (Paso 16B, Tarea 16A-2): mismo
+ * patron que `textoRetracto`, delegado a `shared/textosCasillas.ts` — el saldo se activa de
+ * inmediato en vez de "empezar el servicio", y la devolucion aplica a ESA compra, nunca al
+ * Paquete. */
+export function textoRetractoPorUso(idioma: "es" | "en"): string {
+  return textoCasillaRetractoPorUso(idioma);
+}
+
+// ── Pago por uso: cantidad, total en vivo y paridad con el servidor (Paso 16B, 2026-10-07)
+// ────────────────────────────────────────────────────────────────────────────────────────────
+// Decision de Leonardo (2026-10-06): US$0,15 por envio, minimo 50, maximo 5000 por compra,
+// entero; el saldo nunca vence y se acumula entre compras. Estos limites son los MISMOS que
+// valida `crearCobroPorUso` (server/cobroPaquete.ts) y que informa `/api/precios`
+// (`porUso.minimo`/`porUso.maximo`) — los valores de aqui son el respaldo del panel ANTES de que
+// /api/precios responda; una vez responde, LandingPage.tsx usa los de la red (nunca estas
+// constantes solas, para no desviarse si Leonardo cambia los limites en el servidor).
+export const PORUSO_USD_UNIDAD = 0.15;
+export const PORUSO_MINIMO = 50;
+export const PORUSO_MAXIMO = 5000;
+export const PORUSO_PASO_BOTONES = 10;
+
+/** true si `cantidad` es un entero dentro de [minimo, maximo] — MISMA validacion que
+ * `crearCobroPorUso` en el servidor (nunca un decimal, nunca fuera de rango). Oraculo: 49 ->
+ * false, 50 -> true, 5000 -> true, 5001 -> false. */
+export function cantidadPorUsoValida(cantidad: number, minimo = PORUSO_MINIMO, maximo = PORUSO_MAXIMO): boolean {
+  return Number.isInteger(cantidad) && cantidad >= minimo && cantidad <= maximo;
+}
+
+/** Ajusta `cantidad` al entero mas cercano dentro de [minimo, maximo] — usado por los botones
+ * +/-10 y por el input numerico del panel: nunca deja la cantidad fuera de rango ni con
+ * decimales, sin importar lo que el usuario escriba o cuanto reste/sume. `NaN`/no finito cae al
+ * minimo (nunca `NaN` propagado a la UI). */
+export function clampCantidadPorUso(cantidad: number, minimo = PORUSO_MINIMO, maximo = PORUSO_MAXIMO): number {
+  if (!Number.isFinite(cantidad)) return minimo;
+  return Math.min(maximo, Math.max(minimo, Math.round(cantidad)));
+}
+
+/**
+ * Total en USD (solo para mostrar, redondeado a 2 decimales) y en COP (el monto REAL que se va a
+ * cobrar) de `cantidad` envios de Pago por uso, con la TRM del dia. El COP usa EXACTAMENTE la
+ * misma formula que el servidor (`copDesdeUsd(usdUnidad * cantidad, trm)`,
+ * server/cobroPaquete.ts `crearCobroPorUso` y server/trm.ts, reexportada de `shared/precios.ts`
+ * — la MISMA funcion, nunca una copia): el total SIEMPRE se redondea UNA vez sobre el total en
+ * USD, nunca redondeando primero un COP unitario y multiplicandolo por N (eso multiplicaria N
+ * veces el error de redondeo de una sola unidad). `tests/precios.test.ts` prueba la paridad para
+ * 50, 137 y 5000 envios.
+ */
+export function calcularTotalPorUso(
+  cantidad: number,
+  trmValor: number,
+  usdUnidad: number = PORUSO_USD_UNIDAD
+): { usd: number; cop: number } {
+  const usd = Math.round(usdUnidad * cantidad * 100) / 100;
+  const cop = copDesdeUsd(usdUnidad * cantidad, trmValor);
+  return { usd, cop };
+}
+
+/** "yyyy-mm-dd" (como `fechaDesde`/`fechaHasta` de /api/precios) -> "DD/MM". Nunca pasa por
+ * `Date`/zona horaria: esa fecha YA es el dia de Bogota tal como lo calculo el servidor
+ * (server/trm.ts `hoyBogota`) — convertirla con `new Date(...)` y volver a formatear con
+ * `Intl`/zona corre el riesgo de restar un dia (mismo motivo por el que `formatearFechaBogota`,
+ * en src/utils/plan.ts, nunca recibe un texto de fecha sin hora). */
+export function formatearFechaCortaDesdeISO(fechaIso: string): string {
+  const [, mes, dia] = fechaIso.split("-");
+  return `${dia}/${mes}`;
 }
 
 // ── Validacion del dominio de `initPoint` antes de redirigir (Bajo, cobro real con planes,

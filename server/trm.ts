@@ -18,6 +18,15 @@
 // mover el dia). Se quita el tope fijo de 5 dias de antiguedad: el dataset real ya declara su
 // propia vigencia (p. ej. una fila de Semana Santa cubre varios dias). Sin ninguna fila que cubra
 // hoy, `trmHoy()` devuelve null — nunca se usa una fila vencida.
+//
+// Paso 16B (2026-10-07): `copDesdeUsd` se movio a `shared/precios.ts` (sin firebase-admin, nunca
+// nada que Vite no pueda empaquetar) para que el panel de "Pago por uso" del cliente
+// (src/utils/checkout.ts) pueda mostrar el MISMO total en COP que este modulo va a cobrar de
+// verdad — se reexporta aqui para no romper a quien ya la importa de `./server/trm`
+// (server.ts, server/cobroPaquete.ts, tests/trm.test.ts, tests/cobroPaquete.test.ts). Mismo
+// patron que `TERMINOS_VERSION`/`textoCasillaRetracto` reexportados en server/cuentas.ts desde
+// shared/textosCasillas.ts.
+export { copDesdeUsd } from "../shared/precios";
 export const TRM_MIN = 2000;
 export const TRM_MAX = 10000;
 const TRM_TIMEOUT_MS = 5000;
@@ -154,12 +163,6 @@ export async function trmHoy(
     console.error("[TRM] datos.gov.co no respondio:", e);
   }
   return null;
-}
-
-/** Redondeo al peso compartido entre `/api/mercadopago/create-preference` y `/api/precios`: NUNCA
- * se duplica esta formula (D3). */
-export function copDesdeUsd(usd: number, trmValor: number): number {
-  return Math.round(usd * trmValor);
 }
 
 /**

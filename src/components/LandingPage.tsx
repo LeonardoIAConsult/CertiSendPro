@@ -28,15 +28,26 @@ import {
   interpretarRespuestaCobro,
   textoTerminos,
   textoRetracto,
+  textoRetractoPorUso,
   esInitPointMercadoPagoValido,
+  cantidadPorUsoValida,
+  clampCantidadPorUso,
+  calcularTotalPorUso,
+  formatearFechaCortaDesdeISO,
+  PORUSO_PASO_BOTONES,
 } from "../utils/checkout";
 
-/** Lo que necesita el panel de checkout del Paquete, de GET /api/precios (M30, corrige vuelta
- * 24): `pagosActivos` es lo UNICO que le dice al cliente si create-preference esta encendido —
- * `PAGOS_ACTIVOS` es una variable de SERVIDOR, nunca llega al bundle de Vite. */
+/** Lo que necesita el panel de checkout del Paquete y de Pago por uso, de GET /api/precios (M30,
+ * corrige vuelta 24; Paso 16B agrega `porUso`): `pagosActivos` es lo UNICO que le dice al cliente
+ * si create-preference esta encendido — `PAGOS_ACTIVOS` es una variable de SERVIDOR, nunca llega
+ * al bundle de Vite. */
 interface PreciosDelDia {
-  cop: number;
-  usd: number;
+  paquete: { usd: number; cop: number };
+  /** Paso 16B: limites y precio unitario de "Pago por uso" — los MISMOS que valida el servidor
+   * (`crearCobroPorUso`, server/cobroPaquete.ts). `copPorUnidadReferencia` es solo informativo
+   * (la linea "~$X COP por envío" de la tarjeta); el total real SIEMPRE sale de
+   * `calcularTotalPorUso` con la cantidad elegida, nunca de multiplicar esta cifra por N. */
+  porUso: { usdUnidad: number; minimo: number; maximo: number; copPorUnidadReferencia: number };
   trm: number;
   fechaDesde: string;
   pagosActivos: boolean;
@@ -129,8 +140,13 @@ export default function LandingPage({
         const data = await res.json();
         if (cancelado) return;
         setPrecios({
-          cop: data.paquete.cop,
-          usd: data.paquete.usd,
+          paquete: { usd: data.paquete.usd, cop: data.paquete.cop },
+          porUso: {
+            usdUnidad: data.porUso.usdUnidad,
+            minimo: data.porUso.minimo,
+            maximo: data.porUso.maximo,
+            copPorUnidadReferencia: data.porUso.copPorUnidadReferencia,
+          },
           trm: data.trm,
           fechaDesde: data.fechaDesde,
           pagosActivos: data.pagosActivos === true,
@@ -156,7 +172,7 @@ export default function LandingPage({
 
   const abrirPanelPaquete = () => {
     if (!precios) return;
-    setCopActual(precios.cop);
+    setCopActual(precios.paquete.cop);
     setAceptaTerminos(false);
     setAceptaRetracto(false);
     setPanelError(null);
@@ -246,14 +262,107 @@ export default function LandingPage({
     window.location.href = `mailto:contacto@leonardoantolinez.com?subject=${encodeURIComponent(asunto)}&body=${encodeURIComponent(cuerpo)}`;
   };
 
-  // Pro no se vende en v1 (Tarea 11, cobro real con planes, 2026-10-05): sin precio que mostrar
-  // en el correo (Tarea 8, la suscripcion de Pro, todavia no existe).
-  const handleContactarPro = () => {
-    const asunto = "CertiSend: Plan Pro";
-    const cuerpo = language === "en"
-      ? "Hi, I'm interested in the CertiSend Pro plan. "
-      : "Hola, me interesa el plan Pro de CertiSend. ";
-    window.location.href = `mailto:contacto@leonardoantolinez.com?subject=${encodeURIComponent(asunto)}&body=${encodeURIComponent(cuerpo)}`;
+  // ── Checkout de "Pago por uso" (Paso 16B, 2026-10-07) ───────────────────────────────────────
+  // Mismo patron exacto que el panel del Paquete, arriba: solo exige el ID token de Firebase.
+  // `cantidadPorUso` es el selector (50-5000, enteros); el total EN VIVO se deriva de
+  // `cantidadPorUso`/`precios.trm` con `calcularTotalPorUso` (misma formula que el servidor) —
+  // `copPorUsoOverride`, cuando no es null, pisa ese total derivado: solo se usa justo despues de
+  // un 409 (R8 de textos-checkout.md v1.2, igual que el Paquete), para mostrar EXACTAMENTE lo que
+  // el servidor dijo que cobraria, sin que un nuevo calculo con la misma TRM vieja del cliente
+  // vuelva a dar el numero equivocado. Cambiar `cantidadPorUso` limpia el override (nueva
+  // cantidad, nuevo calculo desde cero).
+  const [panelPorUsoAbierto, setPanelPorUsoAbierto] = useState(false);
+  const [cantidadPorUso, setCantidadPorUso] = useState(50);
+  const [copPorUsoOverride, setCopPorUsoOverride] = useState<number | null>(null);
+  const [aceptaTerminosPorUso, setAceptaTerminosPorUso] = useState(false);
+  const [aceptaRetractoPorUso, setAceptaRetractoPorUso] = useState(false);
+  const [pagandoPorUso, setPagandoPorUso] = useState(false);
+  const [panelPorUsoError, setPanelPorUsoError] = useState<string | null>(null);
+  const [precioCambioPorUso, setPrecioCambioPorUso] = useState<{ anterior: number; nuevo: number } | null>(null);
+
+  const totalPorUsoVivo = precios ? calcularTotalPorUso(cantidadPorUso, precios.trm, precios.porUso.usdUnidad) : null;
+  const copPorUsoMostrado = copPorUsoOverride ?? totalPorUsoVivo?.cop ?? null;
+  const cantidadPorUsoOk = precios ? cantidadPorUsoValida(cantidadPorUso, precios.porUso.minimo, precios.porUso.maximo) : false;
+
+  const abrirPanelPorUso = () => {
+    if (!precios) return;
+    setCantidadPorUso(precios.porUso.minimo);
+    setCopPorUsoOverride(null);
+    setAceptaTerminosPorUso(false);
+    setAceptaRetractoPorUso(false);
+    setPanelPorUsoError(null);
+    setPrecioCambioPorUso(null);
+    setPanelPorUsoAbierto(true);
+  };
+
+  const cambiarCantidadPorUso = (nueva: number) => {
+    if (!precios) return;
+    setCantidadPorUso(clampCantidadPorUso(nueva, precios.porUso.minimo, precios.porUso.maximo));
+    setCopPorUsoOverride(null); // nueva cantidad: el total se vuelve a calcular desde cero.
+  };
+
+  const handlePagarPorUso = async () => {
+    if (
+      !precios ||
+      copPorUsoMostrado === null ||
+      !cantidadPorUsoOk ||
+      !puedePagar(aceptaTerminosPorUso, aceptaRetractoPorUso)
+    ) {
+      return;
+    }
+    setPagandoPorUso(true);
+    setPanelPorUsoError(null);
+    try {
+      const idToken = await getIdToken();
+      if (!idToken) {
+        setPagandoPorUso(false);
+        if (!puedeEntrar) {
+          setPanelPorUsoAbierto(false);
+          resaltarYScrollearCasillas();
+          return;
+        }
+        onStart();
+        return;
+      }
+      const res = await fetch("/api/mercadopago/create-preference", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({
+          plan: "porUso",
+          cantidad: cantidadPorUso,
+          aceptaTerminos: true,
+          aceptaRetracto: true,
+          copMostrado: copPorUsoMostrado,
+          idioma: language,
+          modalidad: "unico",
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      const resultado = interpretarRespuestaCobro(res.status, body);
+      if (resultado.tipo === "ok") {
+        if (!esInitPointMercadoPagoValido(resultado.initPoint)) {
+          console.error("[CHECKOUT] initPoint fuera de dominio, no se redirige:", resultado.initPoint);
+          setPanelPorUsoError(t.checkoutErrorGenerico);
+          setPagandoPorUso(false);
+          return;
+        }
+        window.location.href = resultado.initPoint;
+        return;
+      }
+      if (resultado.tipo === "precio_cambio") {
+        setPrecioCambioPorUso({ anterior: copPorUsoMostrado, nuevo: resultado.copNuevo });
+        setCopPorUsoOverride(resultado.copNuevo);
+        setAceptaTerminosPorUso(false);
+        setAceptaRetractoPorUso(false);
+        setPagandoPorUso(false);
+        return;
+      }
+      setPanelPorUsoError(resultado.mensaje);
+      setPagandoPorUso(false);
+    } catch (err: any) {
+      setPanelPorUsoError(err?.message || t.checkoutErrorGenerico);
+      setPagandoPorUso(false);
+    }
   };
 
   return (
@@ -595,60 +704,83 @@ export default function LandingPage({
               </button>
             </div>
 
-            {/* Pro Plan (no se vende en v1, Tarea 11 / cobro real con planes, 2026-10-05: sin
-                precio ni "Recomendado" para algo que todavia no se puede comprar — ver
-                handleContactarPro, boton de correo igual que siempre). */}
+            {/* Pago por uso (Paso 16B, decision de Leonardo 2026-10-06: reemplaza a "Pro", que
+                desaparece de todo lo vendible). Precio principal en USD, GRANDE
+                ("US$0,15 / envío", fijo — nunca depende de la TRM); justo debajo, siempre
+                visible y mas chico, el equivalente en COP de HOY con `copPorUnidadReferencia`
+                (solo informativo: el cobro real de N envios sale de `calcularTotalPorUso` en el
+                panel, nunca de multiplicar esta cifra por N); debajo, "mínimo 50 envíos · tu
+                saldo no vence". */}
             <div className="p-8 rounded-3xl border-2 border-indigo-600 bg-gradient-to-b from-[#1C1F30] to-[#0F1119] text-white relative flex flex-col justify-between shadow-2xl shadow-indigo-600/10">
-              <div className="absolute -top-4 right-6 bg-gradient-to-r from-blue-500 to-indigo-600 text-[10px] font-extrabold uppercase py-1 px-3 rounded-full tracking-wider shadow">
-                {t.proximamenteBadge}
-              </div>
               <div className="space-y-6">
                 <div>
-                  <span className="text-xs font-bold text-indigo-400 uppercase tracking-widest">{t.planProName}</span>
-                  <p className="text-2xl font-extrabold mt-2">{t.planProPrice}</p>
+                  <span className="text-xs font-bold text-indigo-400 uppercase tracking-widest">{t.planPagoPorUsoName}</span>
+                  <p className="text-3xl font-extrabold mt-2">{t.planPagoPorUsoUsdGrande}</p>
+                  {precios ? (
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      {t.precioCopPorEnvioNota
+                        .replace("{cop}", precios.porUso.copPorUnidadReferencia.toLocaleString(language === "en" ? "en-US" : "es-CO"))
+                        .replace("{fecha}", formatearFechaCortaDesdeISO(precios.fechaDesde))}
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      {preciosFallo ? t.planPayGoPriceError : t.planPayGoPriceCargando}
+                    </p>
+                  )}
+                  <p className="text-[11px] font-semibold text-emerald-400 mt-0.5">
+                    {t.planPagoPorUsoMinimoNota.replace("{minimo}", String(precios?.porUso.minimo ?? 50))}
+                  </p>
                 </div>
                 <div className="space-y-3 pt-6 border-t border-dashed border-indigo-500/30">
                   <div className="flex items-center gap-2.5 text-xs text-gray-300">
                     <Check className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>{t.planProFeature1}</span>
+                    <span>{t.planPagoPorUsoFeature1}</span>
                   </div>
                   <div className="flex items-center gap-2.5 text-xs text-gray-300">
                     <Check className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>{t.planProFeature2}</span>
+                    <span>{t.planPagoPorUsoFeature2}</span>
                   </div>
                   <div className="flex items-center gap-2.5 text-xs text-gray-300">
                     <Check className="w-4 h-4 text-emerald-400 shrink-0" />
-                    <span>{t.planProFeature3}</span>
+                    <span>{t.planPagoPorUsoFeature3}</span>
+                  </div>
+                  <div className="flex items-center gap-2.5 text-xs text-gray-300">
+                    <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>{t.planPagoPorUsoFeature4}</span>
                   </div>
                 </div>
               </div>
               <button
-                onClick={handleContactarPro}
+                onClick={() =>
+                  precios?.pagosActivos
+                    ? abrirPanelPorUso()
+                    : handlePurchasePlan("CertiSend Pay-as-you-go", 0.15)
+                }
+                disabled={loadingPlan !== null}
                 className="w-full mt-8 py-3.5 rounded-xl font-extrabold text-xs bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white hover:opacity-95 transition-all shadow-md shadow-indigo-500/30 flex items-center justify-center gap-1.5"
               >
-                <span>{t.proContactar}</span>
+                <span>{precios?.pagosActivos ? t.buyPorUso : t.buyNow}</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Paquete (M30/Tarea 11): el precio grande es el COP real del dia, de /api/precios
-                (precios.cop), nunca un "$0,10 USD por envio" fijo (H5, retirado); mientras no
-                haya llegado, se muestra planPayGoPriceCargando en vez de un numero inventado. */}
+            {/* Paquete (M30/Tarea 11; Paso 16B punto 1): precio principal en USD, GRANDE
+                ("US$15 · 150 envíos", fijo); justo debajo, siempre visible y mas chico, el COP
+                real del dia (precios.paquete.cop), nunca un "$0,10 USD por envio" fijo (H5,
+                retirado); mientras no haya llegado, se muestra planPayGoPriceCargando. */}
             <div className={`p-8 rounded-3xl border flex flex-col justify-between ${
               theme === "dark" ? "bg-[#13151F] border-[#222530]" : "bg-white border-gray-100 shadow-sm"
             }`}>
               <div className="space-y-6">
                 <div>
                   <span className="text-xs font-bold text-purple-500 uppercase tracking-widest">{t.planPayGoName}</span>
+                  <p className="text-3xl font-extrabold mt-2">{t.planPaqueteUsdGrande}</p>
                   {precios ? (
                     <>
-                      <p className="text-3xl font-extrabold mt-2">
-                        {language === "en"
-                          ? `COP ${precios.cop.toLocaleString("en-US")}`
-                          : `$${precios.cop.toLocaleString("es-CO")} COP`}
-                      </p>
                       <p className="text-[11px] text-slate-500 mt-1">
-                        {t.checkoutReferencia.replace("{usd}", String(precios.usd))}
+                        {t.precioCopHoyNota
+                          .replace("{cop}", precios.paquete.cop.toLocaleString(language === "en" ? "en-US" : "es-CO"))
+                          .replace("{fecha}", formatearFechaCortaDesdeISO(precios.fechaDesde))}
                       </p>
                       {/* O3 (Dictamen Abogado_LAP ronda 5, 2026-10-06, Alto; T1 de
                           docs/legal/textos-checkout.md): la tarjeta del plan tambien debe decir
@@ -662,7 +794,7 @@ export default function LandingPage({
                       </p>
                     </>
                   ) : (
-                    <p className="text-lg font-bold mt-2 text-slate-500">
+                    <p className="text-[11px] text-slate-500 mt-1">
                       {preciosFallo ? t.planPayGoPriceError : t.planPayGoPriceCargando}
                     </p>
                   )}
@@ -716,7 +848,7 @@ export default function LandingPage({
           </div>
           {/* Calculadora de costo por envio RETIRADA (R6 de docs/legal/textos-checkout.md v1.2:
               "$0,10 por envío" no existe como precio — H5). Las tarjetas de arriba ya muestran el
-              precio real del Paquete (COP del dia) y que Pro no se vende todavia. */}
+              precio real de cada plan; "Pro" desaparece (Paso 16B). */}
         </div>
       </section>
 
@@ -902,6 +1034,169 @@ export default function LandingPage({
                 className="w-full py-3 rounded-xl font-extrabold text-xs bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-95 transition-all shadow-md shadow-indigo-500/30 flex items-center justify-center gap-2"
               >
                 {pagando ? <Loader2 className="w-4 h-4 animate-spin" /> : <span>{t.checkoutPagar}</span>}
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Panel de checkout de "Pago por uso" (Paso 16B, 2026-10-07). Mismo patron que el panel
+          del Paquete, arriba: selector de cantidad (50-5000, enteros, botones +/-10) con el total
+          en vivo en USD y COP; mismas casillas, con `textoRetractoPorUso` en vez de la del
+          Paquete; "tu saldo no vence" en vez de la nota de vencimiento. */}
+      <AnimatePresence>
+        {panelPorUsoAbierto && precios && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+            onClick={() => !pagandoPorUso && setPanelPorUsoAbierto(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              onClick={(e) => e.stopPropagation()}
+              className={`w-full max-w-md rounded-2xl p-6 space-y-5 border ${
+                theme === "dark" ? "bg-[#13151F] border-[#222530] text-white" : "bg-white border-gray-200 text-gray-900"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <h3 className="font-extrabold text-lg">{t.checkoutPorUsoTitle}</h3>
+                <button
+                  onClick={() => !pagandoPorUso && setPanelPorUsoAbierto(false)}
+                  className="text-slate-400 hover:text-rose-400 p-1"
+                  aria-label={t.checkoutCerrar}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {precioCambioPorUso && (
+                <div className="text-xs rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-500 p-3 leading-relaxed">
+                  {t.checkoutPrecioCambio
+                    .replace("{anterior}", precioCambioPorUso.anterior.toLocaleString(language === "en" ? "en-US" : "es-CO"))
+                    .replace("{nuevo}", precioCambioPorUso.nuevo.toLocaleString(language === "en" ? "en-US" : "es-CO"))}
+                </div>
+              )}
+
+              {/* Selector de cantidad: input numerico + botones -/+ de 10 (PORUSO_PASO_BOTONES),
+                  siempre dentro de [precios.porUso.minimo, precios.porUso.maximo]. */}
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-semibold text-slate-500">{t.checkoutCantidadLabel}</label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => cambiarCantidadPorUso(cantidadPorUso - PORUSO_PASO_BOTONES)}
+                    disabled={pagandoPorUso}
+                    aria-label="-10"
+                    className={`w-9 h-9 rounded-lg font-bold text-sm shrink-0 ${
+                      theme === "dark" ? "bg-[#222530] hover:bg-[#2F3345] text-white" : "bg-gray-100 hover:bg-gray-200 text-gray-800"
+                    }`}
+                  >
+                    −10
+                  </button>
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min={precios.porUso.minimo}
+                    max={precios.porUso.maximo}
+                    step={1}
+                    value={cantidadPorUso}
+                    disabled={pagandoPorUso}
+                    onChange={(e) => {
+                      const valor = Number(e.target.value);
+                      setCantidadPorUso(Number.isFinite(valor) ? valor : precios.porUso.minimo);
+                      setCopPorUsoOverride(null);
+                    }}
+                    className={`flex-1 text-center font-bold text-sm rounded-lg px-3 py-2 border ${
+                      theme === "dark" ? "bg-[#0B0C10] border-[#222530] text-white" : "bg-white border-gray-200 text-gray-900"
+                    }`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => cambiarCantidadPorUso(cantidadPorUso + PORUSO_PASO_BOTONES)}
+                    disabled={pagandoPorUso}
+                    aria-label="+10"
+                    className={`w-9 h-9 rounded-lg font-bold text-sm shrink-0 ${
+                      theme === "dark" ? "bg-[#222530] hover:bg-[#2F3345] text-white" : "bg-gray-100 hover:bg-gray-200 text-gray-800"
+                    }`}
+                  >
+                    +10
+                  </button>
+                </div>
+                {!cantidadPorUsoOk && (
+                  <p className="text-xs text-rose-400 font-semibold">
+                    {t.checkoutCantidadInvalida
+                      .replace("{minimo}", String(precios.porUso.minimo))
+                      .replace("{maximo}", String(precios.porUso.maximo))}
+                  </p>
+                )}
+              </div>
+
+              {/* Total en vivo: USD (solo referencia) + COP exacto (el monto REAL que se cobra,
+                  igual que `copDesdeUsd` en el servidor — ver src/utils/checkout.ts). */}
+              <div className="space-y-1">
+                <p className="text-3xl font-black text-indigo-500">
+                  {copPorUsoMostrado !== null
+                    ? language === "en"
+                      ? `COP ${copPorUsoMostrado.toLocaleString("en-US")}`
+                      : `$${copPorUsoMostrado.toLocaleString("es-CO")} COP`
+                    : "—"}
+                </p>
+                <p className="text-[11px] text-slate-500">
+                  {totalPorUsoVivo && t.checkoutPorUsoTotalUsd.replace("{usd}", totalPorUsoVivo.usd.toFixed(2))} ·{" "}
+                  {t.checkoutTrmNota.replace("{trm}", String(precios.trm)).replace("{fecha}", precios.fechaDesde)}
+                </p>
+              </div>
+
+              <div className="space-y-1.5 text-[11px] leading-relaxed">
+                <p className="font-semibold text-emerald-600 dark:text-emerald-400">{t.checkoutPrecioTotalSinCargos}</p>
+                <p className="text-slate-500">{t.checkoutPagoUnicoNota}</p>
+                <p className="text-amber-600 dark:text-amber-400">{t.checkoutSaldoNoVenceNota}</p>
+                <p className="text-slate-500">{t.checkoutMercadoPagoNota}</p>
+              </div>
+
+              <label className="flex items-start gap-2.5 text-[11px] leading-relaxed cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={aceptaTerminosPorUso}
+                  onChange={(e) => setAceptaTerminosPorUso(e.target.checked)}
+                  className="mt-0.5 accent-indigo-500 shrink-0"
+                />
+                <span>
+                  {copPorUsoMostrado !== null ? textoTerminos(copPorUsoMostrado, language) : ""}{" "}
+                  <a
+                    href="/terminos"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-indigo-500 hover:underline font-semibold"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {t.checkoutVerTerminos}
+                  </a>
+                </span>
+              </label>
+
+              <label className="flex items-start gap-2.5 text-[11px] leading-relaxed cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={aceptaRetractoPorUso}
+                  onChange={(e) => setAceptaRetractoPorUso(e.target.checked)}
+                  className="mt-0.5 accent-indigo-500 shrink-0"
+                />
+                <span>{textoRetractoPorUso(language)}</span>
+              </label>
+
+              {panelPorUsoError && <p className="text-xs text-rose-400 font-semibold">{panelPorUsoError}</p>}
+
+              <button
+                onClick={handlePagarPorUso}
+                disabled={!cantidadPorUsoOk || !puedePagar(aceptaTerminosPorUso, aceptaRetractoPorUso) || pagandoPorUso}
+                className="w-full py-3 rounded-xl font-extrabold text-xs bg-gradient-to-r from-[#2563EB] to-[#8B5CF6] text-white disabled:opacity-40 disabled:cursor-not-allowed hover:opacity-95 transition-all shadow-md shadow-indigo-500/30 flex items-center justify-center gap-2"
+              >
+                {pagandoPorUso ? <Loader2 className="w-4 h-4 animate-spin" /> : <span>{t.checkoutPagar}</span>}
               </button>
             </motion.div>
           </motion.div>

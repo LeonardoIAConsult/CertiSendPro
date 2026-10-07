@@ -3,7 +3,14 @@
 // probarse con node:test sin React ni red — mismo patron que server/trm.ts y server/cuentas.ts.
 import { translations, type Lang } from "./translations";
 
-export type Plan = "gratis" | "paquete" | "pro";
+// Paso 16B (decision del Brain 2026-10-06, cableado en servidor desde la Tarea 16A-2): "pro"
+// desaparece de todo lo vendible y de este tipo; "porUso" se agrega ("Pago por uso", US$0,15 por
+// envio, saldo SIN vencimiento y ACUMULABLE — ver `saldoPorUso` en `CuentaInfo`, abajo). En la
+// practica `cuenta.plan` solo pasa a "porUso" si el servidor algun dia lo asigna asi (hoy
+// `activarPorUsoSiNoProcesadoTx`, server/cuentas.ts, NUNCA toca `cuenta.plan`: solo suma a
+// `saldoPorUso`), pero el tipo lo admite para no asumir un invariante del servidor que esta
+// logica no controla.
+export type Plan = "gratis" | "paquete" | "porUso";
 
 /** Forma de lo que devuelve GET /api/cuenta (server.ts), lo unico que esta logica necesita. */
 export interface CuentaInfo {
@@ -12,6 +19,10 @@ export interface CuentaInfo {
   /** ISO 8601, o null (Gratis, o un plan sin fecha de vencimiento). */
   vence: string | null;
   renueva: boolean;
+  /** Paso 16B: saldo del plan "Pago por uso" — SIN vencimiento, ACUMULABLE entre compras. Mismo
+   * campo que expone GET /api/cuenta desde la Tarea 16A-2 (`?? 0` para cuentas viejas: ver
+   * server.ts). */
+  saldoPorUso: number;
   /**
    * Ultimo pago que activo/renovo el plan (G6, NO-GO del REVISOR_EXTERNO_LAP sobre la Tarea 10,
    * 2026-10-05): SOLO `{id, fecha}`, igual que lo que devuelve GET /api/cuenta (server.ts) —
@@ -42,41 +53,48 @@ export function formatearFechaBogota(iso: string, conAnio: boolean): string {
 }
 
 export interface EstadoPlanTexto {
+  /** Estado del Paquete: su texto si esta vigente con saldo, o Gratis si no (nunca mezcla el
+   * saldo Por uso — ver `saldoPorUsoTexto`, abajo: un Paquete vigente y saldo Por uso pueden
+   * coexistir, Paso 16B). */
   titulo: string;
-  /** Nota adicional (hoy solo el Paquete: los lotes <=15 no gastan saldo, R3-1). */
+  /** Nota adicional del Paquete (los lotes <=15 no gastan saldo, R3-1). */
   nota?: string;
+  /** "Saldo por uso: N envíos (no vence)" — `undefined` si `saldoPorUso` es 0 (nada que mostrar).
+   * Paso 16B: "Mi plan" ahora muestra el Paquete Y el saldo Por uso por separado, nunca uno
+   * sustituyendo al otro (las dos fuentes son independientes y acumulables entre si). */
+  saldoPorUsoTexto?: string;
 }
 
 /**
- * Solo la parte de FECHA de la vigencia: tiene `vence` Y esa fecha todavia no paso. Un plan de
- * pago sin `vence` (dato incompleto o a medio camino de activarse) NUNCA se trata como vigente —
- * ver la nota de la Tarea 8 en cuentas.ts sobre por que esto importa tambien para Pro, no solo
- * para Paquete. Pieza interna de `planVigenteConSaldo` (el criterio COMPLETO, de abajo); no se
- * usa sola fuera de este archivo porque a un Paquete le falta todavia mirar el saldo.
+ * Solo la parte de FECHA de la vigencia del PAQUETE: `cuenta.plan === "paquete"` Y tiene `vence`
+ * Y esa fecha todavia no paso. Un Paquete sin `vence` (dato incompleto o a medio camino de
+ * activarse) NUNCA se trata como vigente. El saldo Por uso (Paso 16B) nunca pasa por aqui: no
+ * tiene fecha de vencimiento, por diseño (ver `planVigenteConSaldo`, abajo).
  */
-function planVigente(cuenta: CuentaInfo, ahora: Date): boolean {
-  return cuenta.vence !== null && new Date(cuenta.vence).getTime() > ahora.getTime();
+function paqueteVigente(cuenta: CuentaInfo, ahora: Date): boolean {
+  return cuenta.plan === "paquete" && cuenta.vence !== null && new Date(cuenta.vence).getTime() > ahora.getTime();
 }
 
 /**
- * UNICO criterio de que un plan de pago este vigente Y USABLE ahora mismo (G6, NO-GO del
- * REVISOR_EXTERNO_LAP sobre la Tarea 10: `planActivo` solo miraba `planVigente` y por eso un
- * Paquete con saldo en 0 pasaba como "activo" para el sondeo del regreso de Mercado Pago, aunque
- * el badge del header ya mostrara "Plan Gratis" via `formatearEstadoPlan`). Pro: `vence` en el
- * futuro. Paquete: ADEMAS `enviosRestantes > 0` — mismo criterio que usa `decidirLote` en
- * server/cuentas.ts. Compartido por `formatearEstadoPlan` y `planActivo` para que nunca puedan
- * volver a contradecirse.
+ * UNICO criterio de que la cuenta tenga saldo pagado VIGENTE Y USABLE ahora mismo para un lote de
+ * mas de 15 certificados — Paso 16B: mismo criterio que `decidirLote` en server/cuentas.ts
+ * (`disponiblePaquete + disponiblePorUso`), adaptado a "hay algo usable" en vez de "cuanto hay":
+ * el Paquete aporta su `enviosRestantes` SOLO si esta vigente por fecha (G6, NO-GO del
+ * REVISOR_EXTERNO_LAP sobre la Tarea 10: antes `planActivo` solo miraba la fecha y un Paquete con
+ * saldo en 0 pasaba como "activo"); el saldo Por uso SIEMPRE aporta porque nunca vence. Compartido
+ * por `formatearEstadoPlan` y `planActivo` para que nunca puedan volver a contradecirse.
  */
-function planVigenteConSaldo(cuenta: CuentaInfo, ahora: Date): boolean {
-  if (cuenta.plan === "pro") return planVigente(cuenta, ahora);
-  if (cuenta.plan === "paquete") return planVigente(cuenta, ahora) && cuenta.enviosRestantes > 0;
-  return false;
+export function planVigenteConSaldo(cuenta: CuentaInfo, ahora: Date): boolean {
+  const saldoPaquete = paqueteVigente(cuenta, ahora) ? cuenta.enviosRestantes : 0;
+  return saldoPaquete > 0 || cuenta.saldoPorUso > 0;
 }
 
 /**
- * Texto del plan que ve el usuario (spec §5 "Usar la app segun el plan"). Un Paquete o Pro
- * vencido (o sin `vence`) se muestra igual que Gratis: mismo trato que `decidirLote` en
- * server/cuentas.ts, para que la app nunca prometa un plan que el servidor ya no reconoce.
+ * Texto del plan que ve el usuario (spec §5 "Usar la app segun el plan"; Paso 16B). Un Paquete
+ * vencido, sin `vence` o sin saldo se muestra igual que Gratis — mismo trato que `decidirLote` en
+ * server/cuentas.ts, para que la app nunca prometa un plan que el servidor ya no reconoce. El
+ * saldo Por uso se informa APARTE (`saldoPorUsoTexto`): no sustituye nunca el titulo del Paquete,
+ * ni al reves — las dos fuentes son independientes.
  */
 export function formatearEstadoPlan(
   cuenta: CuentaInfo,
@@ -84,45 +102,46 @@ export function formatearEstadoPlan(
   ahora: Date = new Date()
 ): EstadoPlanTexto {
   const t = translations[lang];
+  const paqueteOk = paqueteVigente(cuenta, ahora) && cuenta.enviosRestantes > 0;
 
-  if (cuenta.plan === "pro") {
-    if (!planVigenteConSaldo(cuenta, ahora)) return { titulo: t.miPlanGratis };
-    return { titulo: t.miPlanPro.replace("{fecha}", formatearFechaBogota(cuenta.vence!, false)) };
-  }
+  const titulo = paqueteOk
+    ? t.miPlanPaquete
+        .replace("{restantes}", String(cuenta.enviosRestantes))
+        .replace("{fecha}", formatearFechaBogota(cuenta.vence!, true))
+    : t.miPlanGratis;
+  const nota = paqueteOk ? t.miPlanPaqueteNota : undefined;
+  const saldoPorUsoTexto =
+    cuenta.saldoPorUso > 0 ? t.miPlanSaldoPorUso.replace("{saldo}", String(cuenta.saldoPorUso)) : undefined;
 
-  if (cuenta.plan === "paquete") {
-    if (planVigenteConSaldo(cuenta, ahora)) {
-      return {
-        titulo: t.miPlanPaquete
-          .replace("{restantes}", String(cuenta.enviosRestantes))
-          .replace("{fecha}", formatearFechaBogota(cuenta.vence!, true)),
-        nota: t.miPlanPaqueteNota,
-      };
-    }
-    return { titulo: t.miPlanGratis };
-  }
-
-  return { titulo: t.miPlanGratis };
+  return { titulo, nota, saldoPorUsoTexto };
 }
 
 export type MotivoRechazoLote = "limite_gratis" | "saldo_insuficiente";
 
 /**
- * Mensaje en lenguaje claro cuando el servidor rechaza un lote antes de enviar nada (spec §5):
- * el motivo exacto ("tienes 40, el lote es de 60" para saldo_insuficiente) mas las opciones
- * (dividir el lote o ver los planes).
+ * Mensaje en lenguaje claro cuando el servidor rechaza un lote antes de enviar nada (spec §5;
+ * Paso 16B: el motivo "saldo_insuficiente" ahora menciona las DOS fuentes de saldo pagado — el
+ * Paquete (`enviosRestantes`, el campo que ya devolvia el servidor) y el saldo Por uso
+ * (`saldoPorUso`, leido de la cuenta YA cargada en el cliente — `/api/lote/iniciar` no lo manda
+ * en su respuesta de rechazo, pero `App.tsx` ya tiene la cuenta completa de `fetchCuenta`) — mas
+ * las opciones (dividir el lote o ver los planes).
  */
 export function formatearMotivoRechazoLote(
   motivo: MotivoRechazoLote | undefined,
   enviosRestantes: number | undefined,
+  saldoPorUso: number | undefined,
   cantidadLote: number,
   lang: Lang
 ): string {
   const t = translations[lang];
+  const paquete = enviosRestantes ?? 0;
+  const porUso = saldoPorUso ?? 0;
   const motivoTexto =
     motivo === "saldo_insuficiente"
       ? t.batchLimitSaldo
-          .replace("{restantes}", String(enviosRestantes ?? 0))
+          .replace("{paquete}", String(paquete))
+          .replace("{porUso}", String(porUso))
+          .replace("{total}", String(paquete + porUso))
           .replace("{lote}", String(cantidadLote))
       : t.batchLimitFree;
   return `${motivoTexto} ${t.batchLimitOpciones}`;

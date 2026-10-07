@@ -31,7 +31,8 @@ import {
   TableProperties,
   Globe,
   Sun,
-  Moon
+  Moon,
+  Coins
 } from "lucide-react";
 import { initAuth, googleSignIn, logout, getAccessToken, getIdToken } from "./firebaseAuth";
 import { Recipient, CertificatePage } from "./types";
@@ -287,6 +288,10 @@ export default function App() {
         enviosRestantes: data.enviosRestantes,
         vence: data.vence,
         renueva: data.renueva,
+        // Paso 16B: saldo del plan "Pago por uso" — ya expuesto por GET /api/cuenta desde la
+        // Tarea 16A-2 (`?? 0`, mismo trato que el servidor, para cuentas leidas antes de este
+        // campo o cualquier respuesta rara).
+        saldoPorUso: data.saldoPorUso ?? 0,
         ultimoPago: data.ultimoPago ?? null,
       };
       setCuenta(leida);
@@ -1513,7 +1518,11 @@ export default function App() {
         // muestra ESE texto; solo se usa el formateador de motivos de plan cuando no hay uno.
         const mensaje = dataLote.error
           ? String(dataLote.error)
-          : formatearMotivoRechazoLote(dataLote.motivo, dataLote.enviosRestantes, matchedCount, language);
+          : // Paso 16B: el mensaje de "saldo_insuficiente" menciona las DOS fuentes de saldo
+            // pagado — `dataLote.enviosRestantes` (Paquete) viene de la respuesta de
+            // /api/lote/iniciar; `cuenta?.saldoPorUso` viene de la cuenta YA cargada en el
+            // cliente (/api/lote/iniciar no manda el saldo Por uso en su respuesta de rechazo).
+            formatearMotivoRechazoLote(dataLote.motivo, dataLote.enviosRestantes, cuenta?.saldoPorUso, matchedCount, language);
         addLog(mensaje, "error");
         triggerBanner("error", mensaje);
         // GRAVE 3(d) (correccion vuelta 31, 2026-10-06): un 403 con `motivo: "autorizacion"`
@@ -2026,13 +2035,24 @@ export default function App() {
           {!needsAuth && user && !user.isGuest && cuenta && (() => {
             const estadoPlan = formatearEstadoPlan(cuenta, language);
             return (
-              <div
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition-colors ${isDark ? "bg-[#16181D] border border-[#2D2F36]" : "bg-gray-50 border border-gray-200"}`}
-                title={estadoPlan.nota || ""}
-              >
-                <Shield className="w-3.5 h-3.5 text-indigo-400" />
-                <span className="text-[10px] font-mono">{estadoPlan.titulo}</span>
-              </div>
+              <>
+                <div
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition-colors ${isDark ? "bg-[#16181D] border border-[#2D2F36]" : "bg-gray-50 border border-gray-200"}`}
+                  title={estadoPlan.nota || ""}
+                >
+                  <Shield className="w-3.5 h-3.5 text-indigo-400" />
+                  <span className="text-[10px] font-mono">{estadoPlan.titulo}</span>
+                </div>
+                {/* Paso 16B: el saldo de "Pago por uso" se muestra APARTE del Paquete (las dos
+                    fuentes son independientes y acumulables entre si — nunca una sustituye a la
+                    otra en "Mi plan"). */}
+                {estadoPlan.saldoPorUsoTexto && (
+                  <div className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition-colors ${isDark ? "bg-[#16181D] border border-[#2D2F36]" : "bg-gray-50 border border-gray-200"}`}>
+                    <Coins className="w-3.5 h-3.5 text-amber-400" />
+                    <span className="text-[10px] font-mono">{estadoPlan.saldoPorUsoTexto}</span>
+                  </div>
+                )}
+              </>
             );
           })()}
 
