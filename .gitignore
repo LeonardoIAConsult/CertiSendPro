@@ -10,3 +10,6 @@ CertiSend_Contenido/
 
 # Borradores legales con [PENDIENTE]: copia versionada en el Brain privado hasta aprobarlos (2026-10-05)
 docs/legal/
+
+# cache local de firebase-tools (se regenera en cada deploy)
+.firebase/
