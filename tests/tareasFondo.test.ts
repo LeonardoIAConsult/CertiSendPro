@@ -16,6 +16,7 @@ import {
   barrerTodosLosPagosPendientes,
   manejarBarridoAcusesTarea,
   datosReintentoDesdePago,
+  datosReintentoPorUsoDesdePago,
   registrarRutasTareas,
   verificarRutaTareasRegistrada,
   RUTA_BARRIDO_ACUSES,
@@ -88,7 +89,9 @@ function pagoFalso(overrides: Partial<PagoProcesadoAcuse> = {}): PagoProcesadoAc
     trm: 3273.49,
     fechaTrm: "2026-10-03",
     fecha: Timestamp.now(),
+    tipo: "paquete",
     vence: Timestamp.now(),
+    cantidad: null,
     correoComprador: null,
     revertido: false,
     avisoAcuse20h: null,
@@ -105,6 +108,18 @@ test("datosReintentoDesdePago: usa uidRespaldo si el pago no trae uid propio", (
 test("datosReintentoDesdePago: propaga 'revertido'", () => {
   const d = datosReintentoDesdePago(pagoFalso({ revertido: true }));
   assert.equal(d.revertido, true);
+});
+
+// Paso 16A-3: equivalente porUso de las dos pruebas de arriba.
+test("datosReintentoPorUsoDesdePago: usa uidRespaldo si el pago no trae uid propio", () => {
+  const d = datosReintentoPorUsoDesdePago(pagoFalso({ uid: null, tipo: "porUso", cantidad: 10, vence: null }), "uid-respaldo");
+  assert.equal(d.uid, "uid-respaldo");
+});
+
+test("datosReintentoPorUsoDesdePago: propaga 'revertido' y 'cantidad'", () => {
+  const d = datosReintentoPorUsoDesdePago(pagoFalso({ tipo: "porUso", cantidad: 25, vence: null, revertido: true }));
+  assert.equal(d.revertido, true);
+  assert.equal(d.cantidad, 25);
 });
 
 // ── barrerTodosLosPagosPendientes (barrido completo paginado para el endpoint de tareas) ───────
@@ -126,6 +141,16 @@ function docCrudo(id: string, overrides: Record<string, any> = {}) {
   };
 }
 
+/** Paso 16A-3: mismo doc crudo pero `tipo:"porUso"` — sin `vence` (ese tipo no vence), con
+ * `cantidad` en su lugar (igual que guarda `activarPorUsoSiNoProcesadoTx`, server/cuentas.ts). */
+function docCrudoPorUso(id: string, overrides: Record<string, any> = {}) {
+  const { vence, ...base } = docCrudo(id).data;
+  return {
+    id,
+    data: { ...base, tipo: "porUso", cantidad: 10, ...overrides },
+  };
+}
+
 test("barrerTodosLosPagosPendientes recorre varias paginas hasta que una sale vacia", async () => {
   const paginas: PaginaPagos[] = [
     { docs: [docCrudo("p1"), docCrudo("p2")], cursorSiguiente: "cursor-1" },
@@ -141,9 +166,10 @@ test("barrerTodosLosPagosPendientes recorre varias paginas hasta que una sale va
       cursoresPedidos.push(cursor);
       return paginas[indice++];
     },
-    reintentar: async (datos) => {
+    reintentarPaquete: async (datos) => {
       reintentados.push(datos.paymentId);
     },
+    reintentarPorUso: async () => {},
   });
 
   assert.deepEqual(cursoresPedidos, [null, "cursor-1", "cursor-2"]);
@@ -160,7 +186,8 @@ test("barrerTodosLosPagosPendientes se detiene si no hay cursorSiguiente aunque 
       llamadas++;
       return { docs: [docCrudo("p1")], cursorSiguiente: null };
     },
-    reintentar: async () => {},
+    reintentarPaquete: async () => {},
+    reintentarPorUso: async () => {},
   });
   assert.equal(llamadas, 1, "sin cursorSiguiente, no debe pedir una segunda pagina");
   assert.equal(resultado.paginas, 1);
@@ -174,7 +201,8 @@ test("barrerTodosLosPagosPendientes respeta maxPaginas aunque el cursor siga dis
         llamadas++;
         return { docs: [docCrudo(`p${llamadas}`)], cursorSiguiente: `cursor-${llamadas}` };
       },
-      reintentar: async () => {},
+      reintentarPaquete: async () => {},
+      reintentarPorUso: async () => {},
     },
     100,
     3 // maxPaginas de prueba
@@ -197,7 +225,8 @@ test("barrerTodosLosPagosPendientes se corta al agotar presupuestoMs y marca det
   const resultado = await barrerTodosLosPagosPendientes(
     {
       obtenerPagina: async () => pagina,
-      reintentar: async (datos) => { reintentados.push(datos.paymentId); },
+      reintentarPaquete: async (datos) => { reintentados.push(datos.paymentId); },
+      reintentarPorUso: async () => {},
     },
     100,
     50,
@@ -211,7 +240,7 @@ test("barrerTodosLosPagosPendientes se corta al agotar presupuestoMs y marca det
 test("barrerTodosLosPagosPendientes: dentro del presupuesto -> detenidoPorTiempo:false", async () => {
   const pagina = { docs: [docCrudo("p1")], cursorSiguiente: null };
   const resultado = await barrerTodosLosPagosPendientes(
-    { obtenerPagina: async () => pagina, reintentar: async () => {} },
+    { obtenerPagina: async () => pagina, reintentarPaquete: async () => {}, reintentarPorUso: async () => {} },
     100,
     50,
     540_000,
@@ -230,9 +259,10 @@ test("barrerTodosLosPagosPendientes salta un pago revertido con correoComprador 
         cursorSiguiente: "c1",
       };
     },
-    reintentar: async (datos) => {
+    reintentarPaquete: async (datos) => {
       reintentados.push(datos.paymentId);
     },
+    reintentarPorUso: async () => {},
   });
   assert.deepEqual(reintentados, ["normal"], "el pago revertido no debe reintentarse");
   assert.equal(resultado.revisados, 2, "pero SI se cuenta como revisado");
@@ -252,9 +282,10 @@ test("barrerTodosLosPagosPendientes salta correoComprador='enviado' y candidatos
         cursorSiguiente: "c1",
       };
     },
-    reintentar: async (datos) => {
+    reintentarPaquete: async (datos) => {
       reintentados.push(datos.paymentId);
     },
+    reintentarPorUso: async () => {},
   });
   assert.deepEqual(reintentados, ["elegible"]);
   assert.equal(resultado.revisados, 3);
@@ -272,11 +303,77 @@ test("barrerTodosLosPagosPendientes: la decision de reintentar/alertar/abandonar
       const haceCienHoras = Timestamp.fromMillis(Date.now() - 100 * 3600_000);
       return { docs: [docCrudo("viejo", { fecha: haceCienHoras })], cursorSiguiente: null };
     },
-    reintentar: async (datos) => {
+    reintentarPaquete: async (datos) => {
       reintentados.push(datos.paymentId);
     },
+    reintentarPorUso: async () => {},
   });
   assert.deepEqual(reintentados, ["viejo"], "se le pasa a reintentar sin importar su antiguedad");
+});
+
+// ── Paso 16A-3: enrutamiento por `tipo` dentro del barrido (Paquete vs Pago por uso) ────────────
+// Oraculo de la orden: rutear un pago porUso a la variante del Paquete (o viceversa) tiene que
+// hacer caer una de estas tres pruebas — cada una afirma CUAL de los dos deps se llamo y CUAL no.
+
+test("barrerTodosLosPagosPendientes: un pago porUso pendiente se reintenta con la variante porUso (nunca con la del Paquete)", async () => {
+  let paqueteLlamado = false;
+  const porUsoRecibidos: Array<{ paymentId: string; cantidad: number }> = [];
+  const resultado = await barrerTodosLosPagosPendientes({
+    obtenerPagina: async (cursor) => {
+      if (cursor) return { docs: [], cursorSiguiente: null };
+      return { docs: [docCrudoPorUso("pu-1", { cantidad: 25 })], cursorSiguiente: null };
+    },
+    reintentarPaquete: async () => {
+      paqueteLlamado = true;
+    },
+    reintentarPorUso: async (datos) => {
+      porUsoRecibidos.push({ paymentId: datos.paymentId, cantidad: datos.cantidad });
+    },
+  });
+  assert.equal(paqueteLlamado, false, "un pago porUso NUNCA debe caer en la variante del Paquete");
+  assert.deepEqual(porUsoRecibidos, [{ paymentId: "pu-1", cantidad: 25 }]);
+  assert.equal(resultado.reintentados, 1);
+});
+
+test("barrerTodosLosPagosPendientes: un porUso revertido no se reintenta (ninguna variante)", async () => {
+  let paqueteLlamado = false;
+  let porUsoLlamado = false;
+  const resultado = await barrerTodosLosPagosPendientes({
+    obtenerPagina: async (cursor) => {
+      if (cursor) return { docs: [], cursorSiguiente: null };
+      return { docs: [docCrudoPorUso("pu-revertido", { revertido: true })], cursorSiguiente: null };
+    },
+    reintentarPaquete: async () => {
+      paqueteLlamado = true;
+    },
+    reintentarPorUso: async () => {
+      porUsoLlamado = true;
+    },
+  });
+  assert.equal(paqueteLlamado, false);
+  assert.equal(porUsoLlamado, false, "un porUso revertido no debe reintentarse");
+  assert.equal(resultado.revisados, 1, "pero SI se cuenta como revisado");
+  assert.equal(resultado.reintentados, 0);
+});
+
+test("barrerTodosLosPagosPendientes: un Paquete sigue usando su propia variante (nunca la de porUso)", async () => {
+  let porUsoLlamado = false;
+  const paqueteRecibidos: string[] = [];
+  const resultado = await barrerTodosLosPagosPendientes({
+    obtenerPagina: async (cursor) => {
+      if (cursor) return { docs: [], cursorSiguiente: null };
+      return { docs: [docCrudo("paq-1")], cursorSiguiente: null };
+    },
+    reintentarPaquete: async (datos) => {
+      paqueteRecibidos.push(datos.paymentId);
+    },
+    reintentarPorUso: async () => {
+      porUsoLlamado = true;
+    },
+  });
+  assert.equal(porUsoLlamado, false, "un Paquete NUNCA debe caer en la variante de porUso");
+  assert.deepEqual(paqueteRecibidos, ["paq-1"]);
+  assert.equal(resultado.reintentados, 1);
 });
 
 // ── manejarBarridoAcusesTarea (el handler del endpoint protegido) ───────────────────────────────

@@ -699,9 +699,18 @@ export interface PagoProcesadoAcuse {
   fechaTrm: string | null;
   /** Fecha del PAGO (nunca de cuando se proceso el aviso). */
   fecha: Timestamp;
+  /** Paso 16A-3: "paquete" | "porUso", leido de `pagosProcesados/{id}.tipo` (ver
+   * `activarPorUsoSiNoProcesadoTx`, que SI lo guarda). Un pago de Paquete viejo nunca guardo este
+   * campo — se interpreta como "paquete", la unica variante que existia antes de la Tarea 16A-1.
+   * `server/tareasFondo.ts` lo usa para enrutar a la variante correcta del reintento del acuse. */
+  tipo: "paquete" | "porUso";
   /** Fecha de vencimiento del Paquete que activo este pago (= `cuenta.vence` en el momento de la
-   * activacion — puede diferir del `vence` ACTUAL de la cuenta si hubo una compra posterior). */
-  vence: Timestamp;
+   * activacion — puede diferir del `vence` ACTUAL de la cuenta si hubo una compra posterior).
+   * `null` para un pago `tipo:"porUso"` (ese saldo nunca vence). */
+  vence: Timestamp | null;
+  /** Cantidad de envios comprados — solo para `tipo:"porUso"` (ver `activarPorUsoSiNoProcesadoTx`);
+   * `null` para un pago de Paquete. */
+  cantidad: number | null;
   /** "enviado" | "reclamado" | null. */
   correoComprador: string | null;
   /** G3 (correccion NO-GO vuelta 30): true si Mercado Pago reembolso/contracargo este pago
@@ -727,7 +736,9 @@ export function pagoProcesadoAcuseDesdeDoc(id: string, data: Record<string, any>
     trm: data.trm,
     fechaTrm: data.fechaTrm ?? null,
     fecha: data.fecha,
-    vence: data.vence,
+    tipo: data.tipo === "porUso" ? "porUso" : "paquete",
+    vence: data.vence ?? null,
+    cantidad: typeof data.cantidad === "number" ? data.cantidad : null,
     correoComprador: data.correoComprador ?? null,
     revertido: data.revertido === true,
     avisoAcuse20h: data.avisoAcuse20h ?? null,

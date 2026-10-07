@@ -21,13 +21,19 @@ import {
   paginaPagosProcesados as paginaPagosProcesadosReal,
   type PagoProcesadoAcuse,
 } from "./cuentas";
-import { reintentarAcusePendiente as reintentarAcusePendienteReal, type DatosReintentoAcusePendiente } from "./notificaciones";
+import {
+  reintentarAcusePendiente as reintentarAcusePendienteReal,
+  reintentarAcusePorUsoPendiente as reintentarAcusePorUsoPendienteReal,
+  type DatosReintentoAcusePendiente,
+  type DatosReintentoAcusePorUsoPendiente,
+} from "./notificaciones";
 import { verificarTokenScheduler as verificarTokenSchedulerReal } from "./schedulerAuth";
 
-/** Reconstruye lo que `reintentarAcusePendiente` necesita a partir de un `PagoProcesadoAcuse` ya
- * leido de Firestore (via `pagoProcesadoAcuseDesdeDoc`). `uidRespaldo` solo importa para pruebas
- * viejas que no guardaban `uid` en el pago; en produccion un pago sin `uid` se descarta antes de
- * llegar aqui (ver `esCandidatoBarridoAcuse`). */
+/** Reconstruye lo que `reintentarAcusePendiente` necesita a partir de un `PagoProcesadoAcuse` de
+ * Paquete ya leido de Firestore (via `pagoProcesadoAcuseDesdeDoc`). `uidRespaldo` solo importa
+ * para pruebas viejas que no guardaban `uid` en el pago; en produccion un pago sin `uid` se
+ * descarta antes de llegar aqui (ver `esCandidatoBarridoAcuse`). SOLO para `pago.tipo==="paquete"`
+ * (`pago.vence` es `null` para un pago porUso — ver `datosReintentoPorUsoDesdePago`). */
 export function datosReintentoDesdePago(pago: PagoProcesadoAcuse, uidRespaldo?: string): DatosReintentoAcusePendiente {
   return {
     paymentId: pago.paymentId,
@@ -37,7 +43,25 @@ export function datosReintentoDesdePago(pago: PagoProcesadoAcuse, uidRespaldo?: 
     trm: pago.trm,
     fechaTrm: pago.fechaTrm,
     fecha: pago.fecha.toDate(),
-    vence: pago.vence.toDate(),
+    vence: pago.vence!.toDate(),
+    revertido: pago.revertido,
+  };
+}
+
+/** Paso 16A-3: equivalente de `datosReintentoDesdePago` para un pago `tipo:"porUso"` — reconstruye
+ * lo que `reintentarAcusePorUsoPendiente` (server/notificaciones.ts) necesita, con `cantidad` en
+ * vez del `vence` que no existe para este tipo. Mismo `uidRespaldo` por simetria con el de arriba
+ * (nunca se ejerce en produccion: `esCandidatoBarridoAcuse` ya descarta un pago sin `uid`). */
+export function datosReintentoPorUsoDesdePago(pago: PagoProcesadoAcuse, uidRespaldo?: string): DatosReintentoAcusePorUsoPendiente {
+  return {
+    paymentId: pago.paymentId,
+    uid: pago.uid ?? uidRespaldo!,
+    referenciaId: pago.referenciaId,
+    cantidad: pago.cantidad ?? 0,
+    cop: pago.cop,
+    trm: pago.trm,
+    fechaTrm: pago.fechaTrm,
+    fecha: pago.fecha.toDate(),
     revertido: pago.revertido,
   };
 }
@@ -65,12 +89,16 @@ export interface PaginaPagos {
 
 export interface DepsBarridoCompleto {
   obtenerPagina(cursor: unknown, tamanoPagina: number): Promise<PaginaPagos>;
-  reintentar(datos: DatosReintentoAcusePendiente): Promise<void>;
+  /** Paso 16A-3: variante de Paquete del reintento — solo para `pago.tipo==="paquete"`. */
+  reintentarPaquete(datos: DatosReintentoAcusePendiente): Promise<void>;
+  /** Paso 16A-3: variante de Pago por uso del reintento — solo para `pago.tipo==="porUso"`. */
+  reintentarPorUso(datos: DatosReintentoAcusePorUsoPendiente): Promise<void>;
 }
 
 const depsBarridoCompletoReales: DepsBarridoCompleto = {
   obtenerPagina: paginaPagosProcesadosReal,
-  reintentar: reintentarAcusePendienteReal,
+  reintentarPaquete: reintentarAcusePendienteReal,
+  reintentarPorUso: reintentarAcusePorUsoPendienteReal,
 };
 
 export interface ResultadoBarridoCompleto {
@@ -136,7 +164,13 @@ export async function barrerTodosLosPagosPendientes(
       if (!esCandidatoBarridoAcuse(doc.data)) continue;
       if (!doc.data.uid) continue; // pago sin uid guardado: nada que reconstruir.
       const pago = pagoProcesadoAcuseDesdeDoc(doc.id, doc.data);
-      await deps.reintentar(datosReintentoDesdePago(pago));
+      // Paso 16A-3: enruta por `pago.tipo` a la variante correcta — un pago `porUso` NUNCA debe
+      // caer en `reintentarPaquete` (le falta `vence`, y reconstruiria mal el acuse).
+      if (pago.tipo === "porUso") {
+        await deps.reintentarPorUso(datosReintentoPorUsoDesdePago(pago));
+      } else {
+        await deps.reintentarPaquete(datosReintentoDesdePago(pago));
+      }
       reintentados++;
     }
 
