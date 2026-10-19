@@ -101,6 +101,15 @@ LLM_HOSTS = re.compile(
     r"aiplatform\.googleapis\.com|firebasevertexai\.googleapis\.com|api\.groq\.com|"
     r"api\.mistral\.ai|openrouter\.ai/api|api\.deepseek\.com|api\.x\.ai)"
 )
+# SDK de IA EN USO en el cliente (REVISOR 2026-10-19, 3a variante Firebase/Gemini): el patron AI
+# Studio carga @google/genai desde esm.sh por importmap, el bundle no trae el host y la llave va tras
+# `apiKey:` como la de Firebase. Se decide por el USO, no por el nombre: si hay SDK de IA en el
+# archivo, es llamada directa (ALTA) y toda AIza de ese archivo es llave de IA (CRITICA).
+AI_SDK = re.compile(
+    r"\bgenerateContent(?:Stream)?\b|\bGoogleGenAI\b|\bGoogleGenerativeAI\b|\bgetGenerativeModel\b|"
+    r"@google/genai|@google/generative-ai|\bdangerouslyAllowBrowser\b|anthropic-dangerous-direct-browser-access|"
+    r"esm\.sh/(?:@google/genai|@google/generative-ai|openai|@anthropic-ai)"
+)
 PROMPT_STRONG = re.compile(
     # Claves con o sin comillas: en JS minificado van sueltas, en el payload RSC van en JSON.
     r"(?:role[\"']?\s*:\s*[\"']system[\"']\s*,\s*[\"']?(?:content|parts)[\"']?\s*:\s*[\"'`\[{]|"
@@ -206,6 +215,10 @@ def scan_text(rep, target, text, api_paths):
         for m in rx.finditer(text):
             line, _ = where(text, m.start())
             rep.add("CRITICA", "SECRET_IN_CLIENT", target, line, f"{name} {snippet(text, m, True)}")
+    sdk = AI_SDK.search(text)
+    if sdk:
+        rep.add("ALTA", "LLM_DIRECT_CLIENT", target, where(text, sdk.start())[0],
+                f"el navegador habla con sdk:{sdk.group(0)}: SDK de IA en el cliente; pasar por /api propia")
     seen_keys = set()
     for m in FIREBASE_KEY.finditer(text):
         k = m.group(0)
@@ -214,8 +227,8 @@ def scan_text(rep, target, text, api_paths):
         seen_keys.add(k)
         line = where(text, m.start())[0]
         before = text[max(0, m.start() - 40): m.start()]
-        firebase = FIREBASE_APIKEY.search(before[-20:]) or (
-            not AI_KEY_NAME.search(before) and FIREBASE_APPID.search(text[max(0, m.start() - 200): m.end() + 200]))
+        firebase = not sdk and (FIREBASE_APIKEY.search(before[-20:]) or (
+            not AI_KEY_NAME.search(before) and FIREBASE_APPID.search(text[max(0, m.start() - 200): m.end() + 200])))
         if firebase:
             rep.add("INFO", "FIREBASE_WEB_KEY", target, line,
                     f"{redact(k)} dentro de config de Firebase: publica por diseno (protege App Check + reglas)")
@@ -261,6 +274,9 @@ def run_build(root, rep, ignore=()):
     # prompt en un route handler es correcto y no se marca (REVISOR 2026-10-19, grave 2).
     next_root = os.path.isdir(os.path.join(root, "static")) and os.path.isdir(os.path.join(root, "server", "app"))
     walks = [(os.path.join(root, "static"), None), (os.path.join(root, "server", "app"), (".html", ".rsc"))] if next_root else [(root, None)]
+    # Next sirve public/ tal cual (REVISOR 2026-10-19): un public/x.js o .map tambien es superficie.
+    if next_root and os.path.isdir(os.path.join(root, "..", "public")):
+        walks.append((os.path.join(root, "..", "public"), None))
     api_paths, n = set(), 0
     for base, only in walks:
         for dirpath, _, files in os.walk(base):
@@ -270,7 +286,9 @@ def run_build(root, rep, ignore=()):
                 if only and not fn.lower().endswith(only):
                     continue
                 # --ignore = espejo del `ignore` del host (Firebase Hosting no sirve server.cjs*).
-                if any(fnmatch.fnmatch(rel, g) or fnmatch.fnmatch(fn, g) for g in ignore):
+                # Solo la ruta relativa: comparar el nombre suelto saltaba assets/server.cjs-x.js,
+                # que el host SI sirve (el ignore de Firebase es por ruta).
+                if any(fnmatch.fnmatch(rel, g) for g in ignore):
                     continue
                 if fn.endswith(".map"):
                     body = read_text(p) or ""
@@ -384,7 +402,8 @@ def run_url(base, paths, rep, probe):
 
 EXPECTED_VULN = {
     "SECRET_IN_CLIENT:anthropic", "SECRET_IN_CLIENT:mercadopago-access", "SECRET_IN_CLIENT:google-aiza:app-chat.js",
-    "SECRET_IN_CLIENT:google-aiza:cfg.js", "SOURCEMAP_EXPOSED:file:gsap-hero.js.map",
+    "SECRET_IN_CLIENT:google-aiza:cfg.js",
+    "SECRET_IN_CLIENT:google-aiza:aistudio.js", "LLM_DIRECT_CLIENT:sdk", "SOURCEMAP_EXPOSED:file:gsap-hero.js.map",
     "SECRET_IN_CLIENT:aws", "SECRET_IN_CLIENT:private-key", "SECRET_IN_CLIENT:openai",
     "SOURCEMAP_EXPOSED:file:app-chat.js.map", "SOURCEMAP_EXPOSED:file:page-1a2b.js.map", "SOURCEMAP_EXPOSED:inline",
     "LLM_DIRECT_CLIENT:api.anthropic.com", "LLM_DIRECT_CLIENT:generativelanguage.googleapis.com",
@@ -438,6 +457,8 @@ def self_test():
                                   'export const GEMINI_KEY="AI', 'za', 'Sy', 'G' * 33, '";'),
         "static/chunks/misc.js": S('a="AK', 'IA', "Q" * 16, '";b="-----BEGIN ', 'PRIVATE KEY-----";c="sk-', 'proj-', "Ab1" * 12,
                                    '";fetch("https://api.mistral.ai/v1/chat/completions")'),
+        # Patron AI Studio: SDK desde esm.sh, llave tras apiKey: (REVISOR 2026-10-19, repro h5).
+        "static/chunks/aistudio.js": S('const c=new a({apiKey:"AI', 'za', 'Sy', 'H' * 33, '"});c.models.generateContent({model:m,contents:t});'),
         # Server component que pasa el prompt como prop: viaja serializado en el payload RSC (grave 2).
         "server/app/dashboard.rsc": '1:["$","Chat",null,{"systemPrompt":"Eres Magdalena, guia de mentalidad. Escucha sin juzgar, pregunta antes de aconsejar y cierra con un paso pequeno."}]',
     }
@@ -491,11 +512,17 @@ def self_test_ignore():
             f.write('fetch("https://api.anthropic.com/v1/messages")')
         with open(os.path.join(d, "index.html"), "w", encoding="utf-8") as f:
             f.write("<html></html>")
+        # Mismo prefijo en otra carpeta: el host SI lo sirve, asi que el ignore por ruta no lo tapa.
+        os.makedirs(os.path.join(d, "assets"))
+        with open(os.path.join(d, "assets", "server.cjs-chunk.js"), "w", encoding="utf-8") as f:
+            f.write('fetch("https://api.openai.com/v1/chat/completions")')
         con, sin = Report(), Report()
         run_build(d, con, ("server.cjs*",))
         run_build(d, sin)
-    passed = not con.blocking() and bool(sin.blocking())
-    print(f"[self-test] --ignore: ignorado={not con.blocking()} sin_ignore_suena={bool(sin.blocking())} -> {'OK' if passed else 'FALLA'}")
+    con_targets = {i["target"] for i in con.blocking()}
+    sin_targets = {i["target"] for i in sin.blocking()}
+    passed = con_targets == {"assets/server.cjs-chunk.js"} and "server.cjs" in sin_targets
+    print(f"[self-test] --ignore: con={sorted(con_targets)} sin={sorted(sin_targets)} -> {'OK' if passed else 'FALLA'}")
     return passed
 
 
