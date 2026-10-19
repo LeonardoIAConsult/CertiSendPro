@@ -45,6 +45,9 @@
           }
         ]
       }
+    ],
+    "predeploy": [
+      "node scripts/security/copy-surface-gate.mjs dist --ignore \"server.cjs*\""
     ]
   }
 }
