@@ -44,6 +44,7 @@ import {
 } from "./server/huellaLote";
 import { decidirEnvioSendEmail, decidirAutorizacionLoteRuta, decidirAceptacionUsoRuta, decidirAccesoSesionPdf } from "./server/decisionesRuta";
 import { trmHoy, copDesdeUsd } from "./server/trm";
+import { geminiKeyConForma } from "./server/geminiKey";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete, crearCobroPorUso, planCobroValido } from "./server/cobroPaquete";
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
@@ -1216,10 +1217,21 @@ verificarRutaTareasRegistrada(app);
 // `huella && proveedor` — deliberadamente NO incluye `relay` (sin el, el acuse queda pendiente de
 // reintento por el barrido programado, no bloquea el envio en si) ni `pagosActivos` (apagarlos a
 // proposito es un estado operable, no una falla).
+//
+// Backlog 20-oct-2026: `gemini` = la FORMA de `GEMINI_API_KEY` es valida (server/geminiKey.ts),
+// sin llamar a Google ni revelar el valor. Tampoco entra en `listo` (sin Gemini solo falla la
+// lectura automatica de nombres; el envio sigue operable).
 app.get("/api/health", (_req, res) => {
   const huella = huellaConfigurada();
   const proveedor = proveedorConfigurado();
-  res.json({ ok: true, huella, proveedor, relay: relayConfigurado(), listo: huella && proveedor });
+  res.json({
+    ok: true,
+    huella,
+    proveedor,
+    relay: relayConfigurado(),
+    gemini: geminiKeyConForma(),
+    listo: huella && proveedor,
+  });
 });
 
 // Endpoint publico de precios del dia (D3, decision del Brain 2026-10-05, Tarea 4): la web lo usa
