@@ -101,6 +101,13 @@ LLM_HOSTS = re.compile(
     r"aiplatform\.googleapis\.com|firebasevertexai\.googleapis\.com|api\.groq\.com|"
     r"api\.mistral\.ai|openrouter\.ai/api|api\.deepseek\.com|api\.x\.ai)"
 )
+# El host como literal de codigo, sin esquema: `const B="api.groq.com"; fetch(`https://${B}/`)`
+# (REVISOR 2026-10-19). La comilla pegada lo separa de la prosa de una landing, que no lo cita asi.
+LLM_HOSTS_LITERAL = re.compile(
+    r"[\"'`](api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com|"
+    r"aiplatform\.googleapis\.com|firebasevertexai\.googleapis\.com|api\.groq\.com|"
+    r"api\.mistral\.ai|api\.deepseek\.com|api\.x\.ai)[\"'`/]"
+)
 # SDK de IA EN USO en el cliente (REVISOR 2026-10-19, 3a variante Firebase/Gemini): el patron AI
 # Studio carga @google/genai desde esm.sh por importmap, el bundle no trae el host y la llave va tras
 # `apiKey:` como la de Firebase. Se decide por el USO, no por el nombre: si hay SDK de IA en el
@@ -235,7 +242,7 @@ def scan_text(rep, target, text, api_paths):
         else:
             rep.add("CRITICA", "SECRET_IN_CLIENT", target, line,
                     f"google-aiza {redact(k)} fuera de config de Firebase: probable llave de Gemini/Maps de servidor")
-    hosts = sorted({m.group(1) for m in LLM_HOSTS.finditer(text)})
+    hosts = sorted({m.group(1) for m in LLM_HOSTS.finditer(text)} | {m.group(1) for m in LLM_HOSTS_LITERAL.finditer(text)})
     for h in hosts:
         rep.add("ALTA", "LLM_DIRECT_CLIENT", target, where(text, text.find(h))[0],
                 f"el navegador habla con {h}: llave o prompt viven en el cliente; pasar por /api propia")
@@ -407,7 +414,7 @@ EXPECTED_VULN = {
     "SECRET_IN_CLIENT:aws", "SECRET_IN_CLIENT:private-key", "SECRET_IN_CLIENT:openai",
     "SOURCEMAP_EXPOSED:file:app-chat.js.map", "SOURCEMAP_EXPOSED:file:page-1a2b.js.map", "SOURCEMAP_EXPOSED:inline",
     "LLM_DIRECT_CLIENT:api.anthropic.com", "LLM_DIRECT_CLIENT:generativelanguage.googleapis.com",
-    "LLM_DIRECT_CLIENT:api.mistral.ai", "LLM_PROMPT_IN_CLIENT:rsc",
+    "LLM_DIRECT_CLIENT:api.mistral.ai", "LLM_DIRECT_CLIENT:api.groq.com", "LLM_PROMPT_IN_CLIENT:rsc",
     "LLM_PROMPT_IN_CLIENT:role-system", "LLM_PROMPT_IN_CLIENT:systemInstruction",
     "LLM_PROMPT_HINT", "CLIENT_GATING:comparacion", "CLIENT_GATING:bandera",
 }
@@ -455,6 +462,8 @@ def self_test():
         # Llave de Gemini declarada pegada al config de Firebase: solo la de apiKey es publica.
         "static/chunks/cfg.js": S('const firebaseConfig={apiKey:"', fb, '",authDomain:"demo.firebaseapp.com",projectId:"demo",appId:"1:522374745014:web:5fc64cc0906"};',
                                   'export const GEMINI_KEY="AI', 'za', 'Sy', 'G' * 33, '";'),
+        # Host armado por plantilla, sin esquema literal (REVISOR 2026-10-19).
+        "static/chunks/plantilla.js": 'const B="api.groq.com";fetch(`https://${B}/openai/v1/chat/completions`)',
         "static/chunks/misc.js": S('a="AK', 'IA', "Q" * 16, '";b="-----BEGIN ', 'PRIVATE KEY-----";c="sk-', 'proj-', "Ab1" * 12,
                                    '";fetch("https://api.mistral.ai/v1/chat/completions")'),
         # Patron AI Studio: SDK desde esm.sh, llave tras apiKey: (REVISOR 2026-10-19, repro h5).
@@ -474,7 +483,8 @@ def self_test():
         "server/app/page.html": '<html><body>Bienvenido</body></html>',
         # Config de Firebase con valores sacados a constantes por el minificador (CertiSend real).
         "static/chunks/vite-cfg.js": S('const xD="demo-436820",SD="1:522374745014:web:5fc64cc0906",_D="', fb, '",wD="demo.online";'),
-        "static/guardian.html": '<li>Conexiones: el endpoint de uso de tu cuenta en <code>api.anthropic.com</code> y Telegram.</li>',
+        "static/guardian.html": ('<li>Conexiones: el endpoint de uso de tu cuenta en <code>api.anthropic.com</code> y Telegram.</li>'
+                                 '<li>Documentado en api.anthropic.com/docs para quien quiera revisarlo.</li>'),
     }
     ok = True
     for name, files in (("vulnerable", vuln), ("seguro", safe)):
@@ -502,7 +512,28 @@ def self_test():
                 for i in noisy:
                     print("   ruido:", i)
             ok = ok and passed
-    return 0 if ok and self_test_ignore() and self_test_url() else 2
+    return 0 if ok and self_test_ignore() and self_test_public() and self_test_url() else 2
+
+
+def self_test_public():
+    """Con raiz .next, ../public tambien se audita: Next lo sirve tal cual."""
+    with tempfile.TemporaryDirectory() as d:
+        for rel, content in {
+            ".next/static/chunks/a.js": "render()",
+            ".next/server/app/page.html": "<html></html>",
+            "public/legado.js": 'fetch("https://api.anthropic.com/v1/messages")',
+            "public/logo.svg": "<svg></svg>",
+        }.items():
+            p = os.path.join(d, rel)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(content)
+        rep = Report()
+        run_build(os.path.join(d, ".next"), rep)
+    targets = {i["target"] for i in rep.blocking()}
+    passed = targets == {"../public/legado.js"}
+    print(f"[self-test] ../public: {sorted(targets)} -> {'OK' if passed else 'FALLA'}")
+    return passed
 
 
 def self_test_ignore():
