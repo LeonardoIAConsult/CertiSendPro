@@ -55,6 +55,8 @@ import { decidirNecesitaAutorizar, type LecturaAutorizacion } from "./utils/auto
 import { pausaAntesDelEnvioMs } from "./utils/envioLote";
 import JSZip from "jszip";
 import LandingPage from "./components/LandingPage";
+// Si el chunk de la V2 no carga (deploy nuevo, red caida), cae a la landing original en vez de pantalla en blanco.
+const LandingPageV2 = React.lazy(() => import("./components/LandingPageV2").catch(() => import("./components/LandingPage")));
 import LegalPage from "./components/LegalPage";
 import terminosMd from "./legal/terminos.md?raw";
 import privacidadMd from "./legal/privacidad.md?raw";
@@ -1733,10 +1735,13 @@ export default function App() {
   const textoAceptacionTerminosUso = textoAceptacionTerminosUsoCompartido(language);
 
   if (needsAuth) {
+    // Version B de la landing: solo con ?landing=2; sin el parametro se sirve la original.
+    const Landing = new URLSearchParams(window.location.search).get("landing") === "2" ? LandingPageV2 : LandingPage;
     return (
       <>
         {pagoBanner}
-        <LandingPage
+        <React.Suspense fallback={null}>
+        <Landing
           language={language}
           setLanguage={setLanguage}
           theme={theme}
@@ -1752,6 +1757,7 @@ export default function App() {
           aceptaTerminosUso={aceptaTerminosUso}
           onToggleAceptaTerminosUso={setAceptaTerminosUso}
         />
+        </React.Suspense>
       </>
     );
   }
