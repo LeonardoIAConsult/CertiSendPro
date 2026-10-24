@@ -1301,10 +1301,34 @@ export async function crearLote(
   return { loteId: ref.id, lote };
 }
 
-/** H8: envios gratis YA consumidos por este correo (huella); 0 si nunca uso ninguno. */
+/** H8: la huella del correo y su contador se conservan 24 meses desde el ultimo envio gratis autorizado
+ * (Politica de Privacidad v2.5, secc. 7). Pasado ese plazo el contador ya no cuenta y Firestore lo borra
+ * solo (politica TTL sobre `expiraEn`); la regla logica de abajo no depende de cuando corra la purga. */
+export const RETENCION_GRATIS_MESES = 24;
+
+/** Fecha (Timestamp) hasta la que se conserva el contador de gratis de un correo autorizado en `ahora`. */
+export function expiraEnGratis(ahora: Timestamp): Timestamp {
+  const d = new Date(ahora.toMillis());
+  d.setUTCMonth(d.getUTCMonth() + RETENCION_GRATIS_MESES);
+  return Timestamp.fromMillis(d.getTime());
+}
+
+interface DocGratisPorCorreo {
+  usados?: unknown;
+  expiraEn?: { toMillis(): number } | null;
+}
+
+/** H8: envios gratis usados segun el documento del correo; 0 si no existe o ya vencio su retencion. */
+export function gratisUsadosVigentes(data: DocGratisPorCorreo | undefined, ahoraMs: number): number {
+  if (!data) return 0;
+  if (data.expiraEn && data.expiraEn.toMillis() <= ahoraMs) return 0; // vencido: el contador empieza de nuevo
+  return gratisUsadosDe(data.usados);
+}
+
+/** H8: envios gratis YA consumidos por este correo (huella); 0 si nunca uso ninguno o vencio su retencion. */
 export async function obtenerGratisUsados(huella: string): Promise<number> {
   const snap = await db().collection("gratisPorCorreo").doc(huella).get();
-  return snap.exists ? gratisUsadosDe((snap.data() as { usados?: unknown }).usados) : 0;
+  return snap.exists ? gratisUsadosVigentes(snap.data() as DocGratisPorCorreo, Date.now()) : 0;
 }
 
 /**
@@ -1323,10 +1347,10 @@ export async function crearLoteConConsumoGratis(
   const loteRef = db().collection("lotes").doc();
   return db().runTransaction(async (tx) => {
     const snap = await tx.get(gratisRef);
-    const usados = snap.exists ? gratisUsadosDe((snap.data() as { usados?: unknown }).usados) : 0;
+    const ahora = Timestamp.now();
+    const usados = snap.exists ? gratisUsadosVigentes(snap.data() as DocGratisPorCorreo, ahora.toMillis()) : 0;
     const restantes = Math.max(0, LIMITE_GRATIS - usados);
     if (cantidad > restantes) return { ok: false as const, gratisRestantes: restantes };
-    const ahora = Timestamp.now();
     const lote: Lote = {
       uid,
       cantidad,
@@ -1339,7 +1363,8 @@ export async function crearLoteConConsumoGratis(
       expira: Timestamp.fromMillis(ahora.toMillis() + DURACION_LOTE_MS),
       gratisHuella: huella,
     };
-    tx.set(gratisRef, { usados: usados + cantidad, actualizado: ahora });
+    // `expiraEn` se renueva en cada autorizacion: la huella vence 24 meses despues del ULTIMO envio gratis.
+    tx.set(gratisRef, { usados: usados + cantidad, actualizado: ahora, expiraEn: expiraEnGratis(ahora) });
     tx.set(loteRef, lote);
     return { ok: true as const, loteId: loteRef.id, lote };
   });
@@ -1355,8 +1380,11 @@ export async function reponerConsumoGratis(huella: string, cantidad: number): Pr
   await db().runTransaction(async (tx) => {
     const snap = await tx.get(gratisRef);
     if (!snap.exists) return;
-    const usados = gratisUsadosDe((snap.data() as { usados?: unknown }).usados);
-    tx.update(gratisRef, { usados: Math.max(0, usados - cantidad), actualizado: Timestamp.now() });
+    const ahora = Timestamp.now();
+    const doc = snap.data() as DocGratisPorCorreo;
+    if (doc.expiraEn && doc.expiraEn.toMillis() <= ahora.toMillis()) return; // vencido: nada que reponer
+    const usados = gratisUsadosDe(doc.usados);
+    tx.update(gratisRef, { usados: Math.max(0, usados - cantidad), actualizado: ahora });
   });
 }
 
@@ -1384,8 +1412,12 @@ export async function conciliarGratisVencidos(uid: string, huella: string, ahora
       if (l.gratisConciliado) return 0;
       const reponer = Math.min(Math.max(0, l.fallidos ?? 0), Math.max(0, l.cantidad - l.enviados));
       if (reponer > 0 && gratisSnap.exists) {
-        const usados = gratisUsadosDe((gratisSnap.data() as { usados?: unknown }).usados);
-        tx.update(gratisRef, { usados: Math.max(0, usados - reponer), actualizado: Timestamp.now() });
+        const ahoraTs = Timestamp.now();
+        const doc = gratisSnap.data() as DocGratisPorCorreo;
+        const vencido = !!doc.expiraEn && doc.expiraEn.toMillis() <= ahoraTs.toMillis();
+        if (!vencido) {
+          tx.update(gratisRef, { usados: Math.max(0, gratisUsadosDe(doc.usados) - reponer), actualizado: ahoraTs });
+        }
       }
       tx.update(loteRef, { gratisConciliado: true, gratisRepuestos: reponer });
       return reponer;

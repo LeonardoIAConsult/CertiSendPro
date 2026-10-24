@@ -173,14 +173,14 @@ test("decidirAutorizacionLote: version guardada IGUAL a la vigente -> ok", () =>
 // alguien la vuelve a dejar en "2.3" (o en cualquier version distinta de la que de verdad guardo
 // una autorizacion vieja), la prueba SI caiga.
 test("decidirAutorizacionLote: una autorizacion 2.3 (version vieja, pre-fix) se vuelve a pedir contra AUTORIZACION_DATOS_VERSION vigente", () => {
-  assert.equal(AUTORIZACION_DATOS_VERSION, "2.4", "la version vigente debe ser 2.4 (Politica de Privacidad v2.4)");
+  assert.equal(AUTORIZACION_DATOS_VERSION, "2.5", "la version vigente debe ser 2.5 (Politica de Privacidad v2.5)");
   const r = decidirAutorizacionLote(autorizacion("2.3"), AUTORIZACION_DATOS_VERSION);
   assert.equal(r.ok, false, "una autorizacion de la version vieja (2.3) debe pedirse de nuevo");
   assert.equal((r as any).httpStatus, 403);
   assert.equal((r as any).motivo, "autorizacion");
 });
 
-test("decidirAutorizacionLote: una autorizacion YA en AUTORIZACION_DATOS_VERSION vigente (2.4) -> ok", () => {
+test("decidirAutorizacionLote: una autorizacion YA en AUTORIZACION_DATOS_VERSION vigente (2.5) -> ok", () => {
   assert.deepEqual(decidirAutorizacionLote(autorizacion(AUTORIZACION_DATOS_VERSION), AUTORIZACION_DATOS_VERSION), { ok: true });
 });
 

@@ -116,7 +116,7 @@ const COPY = {
       { t: "La IA lee, tú decides", d: "La IA lee el nombre de cada página y lo empareja con tu lista. Antes de enviar ves cada certificado junto a su destinatario y corriges lo que haga falta." },
       { t: "Sale de tu Gmail, con tu nombre", d: "Cada correo viaja desde tu propia cuenta, con el certificado adjunto. Quien lo recibe ve tu dirección, no la de un desconocido." },
     ],
-    ctaSub: "Empieza gratis: tienes 15 envíos gratis por cuenta, sin costo.",
+    ctaSub: "Empieza gratis: 15 envíos por correo, en total. Después, Paquete o Pago por uso.",
     trustTitle: "Tus datos, bajo tu control",
     trustSub: "Sabes qué pasa con cada archivo, de principio a fin.",
     trustSteps: [
@@ -188,7 +188,7 @@ const COPY = {
       { t: "AI reads, you decide", d: "AI reads the name on each page and matches it with your list. Before sending you see every certificate next to its recipient and fix whatever needs fixing." },
       { t: "Sent from your Gmail, under your name", d: "Every email goes out from your own account, with the certificate attached. Recipients see your address, not a stranger's." },
     ],
-    ctaSub: "Start free: you get 15 free sends per account, at no cost.",
+    ctaSub: "Start free: 15 sends per email, in total. After that, Bundle or Pay-as-you-go.",
     trustTitle: "Your data, under your control",
     trustSub: "You know what happens to every file, from start to finish.",
     trustSteps: [

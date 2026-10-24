@@ -8,6 +8,9 @@ import {
   crearLoteConConsumoGratis,
   conciliarGratisVencidos,
   obtenerGratisUsados,
+  expiraEnGratis,
+  gratisUsadosVigentes,
+  RETENCION_GRATIS_MESES,
   liberarReservaTx,
   gratisUnaVezActivo,
   gratisUsadosDe,
@@ -308,4 +311,53 @@ test("conciliar: solo mira lotes GRATIS del uid (la consulta filtra por planEfec
     await db.doc("lotes/pagado2").set({ uid: "u14", planEfectivo: "porUso", gratisHuella: H, fallidos: 9, enviados: 0, cantidad: 9, expira: Timestamp.fromMillis(ahora.getTime() - 1000) });
     assert.equal(await conciliarGratisVencidos("u14", H, ahora), 4);
     assert.equal(((await db.doc("lotes/pagado2").get()).data() as Lote).gratisConciliado, undefined);
+  }));
+
+// ── Retencion de 24 meses de la huella (Politica 2.5, secc. 7) ───────────────────────────────
+
+test("expiraEnGratis: 24 meses despues de la autorizacion", () => {
+  assert.equal(RETENCION_GRATIS_MESES, 24);
+  const t = Timestamp.fromDate(new Date("2026-10-24T12:00:00Z"));
+  assert.equal(expiraEnGratis(t).toDate().toISOString(), "2028-10-24T12:00:00.000Z");
+});
+
+test("gratisUsadosVigentes: sin documento o con retencion vencida cuenta 0; vigente cuenta", () => {
+  const ahoraMs = Date.UTC(2026, 9, 24);
+  assert.equal(gratisUsadosVigentes(undefined, ahoraMs), 0);
+  assert.equal(gratisUsadosVigentes({ usados: 9, expiraEn: Timestamp.fromMillis(ahoraMs + 1000) }, ahoraMs), 9);
+  assert.equal(gratisUsadosVigentes({ usados: 9, expiraEn: Timestamp.fromMillis(ahoraMs) }, ahoraMs), 0); // justo al vencer
+  assert.equal(gratisUsadosVigentes({ usados: 9, expiraEn: Timestamp.fromMillis(ahoraMs - 1) }, ahoraMs), 0);
+  assert.equal(gratisUsadosVigentes({ usados: 9 }, ahoraMs), 9); // sin expiraEn (dato previo): sigue contando
+  assert.equal(gratisUsadosVigentes({ usados: -3, expiraEn: Timestamp.fromMillis(ahoraMs + 1000) }, ahoraMs), 0); // saneado
+});
+
+test("crearLoteConConsumoGratis: escribe expiraEn a ~24 meses y la renueva en cada autorizacion", () =>
+  conDb(async (db) => {
+    assert.equal((await crearLoteConConsumoGratis("u20", H, 5)).ok, true);
+    const d1 = (await db.doc(`gratisPorCorreo/${H}`).get()).data() as any;
+    const meses = (d1.expiraEn.toMillis() - Date.now()) / (30.4 * 24 * 3600_000);
+    assert.ok(meses > 23.5 && meses < 24.5, `expiraEn a ${meses} meses`);
+    // se fuerza un expiraEn mas corto y una segunda autorizacion lo renueva a 24 meses
+    await db.doc(`gratisPorCorreo/${H}`).set({ ...d1, expiraEn: Timestamp.fromMillis(Date.now() + 1000) });
+    assert.equal((await crearLoteConConsumoGratis("u20", H, 3)).ok, true);
+    const d2 = (await db.doc(`gratisPorCorreo/${H}`).get()).data() as any;
+    assert.equal(d2.usados, 8);
+    assert.ok(d2.expiraEn.toMillis() - Date.now() > 23 * 30 * 24 * 3600_000);
+  }));
+
+test("retencion vencida: el correo vuelve a empezar con 15 (aunque Firestore aun no haya borrado el documento)", () =>
+  conDb(async (db) => {
+    await db.doc(`gratisPorCorreo/${H}`).set({ usados: 15, actualizado: Timestamp.fromMillis(0), expiraEn: Timestamp.fromMillis(Date.now() - 1000) });
+    assert.equal(await obtenerGratisUsados(H), 0);
+    const r = await crearLoteConConsumoGratis("u21", H, 10);
+    assert.equal(r.ok, true);
+    assert.equal(await obtenerGratisUsados(H), 10); // no 25: parte de cero
+    assert.ok(((await db.doc(`gratisPorCorreo/${H}`).get()).data() as any).expiraEn.toMillis() > Date.now());
+  }));
+
+test("reponerConsumoGratis y conciliar: sobre un contador vencido no reponen nada", () =>
+  conDb(async (db) => {
+    await db.doc(`gratisPorCorreo/${H}`).set({ usados: 9, actualizado: Timestamp.fromMillis(0), expiraEn: Timestamp.fromMillis(Date.now() - 1000) });
+    await reponerConsumoGratis(H, 5);
+    assert.equal(((await db.doc(`gratisPorCorreo/${H}`).get()).data() as any).usados, 9); // intacto (no se toca un vencido)
   }));

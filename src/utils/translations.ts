@@ -236,7 +236,7 @@ export const translations: Record<Lang, TranslationDict> = {
 
     planFreeName: "Plan Gratuito",
     planFreePrice: "$0",
-    planFreeFeature1: "15 envíos gratis por cuenta, de por vida",
+    planFreeFeature1: "15 envíos gratis por correo de Google, en total y de por vida. Al agotarlos, para enviar necesitas comprar un Paquete (150 envíos) o Pago por uso (desde 50).",
     planFreeFeature2: "Asunto y cuerpo del correo personalizados",
     planFreeFeature3: "Lectura de nombres con IA",
 
@@ -274,14 +274,14 @@ export const translations: Record<Lang, TranslationDict> = {
     footerRights: "Todos los derechos reservados.",
 
     autorizacionDatosRequerida: "Marca la casilla de autorización de datos para continuar.",
-    batchLimitFree: "El plan Gratis incluye 15 envíos gratis por cuenta, en total, y este lote no cabe en los que te quedan.",
-    batchLimitGratisAgotado: "Ya usaste tus 15 envíos gratis y tu saldo pagado no alcanza para este lote. Compra un Paquete o Pago por uso para seguir enviando.",
+    batchLimitFree: "El plan Gratis incluye 15 envíos gratis por cuenta (por correo de Google), en total y de por vida, y este lote no cabe en los que te quedan.",
+    batchLimitGratisAgotado: "Ya usaste los 15 envíos gratis de este correo y tu saldo pagado no alcanza para este lote. Compra un Paquete (150 envíos) o Pago por uso (desde 50 envíos) para seguir enviando.",
     batchLimitGratisParcial: "Te quedan {gratis} envíos gratis y este lote es de {cantidad}. Un lote solo es gratis si cabe entero: puedes enviar hasta {gratis} certificados o comprar saldo.",
     batchLimitSaldo: "Tienes {paquete} del Paquete y {porUso} de Pago por uso ({total} en total) y el lote es de {lote}.",
     batchLimitOpciones: "Puedes dividir el lote en partes más pequeñas o escribirnos a contacto@leonardoantolinez.com para ver los planes.",
 
     miPlanGratis: "Plan Gratis · 15 envíos gratis por cuenta",
-    miPlanGratisUnaVez: "Plan Gratis · te quedan {restantes} de {limite} envíos gratis",
+    miPlanGratisUnaVez: "Plan Gratis · te quedan {restantes} de {limite} envíos gratis de este correo",
     miPlanPaquete: "Paquete · te quedan {restantes} envíos · vencen el {fecha}",
     miPlanPaqueteNota: "Los lotes que envías como gratis no gastan tu saldo.",
     miPlanSaldoPorUso: "Saldo por uso: {saldo} envíos (no vence)",
@@ -364,7 +364,7 @@ export const translations: Record<Lang, TranslationDict> = {
 
     planFreeName: "Free Plan",
     planFreePrice: "$0",
-    planFreeFeature1: "15 free sends per account, for life",
+    planFreeFeature1: "15 free sends per Google email, in total and for life. Once used, you need a Bundle (150 sends) or Pay-as-you-go (from 50) to send more.",
     planFreeFeature2: "Custom subject and body",
     planFreeFeature3: "AI name reading",
 
@@ -402,14 +402,14 @@ export const translations: Record<Lang, TranslationDict> = {
     footerRights: "All rights reserved.",
 
     autorizacionDatosRequerida: "Check the data-authorization box to continue.",
-    batchLimitFree: "The Free plan includes 15 free sends per account in total, and this batch does not fit in the ones you have left.",
-    batchLimitGratisAgotado: "You have used all 15 of your free sends and your paid balance is not enough for this batch. Buy a Bundle or Pay-as-you-go to keep sending.",
+    batchLimitFree: "The Free plan includes 15 free sends per account (per Google email), in total and for the life of that email, and this batch does not fit in the ones you have left.",
+    batchLimitGratisAgotado: "You have used all 15 free sends of this email and your paid balance is not enough for this batch. Buy a Bundle (150 sends) or Pay-as-you-go (from 50 sends) to keep sending.",
     batchLimitGratisParcial: "You have {gratis} free sends left and this batch has {cantidad}. A batch is only free if it fits entirely: you can send up to {gratis} certificates or buy balance.",
     batchLimitSaldo: "You have {paquete} from the Bundle and {porUso} from Pay-as-you-go ({total} total) and this batch has {lote}.",
     batchLimitOpciones: "You can split the batch into smaller parts or email us at contacto@leonardoantolinez.com to see the plans.",
 
     miPlanGratis: "Free plan · 15 free sends per account",
-    miPlanGratisUnaVez: "Free plan · you have {restantes} of {limite} free sends left",
+    miPlanGratisUnaVez: "Free plan · you have {restantes} of {limite} free sends of this email left",
     miPlanPaquete: "Bundle · {restantes} sends left · expires {fecha}",
     miPlanPaqueteNota: "Batches you send as free never spend your balance.",
     miPlanSaldoPorUso: "Pay-as-you-go balance: {saldo} sends (never expires)",

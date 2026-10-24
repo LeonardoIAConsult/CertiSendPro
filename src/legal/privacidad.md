@@ -1,6 +1,6 @@
 # Política de Privacidad y Tratamiento de Datos Personales — CertiSend Pro
 
-**Versión:** 2.4 · **Entrada en vigencia:** el día de su publicación en https://certisendpro.online
+**Versión:** 2.5 · **Entrada en vigencia:** el día de su publicación en https://certisendpro.online
 
 Debajo de cada sección hay una línea **«En corto»** en lenguaje sencillo.
 
@@ -35,7 +35,8 @@ Debajo de cada sección hay una línea **«En corto»** en lenguaje sencillo.
 |---|---|---|---|
 | Identificación de tu cuenta | Nombre, correo electrónico, foto de perfil e identificador de usuario de Google | Inicio de sesión con Google (Firebase Authentication) | Firebase Authentication (Google), mientras tengas cuenta |
 | Permisos de Google | Token de acceso temporal con dos permisos: enviar correos desde tu Gmail (`gmail.send`) y **leer hojas de cálculo** (`spreadsheets.readonly`). Ese segundo permiso, por cómo lo define Google, **habilita la lectura de todas tus hojas de cálculo**, pero CertiSend **solo lee la hoja que tú indicas** (sus pestañas y las celdas A1:Z1000 de la pestaña que eliges), no busca ni abre otras, y nunca puede modificarlas | Tu autorización al iniciar sesión | Solo en la memoria de tu navegador durante la sesión; viaja al servidor en cada envío y **no se guarda** |
-| Cuenta y plan | Plan (Gratis, Paquete o Pago por uso); de los envíos gratis, cuántos de tus 15 ya usaste; del Paquete, envíos restantes, reservados y fecha de vencimiento; de Pago por uso, el saldo acumulado y el saldo reservado (sin fecha de vencimiento); e identificador del último pago que activó o aumentó tu plan | Lo genera CertiSend cuando compras | **Base de datos Cloud Firestore (Google)**, colección `cuentas`, mientras tengas cuenta y luego según la sección 7 |
+| Cuenta y plan | Plan (Gratis, Paquete o Pago por uso); de los envíos gratis, cuántos de tus 15 ya usaste (el conteo se lleva por correo, ver la fila siguiente); del Paquete, envíos restantes, reservados y fecha de vencimiento; de Pago por uso, el saldo acumulado y el saldo reservado (sin fecha de vencimiento); e identificador del último pago que activó o aumentó tu plan | Lo genera CertiSend cuando compras | **Base de datos Cloud Firestore (Google)**, colección `cuentas`, mientras tengas cuenta y luego según la sección 7 |
+| Huella del correo y envíos gratis usados | Una **huella seudonimizada** (código HMAC con clave secreta del servidor) de tu correo de Google verificado, y la **cantidad de envíos gratis que ese correo ha usado**. En Gmail, para la huella se ignoran los puntos y el sufijo «+». **No contiene tu correo en claro**. Es seudonimizada: no permite recuperar tu correo sin la clave del servidor (que se guarda fuera de la base de datos), y solo sirve para comprobar si un correo concreto ya usó envíos gratis. Solo cuenta el correo verificado por Google; si un inicio de sesión llegara sin correo verificado, el conteo se asocia a la cuenta y no a un correo | La genera CertiSend a partir del correo que Google verifica al iniciar sesión, y el servidor al autorizar cada lote gratis | **Cloud Firestore (Google)**, colección `gratisPorCorreo`, hasta 24 meses después del último envío gratis autorizado con ese correo (sección 7) |
 | Pagos | Identificador del pago en Mercado Pago, estado, monto en pesos, TRM usada y su fecha, fecha del cobro, plan, cantidad de envíos comprada (solo en compras de Pago por uso), y el estado de los correos de confirmación. Antes del pago, el cobro preparado (monto, TRM, cantidad si es Pago por uso, tu identificador de usuario). **No** recibimos ni guardamos los datos de tu tarjeta o cuenta bancaria | Mercado Pago, al confirmar cada pago; CertiSend, al preparar el cobro | Cloud Firestore, colecciones `pagosProcesados` y `preferencias`, según la sección 7 |
 | Prueba de aceptación | Versión de los Términos aceptada, texto exacto de cada casilla marcada (aceptación de los Términos y declaración de inicio inmediato del servicio), idioma, fecha y hora, identificador de usuario, correo de tu cuenta, plan, modalidad, monto y TRM | Tu clic en las casillas del checkout | Cloud Firestore, colección `aceptaciones`, según la sección 7 |
 | Autorización de tratamiento de datos | Versión de esta política que autorizaste, texto exacto de la casilla, idioma, fecha y hora, y tus autorizaciones anteriores si la política cambió de versión | Tu clic en la casilla antes de entrar con Google | Cloud Firestore, colección `autorizaciones`, según la sección 7 |
@@ -51,18 +52,19 @@ Debajo de cada sección hay una línea **«En corto»** en lenguaje sencillo.
 
 No tratamos datos sensibles (salud, biometría, origen racial, creencias, etc.) ni los pedimos. No usamos cookies de rastreo ni herramientas de analítica publicitaria.
 
-**En corto:** guardamos tu cuenta, tu plan, tus pagos y la prueba de lo que aceptaste; tus certificados y tus listas no se guardan: los PDF se borran solos en unas dos horas.
+**En corto:** guardamos tu cuenta, tu plan, tus pagos y la prueba de lo que aceptaste, y una huella seudonimizada de tu correo (no tu correo) con cuántos envíos gratis usaste, hasta 24 meses después de tu último envío gratis; tus certificados y tus listas no se guardan: los PDF se borran solos en unas dos horas.
 
 ## 4. Para qué usamos tus datos (finalidades)
 
 1. **Prestarte el servicio:** iniciar tu sesión, dividir tus PDF, leer los nombres con IA, emparejarlos con tu lista y enviar los correos desde tu Gmail.
-2. **Gestionar tu plan:** saber qué plan tienes, contar los envíos gratis que has usado (el tope es de 15 por cuenta), contar los envíos con éxito del Paquete y descontarlos (o acumularlos) del saldo de Pago por uso, aplicar los límites en el servidor y mostrarte tu saldo y, si aplica, tu vencimiento.
+2. **Gestionar tu plan:** saber qué plan tienes, contar los envíos gratis que has usado (el tope es de 15 por correo, en total), contar los envíos con éxito del Paquete y descontarlos (o acumularlos) del saldo de Pago por uso, aplicar los límites en el servidor y mostrarte tu saldo y, si aplica, tu vencimiento.
 3. **Cobrar y probar el cobro:** crear el cobro en Mercado Pago, verificar que el pago es real antes de activar tu plan, procesar cada pago una sola vez, y conservar la prueba de la relación comercial y de tu aceptación (Ley 1480 de 2011, artículo 50, literal e).
 4. **Avisarte por correo:** enviarte la confirmación de compra, la respuesta a tus solicitudes de reembolso o reversión, y los avisos de cambios en los Términos o en esta política.
 5. **Avisar al administrador:** {{PROVEEDOR_NOMBRE}} recibe un correo por cada venta, reembolso o contracargo, con tu identificador de usuario, el plan, el monto y la referencia de Mercado Pago, para atender incidencias.
 6. **Atender tus peticiones, quejas, reclamos, reembolsos y reversiones.**
 7. **Cumplir obligaciones legales**, comerciales y tributarias.
 8. **Proteger el servicio:** limitar abusos (por ejemplo, demasiadas solicitudes de cobro por minuto) y diagnosticar errores.
+9. **Aplicar el límite de 15 envíos gratis por correo y evitar su abuso** (Términos y Condiciones, sección 4.4-bis): para ello guardamos la huella seudonimizada de tu correo verificado y cuántos envíos gratis usó, de modo que borrar y volver a crear una cuenta, o abrir otra con el mismo correo, no reinicie el conteo.
 
 No vendemos tus datos, no los usamos para publicidad ni los cedemos a terceros para sus propios fines.
 
@@ -72,7 +74,7 @@ No vendemos tus datos, no los usamos para publicidad ni los cedemos a terceros p
 
 5.1. Al iniciar sesión con Google y aceptar esta política, nos autorizas a tratar tus datos para las finalidades de la sección 4, incluidas las transferencias internacionales de la sección 6. La autorización se pide de forma expresa, con una casilla que aparece sin marcar, y **guardamos el registro** de cuándo y qué versión aceptaste (Ley 1581 de 2012, artículo 9; Decreto 1377 de 2013, artículo 7). El silencio no vale como autorización.
 
-5.2. Para las finalidades 3, 4 y 7 relacionadas con una compra, el tratamiento también es necesario para ejecutar el contrato que celebras al pagar.
+5.2. Para las finalidades 3, 4 y 7 relacionadas con una compra, el tratamiento también es necesario para ejecutar el contrato que celebras al pagar. La finalidad 9 (huella del correo y conteo de envíos gratis) se apoya en la autorización de la sección 5.1 y es necesaria para aplicar el límite de envíos gratis de los Términos.
 
 **En corto:** nos das permiso con una casilla que marcas tú, y guardamos la prueba.
 
@@ -103,11 +105,14 @@ CertiSend funciona sobre proveedores que procesan datos **fuera de Colombia**. L
 | PDF de certificados | Máximo unas 2 horas y 10 minutos, en memoria temporal; se eliminan solos |
 | Lista de destinatarios y token de Google | No se guardan en el servidor; desaparecen al cerrar la sesión del navegador |
 | Contenido enviado a Gemini (página del PDF y lista de nombres) | CertiSend no lo guarda. Google puede conservarlo por un **periodo limitado**, que sus términos no fijan en días, solo para detectar y prevenir abusos de su política de uso y para requerimientos legales o regulatorios. Ese plazo no lo controla CertiSend |
-| Datos de cuenta y plan | Mientras tengas cuenta. Si pides la supresión, se eliminan en los plazos de la sección 9, salvo lo indicado en la fila siguiente |
+| Datos de cuenta y plan | Mientras tengas cuenta. Si pides la supresión, se eliminan en los plazos de la sección 9, salvo lo indicado más abajo en esta sección |
 | Pagos, cobros preparados, prueba de aceptación, lotes, confirmación de lotes, registro de avisos, autorizaciones de tratamiento de datos y aceptaciones de los Términos | **Diez (10) años** desde la operación (criterio conservador basado en la Ley 962 de 2005, artículo 28, para los libros y papeles del comerciante). Cumplido el plazo, se eliminan |
 | Registros técnicos | Treinta (30) días, retención por defecto de Google Cloud Logging |
+| Huella del correo y envíos gratis usados | Hasta veinticuatro (24) meses después del último envío gratis autorizado con ese correo; cumplido ese plazo se elimina sola. Se conserva aunque cierres o elimines tu cuenta, porque sin ella el límite de 15 envíos gratis podría repetirse; si está activa o tienes un reclamo en trámite, se conserva el tiempo necesario para atenderlo. No contiene tu correo en claro |
 
-**Cómo se suprime una cuenta.** La supresión se hace **a mano, por solicitud** a contacto@leonardoantolinez.com; no hay borrado automático de cuentas inactivas. Recibida la solicitud, y dentro de los plazos de la sección 9, el responsable: (1) elimina tu usuario de Firebase Authentication; (2) elimina tu documento de la colección `cuentas`; (3) conserva solo los registros de pagos, aceptaciones, autorizaciones, lotes y confirmaciones que deban guardarse por la fila anterior, y los elimina al cumplirse el plazo; y (4) te confirma por correo lo que se suprimió y lo que se conserva, y por qué. Además, puedes retirar el acceso de CertiSend a tu cuenta de Google en cualquier momento (sección 8).
+**Cómo se suprime una cuenta.** La supresión se hace **a mano, por solicitud** a contacto@leonardoantolinez.com; no hay borrado automático de cuentas inactivas. Recibida la solicitud, y dentro de los plazos de la sección 9, el responsable: (1) elimina tu usuario de Firebase Authentication; (2) elimina tu documento de la colección `cuentas`; (3) conserva solo los registros de pagos, aceptaciones, autorizaciones, lotes y confirmaciones que deban guardarse por la fila anterior, y los elimina al cumplirse el plazo, y conserva la huella del correo con su conteo de envíos gratis hasta 24 meses después del último envío gratis autorizado con ese correo (ver el párrafo siguiente); y (4) te confirma por correo lo que se suprimió y lo que se conserva, y por qué. Además, puedes retirar el acceso de CertiSend a tu cuenta de Google en cualquier momento (sección 8).
+
+**Supresión de la huella del correo.** Puedes solicitar la supresión de la huella de tu correo. La atenderemos, salvo durante el plazo de hasta 24 meses de la fila «Huella del correo y envíos gratis usados» de la tabla anterior, porque en ese periodo es necesaria para aplicar el límite de 15 envíos gratis aceptado en los Términos (sección 4.4-bis). Al vencer ese plazo se elimina. Revocar la autorización no borra la huella durante ese plazo, pero no la usamos para ninguna otra finalidad. Esto es coherente con la sección 8, numeral 5.
 
 **Periodo de vigencia de la base de datos:** la base de cuentas y pagos de CertiSend estará vigente mientras se preste el servicio y, después, durante los plazos de conservación de esta sección.
 
@@ -121,7 +126,7 @@ Como titular tienes derecho a (Ley 1581 de 2012, artículo 8):
 2. **Solicitar prueba de la autorización** que nos diste.
 3. **Ser informado** del uso que damos a tus datos.
 4. Presentar quejas ante la **Superintendencia de Industria y Comercio** (SIC).
-5. **Revocar la autorización** y **solicitar la supresión** de tus datos, cuando no exista un deber legal o contractual de conservarlos.
+5. **Revocar la autorización** y **solicitar la supresión** de tus datos, cuando no exista un deber legal o contractual de conservarlos. La huella de tu correo se rige por la sección 7: se conserva durante el plazo allí indicado porque es necesaria para aplicar el límite de envíos gratis aceptado en los Términos (sección 4.4-bis); revocar la autorización no la borra en ese plazo.
 6. **Acceder gratuitamente** a tus datos.
 
 Además, puedes retirar en cualquier momento el permiso que diste a CertiSend sobre tu cuenta de Google en https://myaccount.google.com/permissions.
@@ -171,4 +176,4 @@ Si cambiamos esta política de forma que afecte el uso de tus datos, te avisarem
 
 ## 15. Vigencia
 
-Versión 2.4 · Fecha: 2026-10-07 · Entrada en vigencia: el día de su publicación. Las versiones anteriores se conservan y se entregan a solicitud.
+Versión 2.5 · Fecha: 2026-10-24 · Entrada en vigencia: el día de su publicación. Las versiones anteriores se conservan y se entregan a solicitud.
