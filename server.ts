@@ -14,6 +14,11 @@ import {
   obtenerCuenta,
   decidirLote,
   crearLote,
+  crearLoteConConsumoGratis,
+  reponerConsumoGratis,
+  gratisUsadosDe,
+  gratisUnaVezActivo,
+  LIMITE_GRATIS,
   reservarEnvio,
   confirmarEnvioExitoso,
   liberarReserva,
@@ -1390,6 +1395,8 @@ app.get("/api/cuenta", exigirAuth, async (req, res) => {
       // vencimiento, ACUMULABLE. `?? 0` para cuentas creadas antes de este campo (mismo patron que
       // `server/cuentas.ts`).
       saldoPorUso: cuenta.saldoPorUso ?? 0,
+      // H8: envios gratis que le quedan (solo con GRATIS_UNA_VEZ=1; `null` si la regla esta apagada).
+      gratisRestantes: gratisUnaVezActivo() ? Math.max(0, LIMITE_GRATIS - gratisUsadosDe(cuenta.gratisUsados)) : null,
       // G6 (NO-GO del REVISOR_EXTERNO_LAP sobre la Tarea 10, 2026-10-05): el sondeo del regreso
       // de Mercado Pago necesita saber si YA llego un pago NUEVO (no solo que la cuenta tenga
       // algun plan vigente de una compra anterior). Solo id+fecha: nunca el monto ni datos del
@@ -1538,7 +1545,9 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
     }
 
     const cuenta = await obtenerCuenta(req.uid!);
-    const decision = decidirLote(cuenta, cantidad, new Date());
+    // H8: con GRATIS_UNA_VEZ=1, cada cuenta tiene 15 envios gratis de por vida (se descuentan al autorizar).
+    const gratisUnaVez = gratisUnaVezActivo();
+    const decision = decidirLote(cuenta, cantidad, new Date(), { gratisUnaVez });
     const venceISO = decision.vence ? decision.vence.toDate().toISOString() : null;
 
     if (!decision.permitido) {
@@ -1548,19 +1557,48 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
         plan: decision.plan,
         enviosRestantes: decision.enviosRestantes,
         vence: venceISO,
+        ...(decision.gratisRestantes === undefined ? {} : { gratisRestantes: decision.gratisRestantes }),
       });
     }
 
     // Se guarda el plan EFECTIVO de este lote (R3-1: un lote <=15 es Gratis aunque la cuenta
     // tenga Paquete vigente), no el plan real de la cuenta — eso es lo que decide si se
     // descuenta saldo (ver decidirLote/reservarEnvioTx/confirmarEnvioExitosoTx).
-    const { loteId } = await crearLote(req.uid!, cantidad, decision.planEfectivo);
-
     // A.3 (requisito §13.3(c)/§12.4 del legal) + Medio 3: huella HMAC-SHA256 por cada par
-    // pagina-fila-correo, SIN guardar la lista ni los correos en claro. Siempre se guarda (ya no
-    // es condicional: `secreto`/`pares` se validaron arriba, antes de crear el lote).
-    const huellas = huellasLote(pares, secreto!); // validarSecretoYPares ya confirmo que existe.
-    await guardarConfirmacionLote(loteId, pares.length, huellas, Timestamp.now());
+    // pagina-fila-correo, SIN guardar la lista ni los correos en claro. Se calcula ANTES de crear el
+    // lote (H8: asi un fallo aqui no deja descontado el cupo gratis). `validarSecretoYPares` ya confirmo
+    // que el secreto existe.
+    const huellas = huellasLote(pares, secreto!);
+
+    let loteId: string;
+    if (decision.consumoGratis !== undefined) {
+      const creado = await crearLoteConConsumoGratis(req.uid!, cantidad);
+      if (creado.ok === false) {
+        // Otro lote gratis abierto a la vez se llevo el cupo entre la decision y la transaccion.
+        return res.json({
+          permitido: false,
+          motivo: "saldo_insuficiente",
+          plan: decision.plan,
+          enviosRestantes: decision.enviosRestantes,
+          vence: venceISO,
+          gratisRestantes: creado.gratisRestantes,
+        });
+      }
+      loteId = creado.loteId;
+    } else {
+      loteId = (await crearLote(req.uid!, cantidad, decision.planEfectivo)).loteId;
+    }
+
+    // Siempre se guarda (ya no es condicional: `secreto`/`pares` se validaron arriba, antes de crear el lote).
+    try {
+      await guardarConfirmacionLote(loteId, pares.length, huellas, Timestamp.now());
+    } catch (errorHuella) {
+      // H8: el lote gratis quedo sin huella (inutilizable): se devuelve el cupo descontado antes de fallar.
+      if (decision.consumoGratis !== undefined) {
+        await reponerConsumoGratis(req.uid!, cantidad).catch((e) => console.error("[LOTE] no se pudo reponer el cupo gratis:", e));
+      }
+      throw errorHuella;
+    }
 
     res.json({
       permitido: true,

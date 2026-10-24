@@ -116,6 +116,14 @@ export interface Cuenta {
    * cual es el pago de Paquete activo de verdad. `undefined` (el campo ausente) en cuentas creadas
    * ANTES de este fix — `resolverPagoPaqueteId` hace el fallback para esas. */
   pagoPaqueteId?: string | null;
+  /**
+   * H8 (decision de Leonardo 2026-10-24): envios GRATIS ya consumidos por esta cuenta (una cuenta =
+   * un correo de Google). Con `GRATIS_UNA_VEZ=1` cada cuenta tiene `LIMITE_GRATIS` (15) envios gratis
+   * EN TOTAL, de por vida; se descuentan al AUTORIZAR el lote (`crearLoteConConsumoGratis`) y no se
+   * reponen si el lote no se completa. Ausente en cuentas anteriores a este campo: se lee con `?? 0`,
+   * asi que todas las cuentas existentes empiezan con los 15 completos. Sin la bandera no se usa.
+   */
+  gratisUsados?: number;
   actualizado: Timestamp;
 }
 
@@ -1117,11 +1125,27 @@ export interface DecisionLote {
    * `undefined` cuando el lote es Gratis: no hay reparto, no se consume nada.
    */
   consumo?: { paquete: number; porUso: number };
+  /** H8 (solo con `gratisUnaVez`): cuantos envios gratis le quedan a la cuenta ANTES de este lote. */
+  gratisRestantes?: number;
+  /** H8 (solo con `gratisUnaVez`): envios gratis que consume ESTE lote (== `cantidad`); el llamador debe
+   * crear el lote con `crearLoteConConsumoGratis`, que lo descuenta en la misma transaccion. */
+  consumoGratis?: number;
   enviosRestantes: number;
   vence: Timestamp | null;
 }
 
-const LIMITE_GRATIS = 15;
+export const LIMITE_GRATIS = 15;
+
+/** H8: `gratisUsados` leido de Firestore, saneado (un negativo, NaN o string no puede regalar cupo). */
+export function gratisUsadosDe(valor: unknown): number {
+  const n = Number(valor);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/** H8: la regla "15 gratis de por vida por cuenta" esta apagada salvo `GRATIS_UNA_VEZ=1` en el servidor. */
+export function gratisUnaVezActivo(env: Record<string, string | undefined> = process.env): boolean {
+  return env.GRATIS_UNA_VEZ === "1";
+}
 
 /** `planEfectivo` que corresponde a un reparto de `cantidadPaquete` + `cantidadPorUso` unidades
  * (ya sea el reparto REAL de un lote aceptado, o el disponible de uno rechazado): "mixto" si las
@@ -1156,11 +1180,27 @@ function planEfectivoDeReparto(cantidadPaquete: number, cantidadPorUso: number):
  *   el saldo Por Uso — `consumo.paquete + consumo.porUso === cantidad`. `planEfectivo` es "mixto"
  *   si las dos fuentes aportan, o el nombre de la unica que aporto.
  */
-export function decidirLote(cuenta: Cuenta, cantidad: number, ahora: Date): DecisionLote {
+export function decidirLote(
+  cuenta: Cuenta,
+  cantidad: number,
+  ahora: Date,
+  opciones: { gratisUnaVez?: boolean } = {}
+): DecisionLote {
   const base = { plan: cuenta.plan, enviosRestantes: cuenta.enviosRestantes, vence: cuenta.vence };
 
-  if (cantidad <= LIMITE_GRATIS) {
-    return { permitido: true, planEfectivo: "gratis", ...base };
+  // H8: con la regla "15 gratis de por vida", el lote es gratis solo si CABE en lo que le queda a la
+  // cuenta; si no (aunque sea de 15 o menos), se cobra completo del saldo pagado, igual que un lote >15.
+  const gratisRestantes = opciones.gratisUnaVez ? Math.max(0, LIMITE_GRATIS - gratisUsadosDe(cuenta.gratisUsados)) : undefined;
+  const extra = gratisRestantes === undefined ? {} : { gratisRestantes };
+
+  if (gratisRestantes === undefined ? cantidad <= LIMITE_GRATIS : cantidad <= gratisRestantes) {
+    return {
+      permitido: true,
+      planEfectivo: "gratis",
+      ...(gratisRestantes === undefined ? {} : { consumoGratis: cantidad }),
+      ...extra,
+      ...base,
+    };
   }
 
   const paqueteVigente = cuenta.plan === "paquete" && cuenta.vence !== null && cuenta.vence.toMillis() > ahora.getTime();
@@ -1172,6 +1212,7 @@ export function decidirLote(cuenta: Cuenta, cantidad: number, ahora: Date): Deci
       permitido: false,
       motivo: "saldo_insuficiente",
       planEfectivo: planEfectivoDeReparto(disponiblePaquete, disponiblePorUso),
+      ...extra,
       ...base,
     };
   }
@@ -1182,6 +1223,7 @@ export function decidirLote(cuenta: Cuenta, cantidad: number, ahora: Date): Deci
     permitido: true,
     planEfectivo: planEfectivoDeReparto(consumoPaquete, consumoPorUso),
     consumo: { paquete: consumoPaquete, porUso: consumoPorUso },
+    ...extra,
     ...base,
   };
 }
@@ -1248,6 +1290,60 @@ export async function crearLote(
   };
   await ref.set(lote);
   return { loteId: ref.id, lote };
+}
+
+/**
+ * H8: crea el lote GRATIS descontando sus envios de los `LIMITE_GRATIS` de la cuenta en la MISMA
+ * transaccion (leer `gratisUsados` -> comprobar -> escribir cuenta y lote). Dos lotes abiertos a la vez
+ * no pueden pasarse del tope: la transaccion se reintenta y el segundo ve el consumo del primero.
+ * Si ya no cabe, devuelve `ok: false` con lo que queda (el llamador responde "saldo_insuficiente").
+ */
+export async function crearLoteConConsumoGratis(
+  uid: string,
+  cantidad: number
+): Promise<{ ok: true; loteId: string; lote: Lote } | { ok: false; gratisRestantes: number }> {
+  const cuentaRef = db().collection("cuentas").doc(uid);
+  const loteRef = db().collection("lotes").doc();
+  return db().runTransaction(async (tx) => {
+    const snap = await tx.get(cuentaRef);
+    const usados = snap.exists ? gratisUsadosDe((snap.data() as Cuenta).gratisUsados) : 0;
+    const restantes = Math.max(0, LIMITE_GRATIS - usados);
+    if (cantidad > restantes) return { ok: false as const, gratisRestantes: restantes };
+    const ahora = Timestamp.now();
+    const lote: Lote = {
+      uid,
+      cantidad,
+      planEfectivo: "gratis",
+      enviados: 0,
+      reservados: 0,
+      reservadosPaquete: 0,
+      reservadosPorUso: 0,
+      creado: ahora,
+      expira: Timestamp.fromMillis(ahora.toMillis() + DURACION_LOTE_MS),
+    };
+    if (snap.exists) {
+      tx.update(cuentaRef, { gratisUsados: usados + cantidad, actualizado: ahora });
+    } else {
+      tx.set(cuentaRef, { ...CUENTA_GRATIS_BASE, gratisUsados: usados + cantidad, actualizado: ahora });
+    }
+    tx.set(loteRef, lote);
+    return { ok: true as const, loteId: loteRef.id, lote };
+  });
+}
+
+/**
+ * H8: devuelve a la cuenta los envios gratis descontados por `crearLoteConConsumoGratis` cuando el
+ * servidor falla DESPUES de autorizar y ANTES de que el lote sea usable (p. ej. no se pudo guardar la
+ * huella de confirmacion): ahi el cliente no pudo enviar nada y no debe perder su cupo por un error nuestro.
+ */
+export async function reponerConsumoGratis(uid: string, cantidad: number): Promise<void> {
+  const cuentaRef = db().collection("cuentas").doc(uid);
+  await db().runTransaction(async (tx) => {
+    const snap = await tx.get(cuentaRef);
+    if (!snap.exists) return;
+    const usados = gratisUsadosDe((snap.data() as Cuenta).gratisUsados);
+    tx.update(cuentaRef, { gratisUsados: Math.max(0, usados - cantidad), actualizado: Timestamp.now() });
+  });
 }
 
 // ── Transacciones de reserva/confirmacion/liberacion (Tarea 3, corregida vuelta 18) ─────────
