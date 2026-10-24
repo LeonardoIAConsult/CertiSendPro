@@ -54,10 +54,10 @@ import { sanitizarCorreo } from "../shared/correo";
 import { decidirNecesitaAutorizar, type LecturaAutorizacion } from "./utils/autorizacionDatos";
 import { pausaAntesDelEnvioMs } from "./utils/envioLote";
 import JSZip from "jszip";
-import LandingPage from "./components/LandingPage";
+import LandingPage from "./legacy/LandingPage";
 // Si el chunk de la V2 no carga (deploy nuevo, red caida), cae a la landing original en vez de pantalla en blanco.
 import LandingBoundary from "./components/LandingBoundary";
-const LandingPageV2 = React.lazy(() => import("./components/LandingPageV2").catch(() => import("./components/LandingPage")));
+const LandingPageV2 = React.lazy(() => import("./components/LandingPageV2").catch(() => import("./legacy/LandingPage")));
 import LegalPage from "./components/LegalPage";
 import terminosMd from "./legal/terminos.md?raw";
 import privacidadMd from "./legal/privacidad.md?raw";
@@ -543,7 +543,7 @@ export default function App() {
         triggerBanner("success", `¡Sesión iniciada con éxito como ${result.user.displayName}!`);
 
         // GRAVE 3(c) (correccion vuelta 31, 2026-10-06): la casilla de autorizacion de datos
-        // (T11) vive ANTES del boton "Entrar con Google" en la landing (LandingPage.tsx) — el
+        // (T11) vive ANTES del boton "Entrar con Google" en la landing (legacy/LandingPage.tsx y LandingPageV2.tsx) — el
         // boton queda deshabilitado hasta marcarla, asi que llegar aqui YA implica que se acepto.
         // Se registra de inmediato (sin esperar un segundo clic en el modal posterior, que sigue
         // existiendo solo para usuarios YA logueados antes de esta tarea, sin autorizacion

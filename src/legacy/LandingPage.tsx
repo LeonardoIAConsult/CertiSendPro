@@ -1,3 +1,9 @@
+/**
+ * LANDING ORIGINAL (archivada 2026-10-24). La landing de todos es src/components/LandingPageV2.tsx.
+ * Se conserva (no se borra) como RESPALDO: App.tsx la sirve con `?landing=1` y como `fallback` de
+ * LandingBoundary si la V2 falla al cargar o al renderizar. No agregar funciones aqui: los cambios
+ * van en la V2. Cuando haya meses de V2 estable, esto se puede retirar a un tag de git.
+ */
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -19,7 +25,7 @@ import {
   Loader2,
   X
 } from "lucide-react";
-import { LogoMark, AnimatedGlyph } from "./BrandLogo";
+import { LogoMark, AnimatedGlyph } from "../components/BrandLogo";
 import { translations, TranslationDict } from "../utils/translations";
 import { getIdToken } from "../firebaseAuth";
 import { puedeEntrarConGoogle } from "../utils/autorizacionDatos";
@@ -978,7 +984,7 @@ export default function LandingPage({
                   {language === "es" ? " COP" : ""}
                 </p>
                 <p className="text-[11px] text-slate-500">
-                  {t.checkoutReferencia.replace("{usd}", String(precios.usd))} ·{" "}
+                  {t.checkoutReferencia.replace("{usd}", String(precios.paquete.usd))} ·{" "}
                   {t.checkoutTrmNota.replace("{trm}", String(precios.trm)).replace("{fecha}", precios.fechaDesde)}
                 </p>
               </div>
