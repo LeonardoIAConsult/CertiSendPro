@@ -1736,7 +1736,7 @@ export default function App() {
   const textoAceptacionTerminosUso = textoAceptacionTerminosUsoCompartido(language);
 
   if (needsAuth) {
-    // Version B de la landing: solo con ?landing=2; sin el parametro se sirve la original.
+    // La landing V2 es la de todos; `?landing=1` sirve la original (salida de emergencia).
     // Si la V2 falla (render o carga del chunk), LandingBoundary muestra la original.
     const landingProps = {
       language,
@@ -1754,7 +1754,7 @@ export default function App() {
       aceptaTerminosUso,
       onToggleAceptaTerminosUso: setAceptaTerminosUso,
     };
-    const usarV2 = new URLSearchParams(window.location.search).get("landing") === "2";
+    const usarV2 = new URLSearchParams(window.location.search).get("landing") !== "1";
     return (
       <>
         {pagoBanner}

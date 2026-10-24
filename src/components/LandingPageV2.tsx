@@ -132,6 +132,7 @@ const COPY = {
     trustMore: "Todo el detalle está en la Política de Privacidad.",
     accessTitle: "Empieza gratis",
     accessSub: "Antes de entrar, confirma las dos autorizaciones.",
+    consentHint: "Marca las dos casillas para continuar.",
     popular: "El más flexible",
     faqSub: "Lo que más nos preguntan.",
     privacy: "Política de Privacidad",
@@ -203,6 +204,7 @@ const COPY = {
     trustMore: "Every detail is in the Privacy Policy.",
     accessTitle: "Start for free",
     accessSub: "Before you sign in, confirm the two authorizations.",
+    consentHint: "Check both boxes to continue.",
     popular: "Most flexible",
     faqSub: "What people ask us most.",
     privacy: "Privacy Policy",
@@ -1068,7 +1070,9 @@ export default function LandingPageV2(p: Props) {
     return `${base || "ana.gomez"}@correo.com`;
   }, [nombre]);
 
-  const goAccess = () => document.getElementById("v2-acceso")?.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "center" });
+  // Todos los CTA de "empezar": con las 2 casillas marcadas inician sesion; sin ellas llevan a marcarlas.
+  // onStart NUNCA se llama sin las dos casillas (T11 + Terminos).
+  const startOrConsent = () => (puedeEntrar ? p.onStart() : onNeedConsent());
 
   const bg = dark ? "bg-[#07080D] text-[#E6E9F2]" : "bg-[#F7F8FC] text-[#1E2433]";
   const muted = dark ? "text-slate-400" : "text-slate-600";
@@ -1077,10 +1081,9 @@ export default function LandingPageV2(p: Props) {
 
   const loginBtn = (extra = "") => (
     <button
-      onClick={p.onStart}
-      disabled={!puedeEntrar || p.isLoggingIn}
-      title={!puedeEntrar ? t.autorizacionDatosRequerida : undefined}
-      className={`${gradBtn} rounded-xl font-bold text-sm flex items-center justify-center gap-2 group shadow-xl shadow-indigo-600/25 hover:opacity-95 transition disabled:opacity-40 disabled:cursor-not-allowed ${extra}`}
+      onClick={startOrConsent}
+      disabled={p.isLoggingIn}
+      className={`${gradBtn} rounded-xl font-bold text-sm flex items-center justify-center gap-2 group shadow-xl shadow-indigo-600/25 hover:opacity-95 active:scale-[0.98] transition disabled:opacity-60 disabled:cursor-not-allowed ${extra}`}
     >
       {p.isLoggingIn ? <Loader2 className="w-4 h-4 animate-spin" /> : (<><span>{t.loginWithGoogle}</span><ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" /></>)}
     </button>
@@ -1112,7 +1115,7 @@ export default function LandingPageV2(p: Props) {
             <button onClick={() => setTheme(dark ? "light" : "dark")} aria-label={language === "en" ? "Toggle theme" : "Cambiar tema"} className={`p-2 rounded-lg ${dark ? "hover:bg-white/5 text-yellow-400" : "hover:bg-slate-100 text-slate-700"}`}>
               {dark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
-            <button onClick={goAccess} className={`${gradBtn} px-3 sm:px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shadow-md shadow-indigo-900/20 active:scale-[0.97] transition-transform`}>
+            <button onClick={startOrConsent} className={`${gradBtn} px-3 sm:px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shadow-md shadow-indigo-900/20 active:scale-[0.97] transition-transform`}>
               <span>{t.startFree}</span><ArrowRight className="w-3.5 h-3.5" />
             </button>
           </div>
@@ -1186,6 +1189,7 @@ export default function LandingPageV2(p: Props) {
               <span>{p.textoAceptacionTerminosUso}{" "}<button type="button" onClick={p.onViewTerminos} className="text-indigo-400 underline font-semibold">{c.terms}</button>.</span>
             </label>
             {loginBtn("w-full py-3.5")}
+            {!puedeEntrar && <p role="status" className={`text-center text-xs ${muted}`}>{c.consentHint}</p>}
           </div>
         </div>
       </section>
@@ -1363,7 +1367,7 @@ export default function LandingPageV2(p: Props) {
           </div>
           <div className="grid lg:grid-cols-3 gap-6 items-stretch">
             {[
-              { n: t.planFreeName, price: t.planFreePrice, f: [t.planFreeFeature1, t.planFreeFeature2, t.planFreeFeature3], cta: t.startFree, hot: false, act: goAccess, notes: [] as { txt: string; ok?: boolean }[] },
+              { n: t.planFreeName, price: t.planFreePrice, f: [t.planFreeFeature1, t.planFreeFeature2, t.planFreeFeature3], cta: t.startFree, hot: false, act: startOrConsent, notes: [] as { txt: string; ok?: boolean }[] },
               {
                 n: t.planPagoPorUsoName, price: t.planPagoPorUsoUsdGrande,
                 f: [t.planPagoPorUsoFeature1, t.planPagoPorUsoFeature2, t.planPagoPorUsoFeature3, t.planPagoPorUsoFeature4],
@@ -1451,7 +1455,7 @@ export default function LandingPageV2(p: Props) {
           <motion.div aria-hidden animate={reduce ? undefined : { rotate: [0, 6, 0], y: [0, -10, 0] }} transition={{ duration: 8, repeat: Infinity, ease: "easeInOut" }} className="absolute -right-6 -bottom-6 w-48 h-48 text-white/10"><CertiSendGlyph className="w-full h-full" /></motion.div>
           <h2 className="relative text-3xl sm:text-5xl font-extrabold tracking-tight">{c.ctaFinal}</h2>
           <p className="relative text-sm sm:text-base text-white/85 max-w-xl mx-auto">{c.ctaSub}</p>
-          <button onClick={goAccess} className="relative px-8 py-4 rounded-xl bg-white text-indigo-700 font-extrabold text-sm inline-flex items-center gap-2 hover:scale-[1.03] active:scale-[0.97] transition-transform">
+          <button onClick={startOrConsent} className="relative px-8 py-4 rounded-xl bg-white text-indigo-700 font-extrabold text-sm inline-flex items-center gap-2 hover:scale-[1.03] active:scale-[0.97] transition-transform">
             {t.startFree}<ArrowRight className="w-4 h-4" />
           </button>
           <CertificatePile />
