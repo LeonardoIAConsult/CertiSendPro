@@ -295,6 +295,8 @@ export default function App() {
         // Tarea 16A-2 (`?? 0`, mismo trato que el servidor, para cuentas leidas antes de este
         // campo o cualquier respuesta rara).
         saldoPorUso: data.saldoPorUso ?? 0,
+        // H8: envios gratis restantes (`null` si el servidor tiene la regla apagada).
+        gratisRestantes: typeof data.gratisRestantes === "number" && Number.isFinite(data.gratisRestantes) ? Math.max(0, Math.floor(data.gratisRestantes)) : null,
         ultimoPago: data.ultimoPago ?? null,
       };
       setCuenta(leida);
@@ -1525,7 +1527,7 @@ export default function App() {
             // pagado — `dataLote.enviosRestantes` (Paquete) viene de la respuesta de
             // /api/lote/iniciar; `cuenta?.saldoPorUso` viene de la cuenta YA cargada en el
             // cliente (/api/lote/iniciar no manda el saldo Por uso en su respuesta de rechazo).
-            formatearMotivoRechazoLote(dataLote.motivo, dataLote.enviosRestantes, cuenta?.saldoPorUso, matchedCount, language);
+            formatearMotivoRechazoLote(dataLote.motivo, dataLote.enviosRestantes, cuenta?.saldoPorUso, matchedCount, language, dataLote.gratisRestantes);
         addLog(mensaje, "error");
         triggerBanner("error", mensaje);
         // GRAVE 3(d) (correccion vuelta 31, 2026-10-06): un 403 con `motivo: "autorizacion"`
@@ -2058,6 +2060,13 @@ export default function App() {
                   <Shield className="w-3.5 h-3.5 text-indigo-400" />
                   <span className="text-[10px] font-mono">{estadoPlan.titulo}</span>
                 </div>
+                {/* H8: gratis restantes cuando el titulo ya es el de un plan pagado. */}
+                {estadoPlan.gratisTexto && (
+                  <div className={`flex items-center gap-2 px-3 py-1.5 rounded-md transition-colors ${isDark ? "bg-[#16181D] border border-[#2D2F36]" : "bg-gray-50 border border-gray-200"}`}>
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                    <span className="text-[10px] font-mono">{estadoPlan.gratisTexto}</span>
+                  </div>
+                )}
                 {/* Paso 16B: el saldo de "Pago por uso" se muestra APARTE del Paquete (las dos
                     fuentes son independientes y acumulables entre si — nunca una sustituye a la
                     otra en "Mi plan"). */}

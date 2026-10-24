@@ -10,7 +10,7 @@ Pruébalo en [certisendpro.online](https://certisendpro.online/).
 
 Lo grande: ya no envías a ciegas. Antes de que salga un solo correo, ves qué página va a qué persona y lo confirmas tú.
 
-* **Gratis, hasta 15 certificados por lote.**
+* **Gratis: 15 envíos por correo de Google, en total.** No son 15 por lote: se descuentan de a poco, y un lote es gratis solo si cabe entero en los que te quedan.
 * **Emparejamiento uno a uno, con homónimos detectados.** Cada certificado aparece con el nombre que leyó la IA y con el nombre y el correo de su destinatario. Si en tu hoja hay dos personas con el mismo nombre, eliges la fila correcta; la app no toma la primera por ti.
 * **Confirmas página → correo antes de enviar.** Revisas la lista completa y la apruebas. Sin esa confirmación, no sale nada.
 * **Una huella por certificado, sin guardar correos en claro.** Queda la prueba de cada par página → correo que confirmaste, pero tu lista de destinatarios no se guarda en una base de datos (los registros técnicos pueden conservar 30 días un correo que falló; ver [Privacidad](https://certisendpro.online/privacidad)).
@@ -18,7 +18,7 @@ Lo grande: ya no envías a ciegas. Antes de que salga un solo correo, ves qué p
 * **Autorización de datos y Términos antes de entrar.** Las reglas quedan claras desde el principio: [Términos](https://certisendpro.online/terminos) y [Privacidad](https://certisendpro.online/privacidad).
 * **Paquete de 150 envíos.** US$15, que se cobran en pesos a la TRM del día (la web te muestra el valor en COP de hoy). Pago único, válido 1 mes o hasta gastarlo.
 * **Pago por uso.** US$0,15 por envío: eliges cuántos compras (entre 50 y 5.000) y se cobran en pesos a la TRM del día. Tu saldo no vence y se suma con cada compra.
-* **Reglas para los dos planes de pago:** los lotes de 15 o menos no gastan saldo, los envíos que fallan no se descuentan y, si tienes los dos, primero se usa el Paquete. El pago es en línea con Mercado Pago.
+* **Reglas para los dos planes de pago:** los lotes que se envían como gratis (dentro de tus 15 envíos gratis por correo) no gastan saldo, los envíos que fallan no se descuentan y, si tienes los dos, primero se usa el Paquete. El pago es en línea con Mercado Pago.
 * **Acuse de cada compra por correo.** Cada compra recibe su acuse; si ese correo falla, se reintenta solo de forma programada.
 
 ## 📱 Vista Previa de la Aplicación

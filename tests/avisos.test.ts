@@ -398,13 +398,13 @@ test("construirAvisoReembolsoLeonardo: sin correo del comprador, dice que falta 
 // revirtio (le diria a quien conserva su Paquete que lo perdio), y viceversa.
 const FECHA_REVERSION = new Date("2026-10-06T15:00:00.000Z");
 
-test("construirAvisoReversionComprador: ES, cuentaRevertida=true -> dice plan Gratis, lotes de 15 y como reclamar", () => {
+test("construirAvisoReversionComprador: ES, cuentaRevertida=true -> dice plan Gratis, envios gratis restantes y como reclamar", () => {
   const { asunto, texto } = construirAvisoReversionComprador({
     idioma: "es", paymentId: "pago-1", status: "refunded", cuentaRevertida: true, fecha: FECHA_REVERSION,
   });
   assert.match(asunto, /plan Gratis/);
   assert.match(texto, /pasó al plan Gratis/);
-  assert.match(texto, /lotes de hasta 15 certificados/);
+  assert.match(texto, /envíos gratis que te queden/);
   assert.match(texto, /pago-1/);
   assert.match(texto, /si no reconoces este movimiento/i);
   assert.doesNotMatch(texto, /no cambia/);
@@ -421,13 +421,13 @@ test("construirAvisoReversionComprador: ES, cuentaRevertida=false -> dice que la
   assert.doesNotMatch(texto, /lotes de hasta 15/);
 });
 
-test("construirAvisoReversionComprador: EN, cuentaRevertida=true -> dice Free plan y batches of up to 15 (no una copia del ES)", () => {
+test("construirAvisoReversionComprador: EN, cuentaRevertida=true -> dice Free plan y free sends you have left (no una copia del ES)", () => {
   const { asunto, texto } = construirAvisoReversionComprador({
     idioma: "en", paymentId: "pago-1", status: "refunded", cuentaRevertida: true, fecha: FECHA_REVERSION,
   });
   assert.match(asunto, /Free plan/);
   assert.match(texto, /moved to the Free plan/);
-  assert.match(texto, /batches of up to 15 certificates/);
+  assert.match(texto, /free sends you have left/);
   assert.doesNotMatch(texto, /pasó al plan Gratis/i);
 });
 

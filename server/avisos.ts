@@ -336,7 +336,7 @@ export function construirCorreoConfirmacionCompra(
         `We received and confirmed your payment. This email is the receipt for your purchase; please keep it.\n\n` +
         `PURCHASE SUMMARY\n` +
         `Plan: Bundle (150 sends)\n` +
-        `What it includes: 150 successful sends, valid for 1 month or until used up, whichever comes first. Batches of 15 certificates or fewer never spend your Bundle balance. Unused sends expire and do not carry over.\n` +
+        `What it includes: 150 successful sends, valid for 1 month or until used up, whichever comes first. Batches you send as free (within your 15 free sends per account) never spend your Bundle balance. Unused sends expire and do not carry over.\n` +
         `Price paid: COP $${copTexto}, total and final price, with no additional charges\n` +
         `Calculation: US$15 x TRM ${datos.trm} (official rate, effective ${datos.fechaTrm}), rounded to the peso\n` +
         `Payment date: ${fechaPagoTexto}\n` +
@@ -359,7 +359,7 @@ export function construirCorreoConfirmacionCompra(
       `Recibimos y confirmamos tu pago. Este correo es el acuse de recibo de tu compra; guárdalo como comprobante.\n\n` +
       `RESUMEN DE LA COMPRA\n` +
       `Plan: Paquete (150 envíos)\n` +
-      `Qué incluye: 150 envíos con éxito, 1 mes de vigencia o hasta gastarlos, lo que ocurra primero. Los lotes de 15 certificados o menos no gastan tu Paquete. Los envíos que no uses vencen y no se acumulan.\n` +
+      `Qué incluye: 150 envíos con éxito, 1 mes de vigencia o hasta gastarlos, lo que ocurra primero. Los lotes que se envían como gratis (dentro de tus 15 envíos gratis por cuenta) no gastan tu Paquete. Los envíos que no uses vencen y no se acumulan.\n` +
       `Precio pagado: $${copTexto} COP, precio total y final, sin cargos adicionales\n` +
       `Cálculo: US$15 × TRM ${datos.trm} (certificada por la Superintendencia Financiera, vigente el ${datos.fechaTrm}), redondeado al peso\n` +
       `Fecha del pago: ${fechaPagoTexto}\n` +
@@ -454,8 +454,8 @@ export function construirCorreoConfirmacionCompraPorUso(
 // su cuenta (el mismo que ya recibio el acuse de compra), en vez de que Leonardo tenga que
 // escribirlo a mano cada vez. F1: el correo tiene DOS variantes segun si la reversion de verdad
 // toco la cuenta (`cuentaRevertida`, el resultado REAL de `revertirPagoSiNoRevertidoTx` — nunca se
-// infiere de otra cosa): (a) revertida -> la cuenta volvio a Gratis, puede seguir enviando lotes
-// de hasta 15 y que hacer si no reconoce el movimiento; (b) no revertida (el pago ya no era el
+// infiere de otra cosa): (a) revertida -> la cuenta volvio a Gratis, puede seguir usando los envios gratis
+// que le queden y que hacer si no reconoce el movimiento; (b) no revertida (el pago ya no era el
 // activo) -> la cuenta no cambia. Decirle "tu cuenta volvio a Gratis" a quien SI conserva su
 // Paquete seria una promesa falsa.
 export function construirAvisoReversionComprador(datos: {
@@ -507,8 +507,8 @@ export function construirAvisoReversionComprador(datos: {
         asunto: `Your CertiSend Pro account is back on the Free plan`,
         texto:
           `Hello: Mercado Pago informed us of a ${tipo} of payment ${refMp}. Because of this, your ` +
-          `account moved to the Free plan on ${fechaTexto}: you can keep sending batches of up to ` +
-          `15 certificates at no cost. If you don't recognize this, write to ${PROVEEDOR_CORREO} ` +
+          `account moved to the Free plan on ${fechaTexto}: you can keep using the free sends you have left ` +
+          `(each account gets 15 in total, for life). If you don't recognize this, write to ${PROVEEDOR_CORREO} ` +
           `with reference ${refMp}.\n\n` +
           pieProveedor("en"),
       };
@@ -529,8 +529,8 @@ export function construirAvisoReversionComprador(datos: {
       asunto: `Tu cuenta de CertiSend Pro volvió al plan Gratis`,
       texto:
         `Hola: Mercado Pago nos informó un ${tipo} del pago ${refMp}. Por eso tu cuenta pasó al ` +
-        `plan Gratis desde el ${fechaTexto}: puedes seguir enviando lotes de hasta 15 certificados ` +
-        `sin costo. Si no reconoces este movimiento, escríbenos a ${PROVEEDOR_CORREO} con la ` +
+        `plan Gratis desde el ${fechaTexto}: puedes seguir usando los envíos gratis que te queden ` +
+        `(cada cuenta tiene 15 en total, de por vida). Si no reconoces este movimiento, escríbenos a ${PROVEEDOR_CORREO} con la ` +
         `referencia ${refMp}.\n\n` +
         pieProveedor("es"),
     };

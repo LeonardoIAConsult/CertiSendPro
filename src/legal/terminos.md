@@ -1,6 +1,6 @@
 # Términos y Condiciones de Venta y Suscripción — CertiSend Pro
 
-**Versión:** 1.4 · **Entrada en vigencia:** el día de su publicación en https://certisendpro.online
+**Versión:** 1.5 · **Entrada en vigencia:** el día de su publicación en https://certisendpro.online
 
 Cada sección tiene dos capas: el texto que obliga y, debajo, **«En corto»**, una línea en lenguaje sencillo. Si las dos parecen decir cosas distintas, manda el texto que obliga y nos lo puedes reportar.
 
@@ -38,7 +38,7 @@ Esta identificación es la misma que aparece en la Política de Privacidad y en 
 
 3.1. Para usar CertiSend inicias sesión con una cuenta de Google. Debes ser **mayor de 18 años** y tener capacidad para contratar. Si usas CertiSend en nombre de una organización, declaras que tienes facultad para hacerlo.
 
-3.2. Una cuenta corresponde a un usuario. El plan que compres queda asociado a esa cuenta de Google y no se transfiere a otra.
+3.2. Una cuenta corresponde a un usuario. El plan que compres queda asociado a esa cuenta de Google y no se transfiere a otra. Una cuenta corresponde a un correo de Google. Si una organización o varias personas usan la misma cuenta, comparten sus envíos gratis y su saldo, y el titular del correo responde por su uso.
 
 3.3. Tú respondes por la seguridad de tu cuenta de Google. Puedes retirar en cualquier momento el permiso que diste a CertiSend desde la configuración de tu cuenta de Google («Aplicaciones con acceso a tu cuenta»).
 
@@ -50,29 +50,35 @@ Esta identificación es la misma que aparece en la Política de Privacidad y en 
 
 | Plan | Qué incluye | Precio |
 |---|---|---|
-| **Gratis** | Hasta 15 certificados por lote. Asunto y cuerpo del correo personalizados. Lectura de nombres con IA. | $0 |
-| **Paquete** | 150 envíos con éxito para lotes de más de 15 certificados. Vigencia: 1 mes desde la confirmación del pago o hasta gastarlos, lo que ocurra primero. Se compra como **pago único**: no se renueva solo ni genera cobros posteriores. Los lotes de 15 certificados o menos **no gastan** envíos del Paquete (sección 4.4-bis). | Precio final en pesos que resulta de la fórmula de la sección 5 (referencia: US$15) |
-| **Pago por uso** | Saldo de envíos con éxito para lotes de más de 15 certificados, comprado en bloques de entre **50 y 5.000 envíos** por compra. Se compra como **pago único**: no se renueva solo ni genera cobros posteriores. El saldo **no tiene fecha de vencimiento** y **se acumula** con el de compras anteriores (sección 4.5-bis). Los lotes de 15 certificados o menos **no gastan** este saldo (sección 4.4-bis). | Precio final en pesos que resulta de la fórmula de la sección 5 (referencia: US$0,15 por cada envío que compres) |
+| **Gratis** | **15 envíos gratis en total por correo de Google (por cuenta), de por vida de ese correo** (no son 15 por lote ni por mes). Se van descontando: puedes enviar 10 hoy y 5 después. Un lote es gratis solo si cabe entero en los envíos gratis que te quedan (sección 4.4-bis). Asunto y cuerpo del correo personalizados. Lectura de nombres con IA. | $0 |
+| **Paquete** | 150 envíos con éxito para los lotes que no caben en tus envíos gratis restantes. Vigencia: 1 mes desde la confirmación del pago o hasta gastarlos, lo que ocurra primero. Se compra como **pago único**: no se renueva solo ni genera cobros posteriores. Los lotes que se envían como gratis **no gastan** envíos del Paquete (sección 4.4-bis). | Precio final en pesos que resulta de la fórmula de la sección 5 (referencia: US$15) |
+| **Pago por uso** | Saldo de envíos con éxito para los lotes que no caben en tus envíos gratis restantes, comprado en bloques de entre **50 y 5.000 envíos** por compra. Se compra como **pago único**: no se renueva solo ni genera cobros posteriores. El saldo **no tiene fecha de vencimiento** y **se acumula** con el de compras anteriores (sección 4.5-bis). Los lotes que se envían como gratis **no gastan** este saldo (sección 4.4-bis). | Precio final en pesos que resulta de la fórmula de la sección 5 (referencia: US$0,15 por cada envío que compres) |
 
 **Pro no se ofrece.** CertiSend no vende ni anuncia ningún plan Pro; si en el futuro se ofreciera, se publicaría con aviso previo y sus propias condiciones.
 
 4.2. **Moneda y precio final.** Todo cobro se hace en **pesos colombianos (COP)**. El precio principal que verás antes de pagar es el **monto exacto en pesos**: es el **precio total y final, sin cargos adicionales**: incluye cualquier impuesto o costo que aplique, y es exactamente lo que se cobra; no se le suma nada después. El valor en dólares se muestra solo como **referencia** para calcular el precio.
 
-4.3. **Qué es un «envío con éxito».** Es cada correo que la API de Gmail acepta para envío desde tu cuenta (Gmail devuelve un identificador del mensaje). Los envíos que Gmail rechaza o que fallan **no se descuentan** de tu Paquete. CertiSend no puede garantizar que el destinatario abra o reciba el correo una vez Gmail lo aceptó (por ejemplo, si la dirección no existe o el correo cae en spam).
+4.3. **Qué es un «envío con éxito».** Es cada correo que la API de Gmail acepta para envío desde tu cuenta (Gmail devuelve un identificador del mensaje). Los envíos que Gmail rechaza o que fallan **no se descuentan** de tu saldo pagado (Paquete o Pago por uso); en los envíos gratis rige la reposición de la sección 4.4-bis. CertiSend no puede garantizar que el destinatario abra o reciba el correo una vez Gmail lo aceptó (por ejemplo, si la dirección no existe o el correo cae en spam).
 
-4.4. **Antes de empezar un lote**, CertiSend verifica en su servidor que tu plan lo permite: en Gratis, que el lote no supere 15 certificados; en Paquete y Pago por uso, que la suma de tu saldo disponible de los dos alcance para todo el lote (sección 4.4-ter). Si no alcanza, el lote no empieza y te lo decimos antes. Ya iniciado, un lote puede quedar incompleto por causas ajenas a tu plan (por ejemplo, los límites que Gmail aplica a tu cuenta o una falla de conexión); los envíos que no salgan no se descuentan.
+4.4. **Antes de empezar un lote**, CertiSend verifica en su servidor que tu plan lo permite: que el lote quepa entero en los envíos gratis que te quedan (sección 4.4-bis) o, si no cabe, que la suma de tu saldo disponible del Paquete y de Pago por uso alcance para todo el lote (sección 4.4-ter). Si no se cumple ninguna de las dos, el lote no empieza y te lo decimos antes. Ya iniciado, un lote puede quedar incompleto por causas ajenas a tu plan (por ejemplo, los límites que Gmail aplica a tu cuenta o una falla de conexión); los envíos que no salgan no se descuentan del saldo pagado; los envíos gratis se descuentan al autorizar el lote y solo se reponen en los casos de la sección 4.4-bis.
 
-4.4-bis. **Los lotes pequeños no gastan tu saldo pagado.** Los lotes de **15 certificados o menos** se envían siempre con las condiciones del plan Gratis y **nunca descuentan** envíos del Paquete ni de Pago por uso, aunque los tengas activos y con saldo. El saldo pagado **solo se usa para lotes de más de 15 certificados**, y en ese caso cada envío con éxito de ese lote descuenta uno. Si tu saldo no alcanza para un lote de más de 15, puedes dividirlo en lotes de 15 o menos.
+4.4-bis. **Tus 15 envíos gratis.** Cada correo de Google con el que inicias sesión tiene **15 envíos gratis en total, de por vida de ese correo**; no son 15 por lote ni por mes. Se descuentan de a poco: puedes enviar 10 hoy y 5 después. **Se descuentan al autorizar el lote**, por la cantidad de certificados del lote. El contador es del correo, no solo de tu cuenta de CertiSend: eliminar tu cuenta y crearla de nuevo con el mismo correo **no repone** los envíos gratis. En Gmail, las variantes del mismo buzón (con puntos o con un sufijo «+») cuentan como el mismo correo; esto aplica a Gmail: los demás proveedores, incluidos Google Workspace con dominio propio, se cuentan por la dirección exacta. Solo cuenta el correo verificado por Google. Para aplicar este límite conservamos una huella seudonimizada de tu correo (no tu correo en claro) y cuántos envíos gratis usaste, hasta 24 meses después del último envío gratis autorizado con ese correo, como explica la Política de Privacidad (secciones 3 y 7). Los 15 son **por cuenta**, sin importar cuántas personas la usen: una organización que entra con un solo correo comparte esos 15 envíos entre todas las personas que lo usan.
 
-4.4-ter. **Orden de consumo cuando tienes los dos saldos.** Para un lote de más de 15 certificados, primero se descuenta del saldo vigente del Paquete y, solo si no alcanza, del saldo de Pago por uso. Puedes comprar Pago por uso aunque tengas un Paquete vigente (a diferencia de la sección 4.5, que solo bloquea la recompra de otro Paquete). Si la suma de tu saldo del Paquete y de Pago por uso no alcanza para todo el lote, el lote **no se envía** y te lo decimos antes de empezar.
+**Reposición.** **No se reponen** los envíos que decidas no hacer (por ejemplo, cierras la aplicación o descartas certificados) ni los que fallen por un dato inexacto que tú aportaste (un correo de destinatario inexistente). Si Gmail o una falla técnica te impide enviar certificados de un lote autorizado como gratis —un error de conexión con Google, el límite de cuota que Google aplica (error 429) o una falla del servicio de Gmail (error 5xx)— te reponemos esos envíos gratis automáticamente cuando el lote vence, dos (2) horas después de autorizado. Si el fallo se debe a CertiSend (por ejemplo, una caída de nuestro servidor o un error nuestro al leer o armar el envío) o a que tu autorización de Google expiró durante el lote, también te reponemos esos envíos: escribe a contacto@leonardoantolinez.com con el correo de tu cuenta y la hora aproximada, y respondemos según la sección 10.2.
+
+**Lotes que no caben.** Un lote es gratis solo si **cabe entero** en los envíos gratis que te quedan: CertiSend nunca mezcla en un mismo lote envíos gratis y pagados. Si el lote no cabe entero, se cobra **completo** de tu saldo pagado (sección 4.4-ter); si ese saldo no alcanza, el lote no empieza y puedes comprar un Paquete o Pago por uso, o enviar un lote más pequeño que quepa en los gratis que te quedan. Una vez agotados tus envíos gratis, incluso un lote de un solo certificado requiere saldo pagado. Los lotes que se envían como gratis **nunca descuentan** envíos del Paquete ni de Pago por uso, aunque los tengas activos y con saldo.
+
+4.4-ter. **Orden de consumo cuando tienes los dos saldos.** Para un lote que no cabe en tus envíos gratis restantes, primero se descuenta del saldo vigente del Paquete y, solo si no alcanza, del saldo de Pago por uso. Puedes comprar Pago por uso aunque tengas un Paquete vigente (a diferencia de la sección 4.5, que solo bloquea la recompra de otro Paquete). Si la suma de tu saldo del Paquete y de Pago por uso no alcanza para todo el lote, el lote **no se envía** y te lo decimos antes de empezar.
 
 4.5. **Sobrantes del Paquete.** Los envíos del Paquete **vencen** al mes de la confirmación del pago. **Los envíos que no uses en ese mes se pierden y no se acumulan** a otro Paquete que compres después. Este vencimiento se te muestra antes de pagar y dentro de la app («te quedan N envíos, vencen el DD/MM»). **No puedes comprar un Paquete nuevo mientras el actual esté vigente y tenga saldo:** debes agotarlo o esperar a que venza antes de comprar otro; si lo intentas, no podrás iniciar el pago y te mostraremos el aviso correspondiente. Este bloqueo es solo del Paquete: no te impide comprar Pago por uso (sección 4.5-bis).
 
 4.5-bis. **Pago por uso: saldo sin vencimiento.** Cada compra de Pago por uso es de un mínimo de 50 y un máximo de 5.000 envíos. El saldo que compras **no vence** y **se acumula** con el de cualquier compra anterior de Pago por uso que no hayas gastado. Puedes comprar Pago por uso cuantas veces quieras, incluso con un Paquete vigente.
 
-4.6. **Plan Gratis.** El plan Gratis no tiene costo. Sus condiciones (por ejemplo, el tope de 15 certificados por lote) pueden cambiar solo con el aviso previo de la sección 11.
+4.6. **Plan Gratis.** El plan Gratis no tiene costo. Sus condiciones (por ejemplo, los 15 envíos gratis por correo) pueden cambiar solo con el aviso previo de la sección 11.
 
-**En corto:** Gratis hasta 15 por lote; Paquete de 150 envíos de pago único que vencen al mes y no se acumulan; Pago por uso de 50 a 5.000 envíos por compra, que nunca vence y se acumula. Pro no se ofrece. Todo se cobra en pesos, con el precio final a la vista antes de pagar.
+4.7. **Vigencia de la regla de envíos gratis.** La regla de envíos gratis por cuenta (secciones 4.1 y 4.4-bis) rige desde la publicación de esta versión; el contador de cada correo empieza en cero con ella. La huella de tu correo y el conteo se conservan hasta 24 meses después del último envío gratis autorizado con ese correo, y luego se eliminan (Política de Privacidad, secciones 3 y 7).
+
+**En corto:** Gratis son 15 envíos por correo de Google, en total y de por vida (no por lote), compartidos por quien use esa cuenta y sin reponerse si borras y recreas la cuenta (solo se reponen los que Gmail o una falla técnica te impidan enviar), y la huella seudonimizada de tu correo se guarda hasta 24 meses después de tu último envío gratis; Paquete de 150 envíos de pago único que vencen al mes y no se acumulan; Pago por uso de 50 a 5.000 envíos por compra, que nunca vence y se acumula. Pro no se ofrece. Todo se cobra en pesos, con el precio final a la vista antes de pagar.
 
 ## 5. Cómo se calcula el precio en pesos (fórmula pactada)
 
@@ -110,7 +116,7 @@ Donde:
 
 7.1. El Paquete y Pago por uso son **pagos únicos**: ninguno se renueva solo, no queda ninguna suscripción activa en Mercado Pago y **no se te vuelve a cobrar**. Si quieres más envíos, compras otro Paquete o más Pago por uso cuando quieras.
 
-7.2. Al vencer el Paquete, gastar sus envíos o agotar tu saldo de Pago por uso, tu cuenta sigue en el plan Gratis sin ningún trámite. No hay permanencia mínima ni penalidad.
+7.2. Al vencer el Paquete, gastar sus envíos o agotar tu saldo de Pago por uso, tu cuenta vuelve al plan Gratis sin ningún trámite, con los envíos gratis que todavía te queden (si ya los usaste todos, necesitas comprar para enviar más). No hay permanencia mínima ni penalidad.
 
 **En corto:** pagas una vez y se acabó; no hay nada que cancelar.
 
@@ -122,9 +128,9 @@ Donde:
 
 8.3. Esto **no afecta** los reembolsos de la sección 10 ni la reversión del pago de la sección 9.
 
-8.4. **Devolución del Paquete sin usar.** Aunque el retracto no proceda, si compraste un Paquete y **no has hecho ningún envío con éxito con él**, puedes pedir la devolución completa de ese pago dentro de los **cinco (5) días hábiles** siguientes a la confirmación del pago, escribiendo a contacto@leonardoantolinez.com. Los lotes de 15 o menos no cuentan como uso del Paquete (sección 4.4-bis). Al hacer la devolución, el Paquete se desactiva. Si ya hiciste al menos un envío con éxito con ese Paquete, esta devolución no aplica. Se paga en los plazos de la sección 10.2.
+8.4. **Devolución del Paquete sin usar.** Aunque el retracto no proceda, si compraste un Paquete y **no has hecho ningún envío con éxito con él**, puedes pedir la devolución completa de ese pago dentro de los **cinco (5) días hábiles** siguientes a la confirmación del pago, escribiendo a contacto@leonardoantolinez.com. Los lotes enviados como gratis no cuentan como uso del Paquete (sección 4.4-bis). Al hacer la devolución, el Paquete se desactiva. Si ya hiciste al menos un envío con éxito con ese Paquete, esta devolución no aplica. Se paga en los plazos de la sección 10.2.
 
-8.5. **Devolución de una compra de Pago por uso sin usar.** El mismo principio de la sección 8.4 aplica a cada compra de Pago por uso, de manera individual: si **no has hecho ningún envío con éxito de ESA compra en particular**, puedes pedir la devolución completa de ese pago dentro de los **cinco (5) días hábiles** siguientes a su confirmación, escribiendo a contacto@leonardoantolinez.com con la referencia del pago. Los lotes de 15 o menos no cuentan como uso (sección 4.4-bis). Si ya hiciste al menos un envío con éxito que se descontó de esa compra, esta devolución no aplica a esa compra, aunque conserves saldo sin usar de otras compras de Pago por uso. Se paga en los plazos de la sección 10.2.
+8.5. **Devolución de una compra de Pago por uso sin usar.** El mismo principio de la sección 8.4 aplica a cada compra de Pago por uso, de manera individual: si **no has hecho ningún envío con éxito de ESA compra en particular**, puedes pedir la devolución completa de ese pago dentro de los **cinco (5) días hábiles** siguientes a su confirmación, escribiendo a contacto@leonardoantolinez.com con la referencia del pago. Los lotes enviados como gratis no cuentan como uso (sección 4.4-bis). Si ya hiciste al menos un envío con éxito que se descontó de esa compra, esta devolución no aplica a esa compra, aunque conserves saldo sin usar de otras compras de Pago por uso. Se paga en los plazos de la sección 10.2.
 
 **8.5-bis. Si tienes más de una compra de Pago por uso.** Si al momento de tu solicitud tienes más de una compra de Pago por uso y no es posible saber con certeza de cuál salió un envío ya hecho, lo resolvemos así: consideramos que los envíos ya hechos se descontaron primero de tu compra de Pago por uso más antigua con saldo (orden de llegada) y seguimos en ese orden. Solo te negamos la devolución de la compra que pides si, aplicando ese orden, a esa compra en concreto ya le tocó al menos un envío. Si queda alguna duda real sobre el resultado de ese cálculo, la resolvemos a tu favor (Ley 1480 de 2011, artículo 34).
 
@@ -165,7 +171,7 @@ Donde:
 
 11.1. Podemos cambiar estos Términos, los planes o sus precios de referencia en dólares. Si el cambio te afecta, te avisaremos por correo **con al menos treinta (30) días calendario de anticipación**, indicando qué cambia y desde cuándo.
 
-11.2. Los cambios **nunca se aplican a un Paquete que ya pagaste**: ese Paquete conserva las condiciones con las que lo compraste hasta su vencimiento.
+11.2. Los cambios nunca se aplican a un Paquete ya pagado ni al saldo de Pago por uso ya comprado, ni reducen los envíos gratis que ya te correspondían: conservan las condiciones con las que los obtuviste.
 
 11.3. Un precio nuevo solo se aplica a las compras que hagas después de que entre en vigor, y lo verás en el resumen previo antes de aceptarlo.
 
@@ -203,9 +209,9 @@ Donde:
 
 ## 14. Uso aceptable
 
-No puedes usar CertiSend para: enviar correos no solicitados o publicidad masiva; enviar contenido ilegal, engañoso, que suplante a otra persona u organización o que infrinja derechos de terceros; emitir certificados falsos o de eventos que no existieron; enviar a personas de las que no tienes autorización; intentar saltarse los límites de los planes, atacar, sobrecargar o acceder sin permiso al servicio. Si incumples esto, podemos suspender tu acceso (sección 17).
+No puedes usar CertiSend para: enviar correos no solicitados o publicidad masiva; enviar contenido ilegal, engañoso, que suplante a otra persona u organización o que infrinja derechos de terceros; emitir certificados falsos o de eventos que no existieron; enviar a personas de las que no tienes autorización; crear cuentas adicionales o usar variantes del mismo correo con el propósito de eludir el límite de envíos gratis; intentar saltarse los límites de los planes, atacar, sobrecargar o acceder sin permiso al servicio. Si incumples esto, podemos suspender tu acceso (sección 17).
 
-**En corto:** solo certificados reales, a gente que los espera.
+**En corto:** solo certificados reales, a gente que los espera; y no abras cuentas extra para conseguir más envíos gratis.
 
 ## 15. Propiedad intelectual del servicio
 
@@ -225,7 +231,7 @@ La marca CertiSend Pro, el software, el diseño de la aplicación y sus textos s
 
 ## 17. Terminación
 
-17.1. **Por tu parte:** puedes dejar de usar CertiSend cuando quieras. Para cerrar tu cuenta y pedir la supresión de tus datos, escribe a contacto@leonardoantolinez.com; se atiende como indica la Política de Privacidad, salvo los datos de pagos que la ley nos obligue a conservar.
+17.1. **Por tu parte:** puedes dejar de usar CertiSend cuando quieras. Para cerrar tu cuenta y pedir la supresión de tus datos, escribe a contacto@leonardoantolinez.com; se atiende como indica la Política de Privacidad, salvo los datos de pagos que la ley nos obligue a conservar y la huella seudonimizada de tu correo con el conteo de envíos gratis usados, que se conserva hasta 24 meses después del último envío gratis autorizado con ese correo para poder aplicar el límite de la sección 4.4-bis (Política de Privacidad, secciones 3, 7 y 8).
 
 17.2. **Por nuestra parte:** podemos suspender o cerrar una cuenta por incumplimiento grave de la sección 14, avisándote por correo con el motivo. Si cerramos el servicio o tu cuenta sin culpa tuya, te avisaremos con al menos treinta (30) días calendario de anticipación y te reembolsaremos la parte no prestada de tu Paquete vigente y todo tu saldo de Pago por uso que no hayas gastado a esa fecha, sin importar hace cuánto lo compraste.
 
@@ -244,5 +250,5 @@ La marca CertiSend Pro, el software, el diseño de la aplicación y sus textos s
 ## 19. Contacto y vigencia
 
 - Correo único: **contacto@leonardoantolinez.com** · Teléfono: {{PROVEEDOR_TEL}}
-- Versión 1.4 · Fecha: 2026-10-07 · Entrada en vigencia: el día de su publicación
+- Versión 1.5 · Fecha: 2026-10-24 · Entrada en vigencia: el día de su publicación
 - Las versiones anteriores de estos Términos se conservan y están disponibles a solicitud. Cada compra queda asociada a la versión que aceptaste.

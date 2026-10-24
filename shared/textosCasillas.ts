@@ -12,10 +12,12 @@
 // copias — `tests/textosCasillas.test.ts` es la prueba que detecta si algun lado alguna vez vuelve
 // a desviarse, p. ej. si alguien reintroduce una copia local en vez de importar de aqui).
 
-/** Version vigente de los Terminos y Condiciones citada en la casilla T4. Bump a 1.4 (2026-10-07,
- * decision del Brain, Tarea 16A): plan Pago por uso + Pro desaparece — ver docs/legal/
- * terminos-y-condiciones.md v1.4 y src/legal/terminos.md. */
-export const TERMINOS_VERSION = "1.4";
+/** Version vigente de los Terminos y Condiciones citada en la casilla T4. Bump a 1.5 (2026-10-24,
+ * decision de Leonardo, H8): 15 envios gratis por cuenta de por vida en vez de "lotes de 15 o menos
+ * gratis" — ver docs/legal/terminos-y-condiciones.md v1.5 y src/legal/terminos.md. (1.4, 2026-10-07:
+ * plan Pago por uso + Pro desaparece.) Subirla obliga a re-aceptar: `decidirAceptacionUso` compara
+ * la version guardada con esta. */
+export const TERMINOS_VERSION = "1.5";
 
 /** Idioma de la UI en el momento del cobro: el checkout acepta "es" o "en"; cualquier otro valor
  * (ausente, invalido) se trata como "es" — ver `normalizarIdioma`. */
@@ -131,12 +133,12 @@ export function textoCasillaRetractoPorUso(idioma: Idioma = "es"): string {
   return idioma === "en" ? TEXTO_CASILLA_RETRACTO_POR_USO_EN : TEXTO_CASILLA_RETRACTO_POR_USO;
 }
 
-/** Version vigente de la autorizacion de tratamiento de datos (T11). Bump a 2.4 (2026-10-07,
+/** Version vigente de la autorizacion de tratamiento de datos (T11). Bump a 2.5 (2026-10-24, H8): la Politica declara la huella del correo y los envios gratis usados. Antes 2.4 (2026-10-07,
  * decision del Brain): la Politica de Privacidad paso a v2.4 (Legal_LAP, src/legal/privacidad.md
  * y docs/legal/politica-de-privacidad.md) — tabla de planes con Pago por uso, Pro retirado.
  * Movida aqui (antes vivia como una constante local en server.ts) para que su version quede en
  * el mismo lugar que `TERMINOS_VERSION`, nunca duplicada. */
-export const AUTORIZACION_DATOS_VERSION = "2.4";
+export const AUTORIZACION_DATOS_VERSION = "2.5";
 
 export function textoAutorizacionDatos(idioma: Idioma, nombreProveedor: string | null | undefined): string {
   const nombre = nombreProveedor && nombreProveedor.trim() ? nombreProveedor.trim() : "[dato pendiente]";
