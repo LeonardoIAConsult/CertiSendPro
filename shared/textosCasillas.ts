@@ -12,10 +12,12 @@
 // copias — `tests/textosCasillas.test.ts` es la prueba que detecta si algun lado alguna vez vuelve
 // a desviarse, p. ej. si alguien reintroduce una copia local en vez de importar de aqui).
 
-/** Version vigente de los Terminos y Condiciones citada en la casilla T4. Bump a 1.4 (2026-10-07,
- * decision del Brain, Tarea 16A): plan Pago por uso + Pro desaparece — ver docs/legal/
- * terminos-y-condiciones.md v1.4 y src/legal/terminos.md. */
-export const TERMINOS_VERSION = "1.4";
+/** Version vigente de los Terminos y Condiciones citada en la casilla T4. Bump a 1.5 (2026-10-24,
+ * decision de Leonardo, H8): 15 envios gratis por cuenta de por vida en vez de "lotes de 15 o menos
+ * gratis" — ver docs/legal/terminos-y-condiciones.md v1.5 y src/legal/terminos.md. (1.4, 2026-10-07:
+ * plan Pago por uso + Pro desaparece.) Subirla obliga a re-aceptar: `decidirAceptacionUso` compara
+ * la version guardada con esta. */
+export const TERMINOS_VERSION = "1.5";
 
 /** Idioma de la UI en el momento del cobro: el checkout acepta "es" o "en"; cualquier otro valor
  * (ausente, invalido) se trata como "es" — ver `normalizarIdioma`. */

@@ -24,6 +24,12 @@ export interface CuentaInfo {
    * server.ts). */
   saldoPorUso: number;
   /**
+   * H8: envios gratis que le quedan a la cuenta (regla "15 gratis de por vida", servidor con
+   * `GRATIS_UNA_VEZ=1`). `null`/ausente = la regla esta apagada (se muestra el texto de siempre).
+   * Mismo campo que expone GET /api/cuenta.
+   */
+  gratisRestantes?: number | null;
+  /**
    * Ultimo pago que activo/renovo el plan (G6, NO-GO del REVISOR_EXTERNO_LAP sobre la Tarea 10,
    * 2026-10-05): SOLO `{id, fecha}`, igual que lo que devuelve GET /api/cuenta (server.ts) —
    * nunca el monto ni datos del pagador. `null` si la cuenta nunca ha pagado nada. Se usa para
@@ -59,6 +65,9 @@ export interface EstadoPlanTexto {
   titulo: string;
   /** Nota adicional del Paquete (los lotes <=15 no gastan saldo, R3-1). */
   nota?: string;
+  /** H8: "N de 15 envios gratis" cuando la cuenta tiene un plan pagado Y ademas conserva gratis
+   * (el titulo ya es el del Paquete); `undefined` si la regla esta apagada o el titulo ya lo dice. */
+  gratisTexto?: string;
   /** "Saldo por uso: N envíos (no vence)" — `undefined` si `saldoPorUso` es 0 (nada que mostrar).
    * Paso 16B: "Mi plan" ahora muestra el Paquete Y el saldo Por uso por separado, nunca uno
    * sustituyendo al otro (las dos fuentes son independientes y acumulables entre si). */
@@ -103,17 +112,30 @@ export function formatearEstadoPlan(
 ): EstadoPlanTexto {
   const t = translations[lang];
   const paqueteOk = paqueteVigente(cuenta, ahora) && cuenta.enviosRestantes > 0;
+  // H8: con la regla "15 gratis de por vida" activa, el servidor manda cuantos gratis le quedan.
+  const tieneGratisUnaVez = typeof cuenta.gratisRestantes === "number";
+  const gratisUnaVezTexto = tieneGratisUnaVez
+    ? t.miPlanGratisUnaVez.replace("{restantes}", String(cuenta.gratisRestantes)).replace("{limite}", "15")
+    : "";
 
   const titulo = paqueteOk
     ? t.miPlanPaquete
         .replace("{restantes}", String(cuenta.enviosRestantes))
         .replace("{fecha}", formatearFechaBogota(cuenta.vence!, true))
-    : t.miPlanGratis;
+    : tieneGratisUnaVez
+      ? gratisUnaVezTexto
+      : t.miPlanGratis;
   const nota = paqueteOk ? t.miPlanPaqueteNota : undefined;
   const saldoPorUsoTexto =
     cuenta.saldoPorUso > 0 ? t.miPlanSaldoPorUso.replace("{saldo}", String(cuenta.saldoPorUso)) : undefined;
 
-  return { titulo, nota, saldoPorUsoTexto };
+  // Si el titulo ya es el del plan Gratis, no se repite; con Paquete vigente (o solo saldo Por uso) y
+  // gratis por usar, se muestra aparte.
+  const tituloYaEsGratis = !paqueteOk && tieneGratisUnaVez;
+  const gratisTexto =
+    tieneGratisUnaVez && !tituloYaEsGratis && (cuenta.gratisRestantes as number) > 0 ? gratisUnaVezTexto : undefined;
+
+  return { titulo, nota, gratisTexto, saldoPorUsoTexto };
 }
 
 export type MotivoRechazoLote = "limite_gratis" | "saldo_insuficiente";
@@ -131,11 +153,20 @@ export function formatearMotivoRechazoLote(
   enviosRestantes: number | undefined,
   saldoPorUso: number | undefined,
   cantidadLote: number,
-  lang: Lang
+  lang: Lang,
+  gratisRestantes?: number | null
 ): string {
   const t = translations[lang];
   const paquete = enviosRestantes ?? 0;
   const porUso = saldoPorUso ?? 0;
+  // H8: con la regla "15 gratis de por vida", el rechazo debe hablar de los gratis (antes decia
+  // "paquete 0 + por uso 0" aunque al usuario le quedaran gratis).
+  if (motivo === "saldo_insuficiente" && typeof gratisRestantes === "number") {
+    if (gratisRestantes <= 0 && paquete + porUso <= 0) return `${t.batchLimitGratisAgotado} ${t.batchLimitOpciones}`;
+    if (gratisRestantes > 0 && gratisRestantes < cantidadLote && paquete + porUso < cantidadLote) {
+      return `${t.batchLimitGratisParcial.split("{gratis}").join(String(gratisRestantes)).split("{cantidad}").join(String(cantidadLote))} ${t.batchLimitOpciones}`;
+    }
+  }
   const motivoTexto =
     motivo === "saldo_insuficiente"
       ? t.batchLimitSaldo

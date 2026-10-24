@@ -33,7 +33,7 @@ function cuenta(parcial: Partial<CuentaInfo>): CuentaInfo {
 
 test("Gratis: texto exacto del spec, sin nota, sin saldo por uso", () => {
   const r = formatearEstadoPlan(cuenta({ plan: "gratis" }), "es", ahora);
-  assert.equal(r.titulo, "Plan Gratis · hasta 15 certificados por lote");
+  assert.equal(r.titulo, "Plan Gratis · 15 envíos gratis por cuenta");
   assert.equal(r.nota, undefined);
   assert.equal(r.saldoPorUsoTexto, undefined);
 });
@@ -42,7 +42,7 @@ test("Paquete vigente con saldo: titulo con restantes+fecha y nota de los lotes 
   const vence = new Date(ahora.getTime() + 20 * 24 * 3600_000).toISOString(); // +20 dias
   const r = formatearEstadoPlan(cuenta({ plan: "paquete", enviosRestantes: 42, vence }), "es", ahora);
   assert.match(r.titulo, /^Paquete · te quedan 42 envíos · vencen el \d{2}\/\d{2}\/\d{4}$/);
-  assert.equal(r.nota, "Los lotes de 15 certificados o menos no gastan tu saldo.");
+  assert.equal(r.nota, "Los lotes que envías como gratis no gastan tu saldo.");
 });
 
 test("Paquete con fecha: formatearFechaBogota da DD/MM/AAAA en zona Bogota", () => {
@@ -54,26 +54,26 @@ test("Paquete con fecha: formatearFechaBogota da DD/MM/AAAA en zona Bogota", () 
 test("Paquete VENCIDO: se muestra como Gratis (mismo trato que decidirLote)", () => {
   const vence = new Date(ahora.getTime() - 24 * 3600_000).toISOString(); // -1 dia
   const r = formatearEstadoPlan(cuenta({ plan: "paquete", enviosRestantes: 50, vence }), "es", ahora);
-  assert.equal(r.titulo, "Plan Gratis · hasta 15 certificados por lote");
+  assert.equal(r.titulo, "Plan Gratis · 15 envíos gratis por cuenta");
   assert.equal(r.nota, undefined);
 });
 
 test("Paquete vigente pero SIN saldo (0 restantes): se muestra como Gratis", () => {
   const vence = new Date(ahora.getTime() + 10 * 24 * 3600_000).toISOString();
   const r = formatearEstadoPlan(cuenta({ plan: "paquete", enviosRestantes: 0, vence }), "es", ahora);
-  assert.equal(r.titulo, "Plan Gratis · hasta 15 certificados por lote");
+  assert.equal(r.titulo, "Plan Gratis · 15 envíos gratis por cuenta");
 });
 
 test("Paquete sin fecha de vencimiento: tambien se trata como Gratis", () => {
   const r = formatearEstadoPlan(cuenta({ plan: "paquete", enviosRestantes: 100, vence: null }), "es", ahora);
-  assert.equal(r.titulo, "Plan Gratis · hasta 15 certificados por lote");
+  assert.equal(r.titulo, "Plan Gratis · 15 envíos gratis por cuenta");
 });
 
 // ── Paso 16B: saldo "Pago por uso" en formatearEstadoPlan — APARTE del Paquete, nunca sustituye ─
 
 test("Paso 16B: solo saldoPorUso (sin Paquete) -> titulo Gratis, pero saldoPorUsoTexto con el numero", () => {
   const r = formatearEstadoPlan(cuenta({ plan: "gratis", saldoPorUso: 137 }), "es", ahora);
-  assert.equal(r.titulo, "Plan Gratis · hasta 15 certificados por lote");
+  assert.equal(r.titulo, "Plan Gratis · 15 envíos gratis por cuenta");
   assert.equal(r.saldoPorUsoTexto, "Saldo por uso: 137 envíos (no vence)");
 });
 
@@ -100,7 +100,7 @@ test("EN: saldo por uso traducido", () => {
 // mismo `planVigenteConSaldo`; esta prueba fija que nunca puedan volver a divergir.
 test("formatearEstadoPlan y planActivo SIEMPRE coinciden en si un Paquete sin `vence` esta vigente", () => {
   const c = cuenta({ plan: "paquete", enviosRestantes: 100, vence: null });
-  const mostradoComoGratis = formatearEstadoPlan(c, "es", ahora).titulo === "Plan Gratis · hasta 15 certificados por lote";
+  const mostradoComoGratis = formatearEstadoPlan(c, "es", ahora).titulo === "Plan Gratis · 15 envíos gratis por cuenta";
   const activo = planActivo(c, ahora);
   assert.equal(mostradoComoGratis, !activo, "formatearEstadoPlan y planActivo deben coincidir");
   assert.equal(activo, false, "un Paquete sin vence nunca debe ser \"activo\" (mismo criterio que decidirLote)");
@@ -114,12 +114,12 @@ test("G6: Paquete vigente por fecha pero con saldo 0 -> planActivo false, mismo 
   const vence = new Date(ahora.getTime() + 10 * 24 * 3600_000).toISOString();
   const c = cuenta({ plan: "paquete", enviosRestantes: 0, vence });
   assert.equal(planActivo(c, ahora), false);
-  assert.equal(formatearEstadoPlan(c, "es", ahora).titulo, "Plan Gratis · hasta 15 certificados por lote");
+  assert.equal(formatearEstadoPlan(c, "es", ahora).titulo, "Plan Gratis · 15 envíos gratis por cuenta");
 });
 
 test("EN: Gratis traducido", () => {
   const r = formatearEstadoPlan(cuenta({ plan: "gratis" }), "en", ahora);
-  assert.equal(r.titulo, "Free plan · up to 15 certificates per batch");
+  assert.equal(r.titulo, "Free plan · 15 free sends per account");
 });
 
 // ── planVigenteConSaldo (Paso 16B): mismo criterio que decidirLote del servidor — Paquete
@@ -152,7 +152,7 @@ test("planVigenteConSaldo: Paquete vencido PERO saldoPorUso > 0 -> true (el sald
 
 test("limite_gratis: mensaje claro + opciones, en español", () => {
   const msg = formatearMotivoRechazoLote("limite_gratis", undefined, undefined, 16, "es");
-  assert.match(msg, /Gratis permite hasta 15/);
+  assert.match(msg, /Gratis incluye 15 envíos gratis por cuenta/); // H8: ya no "hasta 15 por lote"
   assert.match(msg, /dividir el lote/);
   assert.match(msg, /planes/);
 });
@@ -653,4 +653,60 @@ test("leerPagoParam: lee ok/pendiente/error y descarta cualquier otro valor", ()
   assert.equal(leerPagoParam("?pago=error"), "error");
   assert.equal(leerPagoParam("?pago=exito"), null);
   assert.equal(leerPagoParam(""), null);
+});
+
+// ── H8: "15 gratis de por vida por cuenta" (regla activa solo si el servidor manda gratisRestantes) ──
+test("H8 formatearEstadoPlan: con gratisRestantes numerico el titulo Gratis muestra cuantos quedan", () => {
+  const r = formatearEstadoPlan(cuenta({ plan: "gratis", gratisRestantes: 7 }), "es", ahora);
+  assert.match(r.titulo, /7/);
+  assert.match(r.titulo, /15/);
+  assert.equal(r.gratisTexto, undefined); // el titulo ya lo dice, no se repite
+});
+
+test("H8 formatearEstadoPlan: sin gratisRestantes (regla apagada) el titulo es el de siempre", () => {
+  const sin = formatearEstadoPlan(cuenta({ plan: "gratis" }), "es", ahora);
+  const nulo = formatearEstadoPlan(cuenta({ plan: "gratis", gratisRestantes: null }), "es", ahora);
+  assert.equal(sin.titulo, nulo.titulo);
+  assert.doesNotMatch(sin.titulo, /de 15/);
+  assert.equal(nulo.gratisTexto, undefined);
+});
+
+test("H8 formatearEstadoPlan: con Paquete vigente y gratis por usar, los gratis salen aparte", () => {
+  const vence = Date.UTC(2026, 10, 20, 12);
+  const r = formatearEstadoPlan(cuenta({ plan: "paquete", enviosRestantes: 50, vence: new Date(vence).toISOString(), gratisRestantes: 4 }), "es", ahora);
+  assert.match(r.titulo, /50/);
+  assert.match(r.gratisTexto ?? "", /4/);
+});
+
+test("H8 formatearEstadoPlan: con Paquete vigente y 0 gratis no muestra la linea de gratis", () => {
+  const vence = Date.UTC(2026, 10, 20, 12);
+  const r = formatearEstadoPlan(cuenta({ plan: "paquete", enviosRestantes: 50, vence: new Date(vence).toISOString(), gratisRestantes: 0 }), "es", ahora);
+  assert.match(r.titulo, /50/); // confirma que el Paquete SI esta vigente en este caso
+  assert.equal(r.gratisTexto, undefined);
+});
+
+test("H8 formatearMotivoRechazoLote: gratis agotados y sin saldo -> mensaje de 'ya usaste tus gratis'", () => {
+  const m = formatearMotivoRechazoLote("saldo_insuficiente", 0, 0, 8, "es", 0);
+  assert.doesNotMatch(m, /paquete 0|Paquete 0/i);
+  assert.match(m, /gratis/i);
+});
+
+test("H8 formatearMotivoRechazoLote: quedan 5 gratis y el lote es de 8 sin saldo -> menciona los 5 y el lote", () => {
+  const m = formatearMotivoRechazoLote("saldo_insuficiente", 0, 0, 8, "es", 5);
+  assert.match(m, /5/);
+  assert.match(m, /8/);
+  assert.match(m, /gratis/i);
+  assert.doesNotMatch(m, /\{gratis\}|\{cantidad\}/); // ningun marcador sin reemplazar (aparece 2 veces)
+  assert.doesNotMatch(formatearMotivoRechazoLote("saldo_insuficiente", 0, 0, 8, "en", 5), /\{gratis\}|\{cantidad\}/);
+});
+
+test("H8 formatearMotivoRechazoLote: con saldo pagado que alcanza a medias sigue el mensaje de saldo de siempre", () => {
+  const m = formatearMotivoRechazoLote("saldo_insuficiente", 3, 2, 20, "es", 0);
+  assert.equal(m, formatearMotivoRechazoLote("saldo_insuficiente", 3, 2, 20, "es"));
+});
+
+test("H8 formatearMotivoRechazoLote: sin gratisRestantes (regla apagada) no cambia nada", () => {
+  const a = formatearMotivoRechazoLote("saldo_insuficiente", 0, 0, 8, "es");
+  const b = formatearMotivoRechazoLote("saldo_insuficiente", 0, 0, 8, "es", null);
+  assert.equal(a, b);
 });

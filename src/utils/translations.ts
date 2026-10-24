@@ -106,6 +106,10 @@ export interface TranslationDict {
   // batchLimitSaldo ahora menciona las DOS fuentes de saldo pagado ({paquete}/{porUso}/{total}),
   // nunca solo una — reemplazados en src/utils/plan.ts (`formatearMotivoRechazoLote`).
   batchLimitFree: string;
+  // H8 (15 envíos gratis por cuenta, de por vida): sin gratis ni saldo suficiente / quedan N gratis y el
+  // lote es de M ({gratis}, {cantidad}; cada marcador una sola vez). Los usa src/utils/plan.ts.
+  batchLimitGratisAgotado: string;
+  batchLimitGratisParcial: string;
   batchLimitSaldo: string;
   // Opciones cuando se rechaza un lote (Tarea 10): dividirlo o ver los planes disponibles.
   batchLimitOpciones: string;
@@ -115,6 +119,8 @@ export interface TranslationDict {
   // muestra APARTE del Paquete (las dos fuentes son independientes, nunca una sustituye a la
   // otra); "Pro" desaparece (miPlanPro se retira).
   miPlanGratis: string;
+  // H8: título del plan Gratis con envíos restantes ({restantes} de {limite}).
+  miPlanGratisUnaVez: string;
   miPlanPaquete: string;
   miPlanPaqueteNota: string;
   miPlanSaldoPorUso: string;
@@ -230,7 +236,7 @@ export const translations: Record<Lang, TranslationDict> = {
 
     planFreeName: "Plan Gratuito",
     planFreePrice: "$0",
-    planFreeFeature1: "Hasta 15 certificados por lote",
+    planFreeFeature1: "15 envíos gratis por cuenta, de por vida",
     planFreeFeature2: "Asunto y cuerpo del correo personalizados",
     planFreeFeature3: "Lectura de nombres con IA",
 
@@ -238,8 +244,8 @@ export const translations: Record<Lang, TranslationDict> = {
     planPaqueteUsdGrande: "US$15 · 150 envíos",
     planPayGoPriceCargando: "Calculando el precio de hoy…",
     planPayGoPriceError: "Escríbenos para el precio de hoy",
-    planPayGoFeature1: "150 envíos con éxito para lotes de más de 15",
-    planPayGoFeature2: "Los lotes de 15 o menos siguen siendo gratis y no gastan el Paquete",
+    planPayGoFeature1: "150 envíos con éxito para los lotes que no caben en tus envíos gratis",
+    planPayGoFeature2: "Los lotes que envías como gratis no gastan el Paquete",
     planPayGoFeature3: "Válidos 1 mes o hasta gastarlos; no se acumulan",
     planPayGoFeature4: "Pago único",
     planPayGoFeature5: "Los envíos que fallan no se descuentan",
@@ -249,7 +255,7 @@ export const translations: Record<Lang, TranslationDict> = {
     planPagoPorUsoMinimoNota: "mínimo {minimo} envíos · tu saldo no vence",
     planPagoPorUsoFeature1: "Compra entre 50 y 5.000 envíos",
     planPagoPorUsoFeature2: "Tu saldo nunca vence y se acumula entre compras",
-    planPagoPorUsoFeature3: "Los lotes de 15 o menos siguen siendo gratis",
+    planPagoPorUsoFeature3: "Los lotes que envías como gratis no gastan tu saldo",
     planPagoPorUsoFeature4: "Pago único, sin suscripción",
     buyPorUso: "Comprar saldo",
 
@@ -268,13 +274,16 @@ export const translations: Record<Lang, TranslationDict> = {
     footerRights: "Todos los derechos reservados.",
 
     autorizacionDatosRequerida: "Marca la casilla de autorización de datos para continuar.",
-    batchLimitFree: "El plan Gratis permite hasta 15 certificados por lote. Puedes dividirlo o escribirnos.",
+    batchLimitFree: "El plan Gratis incluye 15 envíos gratis por cuenta, en total, y este lote no cabe en los que te quedan.",
+    batchLimitGratisAgotado: "Ya usaste tus 15 envíos gratis y tu saldo pagado no alcanza para este lote. Compra un Paquete o Pago por uso para seguir enviando.",
+    batchLimitGratisParcial: "Te quedan {gratis} envíos gratis y este lote es de {cantidad}. Un lote solo es gratis si cabe entero: puedes enviar hasta {gratis} certificados o comprar saldo.",
     batchLimitSaldo: "Tienes {paquete} del Paquete y {porUso} de Pago por uso ({total} en total) y el lote es de {lote}.",
-    batchLimitOpciones: "Puedes dividir el lote en partes de 15 o menos, o escribirnos a contacto@leonardoantolinez.com para ver los planes.",
+    batchLimitOpciones: "Puedes dividir el lote en partes más pequeñas o escribirnos a contacto@leonardoantolinez.com para ver los planes.",
 
-    miPlanGratis: "Plan Gratis · hasta 15 certificados por lote",
+    miPlanGratis: "Plan Gratis · 15 envíos gratis por cuenta",
+    miPlanGratisUnaVez: "Plan Gratis · te quedan {restantes} de {limite} envíos gratis",
     miPlanPaquete: "Paquete · te quedan {restantes} envíos · vencen el {fecha}",
-    miPlanPaqueteNota: "Los lotes de 15 certificados o menos no gastan tu saldo.",
+    miPlanPaqueteNota: "Los lotes que envías como gratis no gastan tu saldo.",
     miPlanSaldoPorUso: "Saldo por uso: {saldo} envíos (no vence)",
 
     pagoConfirmando: "Estamos confirmando tu pago…",
@@ -355,7 +364,7 @@ export const translations: Record<Lang, TranslationDict> = {
 
     planFreeName: "Free Plan",
     planFreePrice: "$0",
-    planFreeFeature1: "Up to 15 certificates per batch",
+    planFreeFeature1: "15 free sends per account, for life",
     planFreeFeature2: "Custom subject and body",
     planFreeFeature3: "AI name reading",
 
@@ -363,8 +372,8 @@ export const translations: Record<Lang, TranslationDict> = {
     planPaqueteUsdGrande: "US$15 · 150 sends",
     planPayGoPriceCargando: "Calculating today's price…",
     planPayGoPriceError: "Write to us for today's price",
-    planPayGoFeature1: "150 successful sends for batches over 15",
-    planPayGoFeature2: "Batches of 15 or fewer stay free and never spend the Bundle",
+    planPayGoFeature1: "150 successful sends for batches that do not fit in your free sends",
+    planPayGoFeature2: "Batches you send as free never spend the Bundle",
     planPayGoFeature3: "Valid for 1 month or until used up; unused sends do not roll over",
     planPayGoFeature4: "One-time payment",
     planPayGoFeature5: "Failed sends are never deducted",
@@ -374,7 +383,7 @@ export const translations: Record<Lang, TranslationDict> = {
     planPagoPorUsoMinimoNota: "minimum {minimo} sends · your balance never expires",
     planPagoPorUsoFeature1: "Buy between 50 and 5,000 sends",
     planPagoPorUsoFeature2: "Your balance never expires and rolls over between purchases",
-    planPagoPorUsoFeature3: "Batches of 15 or fewer stay free",
+    planPagoPorUsoFeature3: "Batches you send as free never spend your balance",
     planPagoPorUsoFeature4: "One-time payment, no subscription",
     buyPorUso: "Buy balance",
 
@@ -393,13 +402,16 @@ export const translations: Record<Lang, TranslationDict> = {
     footerRights: "All rights reserved.",
 
     autorizacionDatosRequerida: "Check the data-authorization box to continue.",
-    batchLimitFree: "The Free plan allows up to 15 certificates per batch. You can split it or email us.",
+    batchLimitFree: "The Free plan includes 15 free sends per account in total, and this batch does not fit in the ones you have left.",
+    batchLimitGratisAgotado: "You have used all 15 of your free sends and your paid balance is not enough for this batch. Buy a Bundle or Pay-as-you-go to keep sending.",
+    batchLimitGratisParcial: "You have {gratis} free sends left and this batch has {cantidad}. A batch is only free if it fits entirely: you can send up to {gratis} certificates or buy balance.",
     batchLimitSaldo: "You have {paquete} from the Bundle and {porUso} from Pay-as-you-go ({total} total) and this batch has {lote}.",
-    batchLimitOpciones: "You can split the batch into parts of 15 or fewer, or email us at contacto@leonardoantolinez.com to see the plans.",
+    batchLimitOpciones: "You can split the batch into smaller parts or email us at contacto@leonardoantolinez.com to see the plans.",
 
-    miPlanGratis: "Free plan · up to 15 certificates per batch",
+    miPlanGratis: "Free plan · 15 free sends per account",
+    miPlanGratisUnaVez: "Free plan · you have {restantes} of {limite} free sends left",
     miPlanPaquete: "Bundle · {restantes} sends left · expires {fecha}",
-    miPlanPaqueteNota: "Batches of 15 or fewer never spend your balance.",
+    miPlanPaqueteNota: "Batches you send as free never spend your balance.",
     miPlanSaldoPorUso: "Pay-as-you-go balance: {saldo} sends (never expires)",
 
     pagoConfirmando: "We're confirming your payment…",
