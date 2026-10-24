@@ -440,14 +440,14 @@ export function useCheckoutV2({ language, theme, onStart, puedeEntrar, onNeedCon
 
               <div className="space-y-1">
                 <p className="text-3xl font-black text-indigo-500">
-                  {copPorUsoMostrado !== null
+                  {copPorUsoMostrado !== null && cantidadPorUsoOk
                     ? language === "en"
                       ? `COP ${copPorUsoMostrado.toLocaleString("en-US")}`
                       : `$${copPorUsoMostrado.toLocaleString("es-CO")} COP`
                     : "—"}
                 </p>
                 <p className="text-[11px] text-slate-500">
-                  {totalPorUsoVivo && t.checkoutPorUsoTotalUsd.replace("{usd}", totalPorUsoVivo.usd.toFixed(2))} ·{" "}
+                  {cantidadPorUsoOk && totalPorUsoVivo && t.checkoutPorUsoTotalUsd.replace("{usd}", totalPorUsoVivo.usd.toFixed(2))} ·{" "}
                   {t.checkoutTrmNota.replace("{trm}", String(precios.trm)).replace("{fecha}", precios.fechaDesde)}
                 </p>
               </div>
@@ -462,7 +462,7 @@ export function useCheckoutV2({ language, theme, onStart, puedeEntrar, onNeedCon
               <label className="flex items-start gap-2.5 text-[11px] leading-relaxed cursor-pointer">
                 <input type="checkbox" checked={aceptaTerminosPorUso} onChange={(e) => setAceptaTerminosPorUso(e.target.checked)} className="mt-0.5 accent-indigo-500 shrink-0" />
                 <span>
-                  {copPorUsoMostrado !== null ? textoTerminos(copPorUsoMostrado, language) : ""}{" "}
+                  {copPorUsoMostrado !== null && cantidadPorUsoOk ? textoTerminos(copPorUsoMostrado, language) : ""}{" "}
                   <a href="/terminos" target="_blank" rel="noopener noreferrer" className="text-indigo-500 hover:underline font-semibold" onClick={(e) => e.stopPropagation()}>
                     {t.checkoutVerTerminos}
                   </a>

@@ -56,6 +56,7 @@ import { pausaAntesDelEnvioMs } from "./utils/envioLote";
 import JSZip from "jszip";
 import LandingPage from "./components/LandingPage";
 // Si el chunk de la V2 no carga (deploy nuevo, red caida), cae a la landing original en vez de pantalla en blanco.
+import LandingBoundary from "./components/LandingBoundary";
 const LandingPageV2 = React.lazy(() => import("./components/LandingPageV2").catch(() => import("./components/LandingPage")));
 import LegalPage from "./components/LegalPage";
 import terminosMd from "./legal/terminos.md?raw";
@@ -1736,28 +1737,36 @@ export default function App() {
 
   if (needsAuth) {
     // Version B de la landing: solo con ?landing=2; sin el parametro se sirve la original.
-    const Landing = new URLSearchParams(window.location.search).get("landing") === "2" ? LandingPageV2 : LandingPage;
+    // Si la V2 falla (render o carga del chunk), LandingBoundary muestra la original.
+    const landingProps = {
+      language,
+      setLanguage,
+      theme,
+      setTheme,
+      onStart: handleLogin,
+      onViewPrivacy: handleNavigateToPrivacidad,
+      onViewTerminos: handleNavigateToTerminos,
+      isLoggingIn,
+      textoAutorizacionDatos,
+      aceptaAutorizacionDatos,
+      onToggleAceptaAutorizacionDatos: setAceptaAutorizacionDatos,
+      textoAceptacionTerminosUso,
+      aceptaTerminosUso,
+      onToggleAceptaTerminosUso: setAceptaTerminosUso,
+    };
+    const usarV2 = new URLSearchParams(window.location.search).get("landing") === "2";
     return (
       <>
         {pagoBanner}
-        <React.Suspense fallback={null}>
-        <Landing
-          language={language}
-          setLanguage={setLanguage}
-          theme={theme}
-          setTheme={setTheme}
-          onStart={handleLogin}
-          onViewPrivacy={handleNavigateToPrivacidad}
-          onViewTerminos={handleNavigateToTerminos}
-          isLoggingIn={isLoggingIn}
-          textoAutorizacionDatos={textoAutorizacionDatos}
-          aceptaAutorizacionDatos={aceptaAutorizacionDatos}
-          onToggleAceptaAutorizacionDatos={setAceptaAutorizacionDatos}
-          textoAceptacionTerminosUso={textoAceptacionTerminosUso}
-          aceptaTerminosUso={aceptaTerminosUso}
-          onToggleAceptaTerminosUso={setAceptaTerminosUso}
-        />
-        </React.Suspense>
+        {usarV2 ? (
+          <LandingBoundary fallback={<LandingPage {...landingProps} />}>
+            <React.Suspense fallback={null}>
+              <LandingPageV2 {...landingProps} />
+            </React.Suspense>
+          </LandingBoundary>
+        ) : (
+          <LandingPage {...landingProps} />
+        )}
       </>
     );
   }
