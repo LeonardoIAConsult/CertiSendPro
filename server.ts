@@ -48,6 +48,8 @@ import { geminiKeyConForma } from "./server/geminiKey";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete, crearCobroPorUso, planCobroValido } from "./server/cobroPaquete";
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
+import { contarUsoDiario, hacerEspacioEnCache, urlDescargaCanvaSegura, esIpPrivada, puedeCachearPagina, sanearNombreAdjunto, type ConteoDiario } from "./server/limitesAbuso";
+import { lookup as dnsLookup } from "node:dns/promises";
 import {
   enviarCorreo,
   construirAvisoFalloWebhookLeonardo,
@@ -125,6 +127,9 @@ const visitas = new Map<string, { n: number; desde: number }>();
 // (verificado aqui, con criptografia, nunca con una cabecera que el cliente controla), se usa el
 // uid como clave del limitador en vez de la IP. Un uid no se puede falsificar rotando cabeceras.
 app.use("/api", async (req, res, next) => {
+  // H6 (Sentinel full 2026-10-24): el webhook de Mercado Pago llega en rafagas desde pocas IPs y tiene su
+  // propio limitador (`limitarWebhookMP`); el global por IP le devolveria 429 a avisos de pago legitimos.
+  if (req.path === "/mp/webhook") return next();
   const identidad = await verificarIdToken(req);
   const clave = identidad ? `uid:${identidad.uid}` : `ip:${req.ip || req.socket.remoteAddress || "desconocida"}`;
   const ahora = Date.now();
@@ -208,6 +213,10 @@ interface PdfCacheEntry {
   buffer: Buffer;
   pageCount: number;
   timestamp: number;
+  /** Ultima vez que se uso la sesion: ordena la expulsion por tope de memoria (LRU). El TTL de 2 h sigue contando desde `timestamp` (creacion). */
+  ultimoUso: number;
+  /** Suma de los largos (base64) de `extractedPages`: evita recorrer el mapa en cada pagina. */
+  bytesExtraidas: number;
   extractedPages: Map<number, string>;
   /** Sentinel/security-review (ad80fd6, hallazgo previo al diff): dueño de la sesion — el uid que
    * la creo via POST /api/split-pdf, o `null` si se creo sin sesion de Firebase (Modo Invitado,
@@ -217,6 +226,11 @@ interface PdfCacheEntry {
   uid: string | null;
 }
 const pdfCache = new Map<string, PdfCacheEntry>();
+// H3 (Sentinel full 2026-10-24): sin tope, JSON de hasta 50 MB sin login (Modo Invitado) se quedaban 2 h
+// en memoria y bastaba repetirlos para agotar el contenedor (1 GiB). Tope TOTAL de la cache y tope por
+// PDF para quien no inicio sesion; al llenarse se expulsan primero las sesiones mas viejas.
+const PDF_CACHE_MAX_BYTES = Number(process.env.PDF_CACHE_MAX_MB || 256) * 1024 * 1024;
+const PDF_INVITADO_MAX_BYTES = Number(process.env.PDF_GUEST_MAX_MB || 15) * 1024 * 1024;
 
 /** Sentinel/security-review (ad80fd6): mismo error para "la sesion no existe" y "la sesion es de
  * otro uid" — nunca revela cual de los dos casos es (evita que alguien use la respuesta para
@@ -245,6 +259,7 @@ async function getPageBase64(sessionId: string, pageIndex: number, requesterUid:
     throw new SesionPdfInaccesible("La sesión del PDF ha expirado o no existe en el servidor. Por favor, selecciona y carga de nuevo tu archivo PDF.");
   }
 
+  cached.ultimoUso = Date.now();
   // Check if already extracted
   if (cached.extractedPages.has(pageIndex)) {
     return cached.extractedPages.get(pageIndex)!;
@@ -262,8 +277,11 @@ async function getPageBase64(sessionId: string, pageIndex: number, requesterUid:
   const pdfBytes = await singlePageDoc.save();
   const base64Str = Buffer.from(pdfBytes).toString("base64");
 
-  // Save in cache
-  cached.extractedPages.set(pageIndex, base64Str);
+  // Save in cache (H3: solo si la sesion no pasa su tope de peso; si no, se devuelve sin guardarla)
+  if (puedeCachearPagina(cached.buffer.length, cached.bytesExtraidas, base64Str.length)) {
+    cached.extractedPages.set(pageIndex, base64Str);
+    cached.bytesExtraidas += base64Str.length;
+  }
   return base64Str;
 }
 
@@ -290,6 +308,14 @@ app.post("/api/split-pdf", adjuntarAuthSiExiste, async (req, res) => {
     }
 
     const pdfBuffer = Buffer.from(pdfBase64, "base64");
+    if (pdfBuffer.length > PDF_CACHE_MAX_BYTES) {
+      return res.status(413).json({ error: "El PDF es demasiado grande para procesarlo en el servidor." });
+    }
+    if (!req.uid && pdfBuffer.length > PDF_INVITADO_MAX_BYTES) {
+      return res.status(413).json({
+        error: `Sin iniciar sesión el PDF puede pesar hasta ${Math.round(PDF_INVITADO_MAX_BYTES / (1024 * 1024))} MB. Inicia sesión para subir archivos más grandes.`,
+      });
+    }
     // Load original PDF using pdf-lib just to get page count and validate
     const pdfDoc = await PDFDocument.load(pdfBuffer);
     const pageCount = pdfDoc.getPageCount();
@@ -300,12 +326,36 @@ app.post("/api/split-pdf", adjuntarAuthSiExiste, async (req, res) => {
     // servidor) es impredecible.
     const sessionId = "pdf_" + randomUUID();
 
+    // H3: el tope se evalua DESPUES de validar el PDF (uno invalido no expulsa a nadie) y SIN `await`
+    // entre el chequeo y el `set` (con concurrencia 80, dos subidas no pueden pasar a la vez). Un invitado
+    // solo puede expulsar sesiones de invitado; nunca la de un usuario con login.
+    const espacio = hacerEspacioEnCache(
+      Array.from(pdfCache, ([clave, e]) => ({
+        clave,
+        bytes: e.buffer.length + e.bytesExtraidas,
+        ultimoUso: e.ultimoUso,
+        invitado: e.uid === null,
+      })),
+      pdfBuffer.length,
+      PDF_CACHE_MAX_BYTES,
+      !req.uid
+    );
+    if (!espacio.aceptar) {
+      return res.status(503).json({ error: "El servidor está ocupado procesando otros PDF. Intenta de nuevo en unos minutos." });
+    }
+    for (const clave of espacio.expulsar) {
+      pdfCache.delete(clave);
+      console.log(`[Cache Evict] Expulsada por tope de memoria: ${clave}`);
+    }
+
     // Cache the root PDF buffer. `uid` (adjuntarAuthSiExiste: puede ser undefined si no hay
     // sesion de Firebase, p. ej. Modo Invitado) queda como dueño de la sesion.
     pdfCache.set(sessionId, {
       buffer: pdfBuffer,
       pageCount,
       timestamp: Date.now(),
+      ultimoUso: Date.now(),
+      bytesExtraidas: 0,
       extractedPages: new Map(),
       uid: req.uid ?? null,
     });
@@ -343,6 +393,46 @@ app.post("/api/get-page-pdf", adjuntarAuthSiExiste, async (req, res) => {
     res.status(500).json({ error: error.message || "Failed to split page" });
   }
 });
+
+const CANVA_PDF_MAX_BYTES = 50 * 1024 * 1024;
+async function descargarPdfCanva(urlInicial: string): Promise<Buffer> {
+  let url = urlInicial;
+  for (let salto = 0; salto <= 3; salto++) {
+    if (!urlDescargaCanvaSegura(url)) throw new Error("Canva devolvió una dirección de descarga no válida.");
+    const host = new URL(url).hostname.replace(/\.+$/, "");
+    const direcciones = await dnsLookup(host, { all: true });
+    if (direcciones.length === 0 || direcciones.some((d) => esIpPrivada(d.address))) {
+      throw new Error("Canva devolvió una dirección de descarga no válida.");
+    }
+    const r = await fetch(url, { signal: AbortSignal.timeout(30_000), redirect: "manual" });
+    if (r.status >= 300 && r.status < 400) {
+      const destino = r.headers.get("location");
+      if (!destino) throw new Error("No se pudo descargar el PDF exportado de los servidores de Canva.");
+      url = new URL(destino, url).toString();
+      continue;
+    }
+    if (!r.ok) throw new Error("No se pudo descargar el PDF exportado de los servidores de Canva.");
+    if (Number(r.headers.get("content-length") || 0) > CANVA_PDF_MAX_BYTES) {
+      throw new Error("El PDF exportado de Canva es demasiado grande.");
+    }
+    const lector = r.body?.getReader();
+    if (!lector) throw new Error("No se pudo descargar el PDF exportado de los servidores de Canva.");
+    const partes: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await lector.read();
+      if (done) break;
+      total += value.length;
+      if (total > CANVA_PDF_MAX_BYTES) {
+        await lector.cancel();
+        throw new Error("El PDF exportado de Canva es demasiado grande.");
+      }
+      partes.push(value);
+    }
+    return Buffer.concat(partes);
+  }
+  throw new Error("Demasiadas redirecciones al descargar el PDF de Canva.");
+}
 
 // Endpoint to trigger Canva Connect API Export & Download flow
 app.post("/api/canva/export-design", adjuntarAuthSiExiste, async (req, res) => {
@@ -428,13 +518,11 @@ app.post("/api/canva/export-design", adjuntarAuthSiExiste, async (req, res) => {
     }
 
     // Step 3: Fetch download PDF bytes and encode to base64
-    const pdfResponse = await fetch(downloadUrl);
-    if (!pdfResponse.ok) {
-      throw new Error("No se pudo descargar el PDF exportado de los servidores de Canva.");
-    }
-
-    const pdfArrayBuffer = await pdfResponse.arrayBuffer();
-    const pdfBase64 = Buffer.from(pdfArrayBuffer).toString("base64");
+    // H5 (Sentinel full 2026-10-24): la URL la devuelve un tercero. `descargarPdfCanva` exige https hacia un
+    // host publico con nombre cuyo DNS NO resuelva a una IP privada, valida CADA redireccion y limita
+    // tiempo y tamano (lectura en streaming con tope).
+    const pdfBytes = await descargarPdfCanva(downloadUrl);
+    const pdfBase64 = pdfBytes.toString("base64");
 
     res.json({ success: true, pdfBase64 });
   } catch (error: any) {
@@ -444,7 +532,19 @@ app.post("/api/canva/export-design", adjuntarAuthSiExiste, async (req, res) => {
 });
 
 // Endpoint to analyze a single PDF page with Gemini to extract the person's name
-app.post("/api/analyze-page", exigirAuth, async (req, res) => {
+// H2 (Sentinel full 2026-10-24): el limite por minuto no frena a quien quema la cuota de Gemini toda la
+// jornada con una cuenta gratis de Google. Tope DIARIO de paginas analizadas por usuario (dia de Colombia):
+// por defecto 5000, igual al maximo que se puede comprar en un pago por uso. Ajustable con ANALYZE_MAX_PER_DAY.
+const ANALISIS_MAX_POR_DIA = Number(process.env.ANALYZE_MAX_PER_DAY || 5000);
+const analisisDelDia = new Map<string, ConteoDiario>();
+const limitarAnalisisDiario: express.RequestHandler = (req, res, next) => {
+  const r = contarUsoDiario(analisisDelDia, req.uid!, Date.now(), ANALISIS_MAX_POR_DIA);
+  if (!r.ok) {
+    return res.status(429).json({ error: "Llegaste al límite diario de páginas analizadas con IA. Vuelve a intentarlo mañana." });
+  }
+  next();
+};
+app.post("/api/analyze-page", exigirAuth, limitarAnalisisDiario, async (req, res) => {
   try {
     const { pdfPageBase64, sessionId, pageIndex, recipientNames } = req.body;
     let activePageBase64 = pdfPageBase64;
@@ -677,8 +777,8 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       Buffer.from(body).toString("base64"),
       ``,
       `--${boundary}`,
-      `Content-Type: application/pdf; name="${filename}"`,
-      `Content-Disposition: attachment; filename="${filename}"`,
+      `Content-Type: application/pdf; name="${sanearNombreAdjunto(filename)}"`,
+      `Content-Disposition: attachment; filename="${sanearNombreAdjunto(filename)}"`,
       `Content-Transfer-Encoding: base64`,
       ``,
       activePdfBase64,

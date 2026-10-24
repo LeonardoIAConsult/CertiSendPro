@@ -17,12 +17,12 @@ import {
 } from "../utils/checkout";
 
 /**
- * Checkout de la landing V2 (copia AISLADA del de LandingPage.tsx, decision de Leonardo
+ * Checkout de la landing V2 (copia AISLADA del de src/legacy/LandingPage.tsx, decision de Leonardo
  * 2026-10-24: la original no se toca). La logica y los textos son los mismos que la original —
  * mismas funciones de src/utils/checkout.ts, mismos endpoints (GET /api/precios y POST
  * /api/mercadopago/create-preference), mismo orden de validaciones (R8: si el precio cambia, se
  * muestra el nuevo y se exigen las dos casillas de nuevo). Cuando V2 reemplace a la original, este
- * archivo es el unico checkout y el de LandingPage.tsx se borra. No cambiar uno sin el otro.
+ * archivo es el unico checkout y el de legacy/LandingPage.tsx se retira. No cambiar uno sin el otro.
  */
 export interface PreciosDelDia {
   paquete: { usd: number; cop: number };
