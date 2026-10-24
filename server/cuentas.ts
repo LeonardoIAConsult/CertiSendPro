@@ -119,9 +119,10 @@ export interface Cuenta {
   /**
    * H8 (decision de Leonardo 2026-10-24): envios GRATIS ya consumidos por esta cuenta (una cuenta =
    * un correo de Google). Con `GRATIS_UNA_VEZ=1` cada cuenta tiene `LIMITE_GRATIS` (15) envios gratis
-   * EN TOTAL, de por vida; se descuentan al AUTORIZAR el lote (`crearLoteConConsumoGratis`) y no se
-   * reponen si el lote no se completa. Ausente en cuentas anteriores a este campo: se lee con `?? 0`,
-   * asi que todas las cuentas existentes empiezan con los 15 completos. Sin la bandera no se usa.
+   * EN TOTAL, de por vida. OJO: la FUENTE DE VERDAD ya NO es este campo sino `gratisPorCorreo/{huella}`
+   * (por correo, para que eliminar y recrear la cuenta no reponga los 15; ver server/huellaGratis.ts). Este
+   * campo es solo el dato que el llamador INYECTA a `decidirLote` (leido de `gratisPorCorreo`); no se escribe
+   * en `cuentas/{uid}`.
    */
   gratisUsados?: number;
   actualizado: Timestamp;
@@ -1257,6 +1258,14 @@ export interface Lote {
   reservadosPorUso: number;
   creado: Timestamp;
   expira: Timestamp;
+  /** H8: huella del correo cuyos gratis consumio este lote (solo lotes gratis con la regla encendida). */
+  gratisHuella?: string;
+  /** H8: envios de este lote que fallaron (Gmail/servidor) y se liberaron; base de la reposicion al vencer. */
+  fallidos?: number;
+  /** H8: el lote ya se concilio (se repusieron los gratis de los fallidos no reintentados). Idempotencia. */
+  gratisConciliado?: boolean;
+  /** H8: cuantos gratis se repusieron al conciliar (evidencia/bitacora). */
+  gratisRepuestos?: number;
 }
 
 // Mismo plazo que la sesion del PDF en memoria (server.ts): un lote autorizado no sobrevive
@@ -1292,21 +1301,29 @@ export async function crearLote(
   return { loteId: ref.id, lote };
 }
 
+/** H8: envios gratis YA consumidos por este correo (huella); 0 si nunca uso ninguno. */
+export async function obtenerGratisUsados(huella: string): Promise<number> {
+  const snap = await db().collection("gratisPorCorreo").doc(huella).get();
+  return snap.exists ? gratisUsadosDe((snap.data() as { usados?: unknown }).usados) : 0;
+}
+
 /**
- * H8: crea el lote GRATIS descontando sus envios de los `LIMITE_GRATIS` de la cuenta en la MISMA
- * transaccion (leer `gratisUsados` -> comprobar -> escribir cuenta y lote). Dos lotes abiertos a la vez
- * no pueden pasarse del tope: la transaccion se reintenta y el segundo ve el consumo del primero.
- * Si ya no cabe, devuelve `ok: false` con lo que queda (el llamador responde "saldo_insuficiente").
+ * H8: crea el lote GRATIS descontando sus envios de los `LIMITE_GRATIS` del CORREO (huella) en la MISMA
+ * transaccion (leer `gratisPorCorreo` -> comprobar -> escribir contador y lote). Dos lotes abiertos a la
+ * vez no pueden pasarse del tope: la transaccion se reintenta y el segundo ve el consumo del primero. El
+ * lote guarda la huella para poder reponer los fallidos al vencer. Si ya no cabe, devuelve `ok: false`
+ * con lo que queda (el llamador responde "saldo_insuficiente").
  */
 export async function crearLoteConConsumoGratis(
   uid: string,
+  huella: string,
   cantidad: number
 ): Promise<{ ok: true; loteId: string; lote: Lote } | { ok: false; gratisRestantes: number }> {
-  const cuentaRef = db().collection("cuentas").doc(uid);
+  const gratisRef = db().collection("gratisPorCorreo").doc(huella);
   const loteRef = db().collection("lotes").doc();
   return db().runTransaction(async (tx) => {
-    const snap = await tx.get(cuentaRef);
-    const usados = snap.exists ? gratisUsadosDe((snap.data() as Cuenta).gratisUsados) : 0;
+    const snap = await tx.get(gratisRef);
+    const usados = snap.exists ? gratisUsadosDe((snap.data() as { usados?: unknown }).usados) : 0;
     const restantes = Math.max(0, LIMITE_GRATIS - usados);
     if (cantidad > restantes) return { ok: false as const, gratisRestantes: restantes };
     const ahora = Timestamp.now();
@@ -1320,30 +1337,61 @@ export async function crearLoteConConsumoGratis(
       reservadosPorUso: 0,
       creado: ahora,
       expira: Timestamp.fromMillis(ahora.toMillis() + DURACION_LOTE_MS),
+      gratisHuella: huella,
     };
-    if (snap.exists) {
-      tx.update(cuentaRef, { gratisUsados: usados + cantidad, actualizado: ahora });
-    } else {
-      tx.set(cuentaRef, { ...CUENTA_GRATIS_BASE, gratisUsados: usados + cantidad, actualizado: ahora });
-    }
+    tx.set(gratisRef, { usados: usados + cantidad, actualizado: ahora });
     tx.set(loteRef, lote);
     return { ok: true as const, loteId: loteRef.id, lote };
   });
 }
 
 /**
- * H8: devuelve a la cuenta los envios gratis descontados por `crearLoteConConsumoGratis` cuando el
- * servidor falla DESPUES de autorizar y ANTES de que el lote sea usable (p. ej. no se pudo guardar la
- * huella de confirmacion): ahi el cliente no pudo enviar nada y no debe perder su cupo por un error nuestro.
+ * H8: devuelve al correo los envios gratis descontados por `crearLoteConConsumoGratis` cuando el servidor
+ * falla DESPUES de autorizar y ANTES de que el lote sea usable (p. ej. no se pudo guardar la huella de
+ * confirmacion): ahi el cliente no pudo enviar nada y no debe perder su cupo por un error nuestro.
  */
-export async function reponerConsumoGratis(uid: string, cantidad: number): Promise<void> {
-  const cuentaRef = db().collection("cuentas").doc(uid);
+export async function reponerConsumoGratis(huella: string, cantidad: number): Promise<void> {
+  const gratisRef = db().collection("gratisPorCorreo").doc(huella);
   await db().runTransaction(async (tx) => {
-    const snap = await tx.get(cuentaRef);
+    const snap = await tx.get(gratisRef);
     if (!snap.exists) return;
-    const usados = gratisUsadosDe((snap.data() as Cuenta).gratisUsados);
-    tx.update(cuentaRef, { gratisUsados: Math.max(0, usados - cantidad), actualizado: Timestamp.now() });
+    const usados = gratisUsadosDe((snap.data() as { usados?: unknown }).usados);
+    tx.update(gratisRef, { usados: Math.max(0, usados - cantidad), actualizado: Timestamp.now() });
   });
+}
+
+/**
+ * H8 (hallazgo H2 de Abogado_LAP: "los envios que fallan no se descuentan"): al VENCER un lote gratis (2 h),
+ * se reponen al correo los envios que fallaron (Gmail o servidor) y no se reintentaron con exito:
+ * `min(fallidos, cantidad - enviados)`. NO se reponen los que el usuario decidio no enviar. Idempotente
+ * (marca `gratisConciliado` en el lote dentro de la misma transaccion que repone). Se invoca antes de decidir
+ * un lote nuevo y al leer la cuenta. Devuelve cuantos gratis se repusieron en total.
+ */
+export async function conciliarGratisVencidos(uid: string, huella: string, ahora: Date = new Date()): Promise<number> {
+  const snap = await db().collection("lotes").where("uid", "==", uid).where("planEfectivo", "==", "gratis").get();
+  let repuestos = 0;
+  for (const doc of snap.docs) {
+    const lote = doc.data() as Lote;
+    const vencido = lote.expira.toMillis() <= ahora.getTime();
+    if (lote.planEfectivo !== "gratis" || lote.gratisHuella !== huella || lote.gratisConciliado || !vencido) continue;
+    const loteRef = db().collection("lotes").doc(doc.id);
+    const gratisRef = db().collection("gratisPorCorreo").doc(huella);
+    repuestos += await db().runTransaction(async (tx) => {
+      const loteSnap = await tx.get(loteRef);
+      const gratisSnap = await tx.get(gratisRef);
+      if (!loteSnap.exists) return 0;
+      const l = loteSnap.data() as Lote;
+      if (l.gratisConciliado) return 0;
+      const reponer = Math.min(Math.max(0, l.fallidos ?? 0), Math.max(0, l.cantidad - l.enviados));
+      if (reponer > 0 && gratisSnap.exists) {
+        const usados = gratisUsadosDe((gratisSnap.data() as { usados?: unknown }).usados);
+        tx.update(gratisRef, { usados: Math.max(0, usados - reponer), actualizado: Timestamp.now() });
+      }
+      tx.update(loteRef, { gratisConciliado: true, gratisRepuestos: reponer });
+      return reponer;
+    });
+  }
+  return repuestos;
 }
 
 // ── Transacciones de reserva/confirmacion/liberacion (Tarea 3, corregida vuelta 18) ─────────
@@ -1675,7 +1723,12 @@ export async function confirmarEnvioExitoso(loteId: string, uid: string, planEfe
  * del propio lote (nunca lo recibe de quien llama) — `fuenteDelLote` resuelve "mixto" igual en
  * los dos casos.
  */
-export async function liberarReservaTx(tx: TransaccionLike, loteRef: any, cuentaRef: any): Promise<void> {
+export async function liberarReservaTx(
+  tx: TransaccionLike,
+  loteRef: any,
+  cuentaRef: any,
+  contarFallo = false
+): Promise<void> {
   const loteSnap = await tx.get(loteRef);
   if (!loteSnap.exists) return;
   const lote = loteSnap.data() as Lote;
@@ -1686,6 +1739,10 @@ export async function liberarReservaTx(tx: TransaccionLike, loteRef: any, cuenta
     reservados: Math.max(0, lote.reservados - 1),
     ...(fuente === "paquete" ? { reservadosPaquete: Math.max(0, (lote.reservadosPaquete ?? 0) - 1) } : {}),
     ...(fuente === "porUso" ? { reservadosPorUso: Math.max(0, (lote.reservadosPorUso ?? 0) - 1) } : {}),
+    // H8: en un lote gratis se cuenta el fallo SOLO si `contarFallo` (falla de Gmail o del servidor, no un
+    // error de validacion que el propio cliente puede provocar a voluntad); al vencer el lote,
+    // `conciliarGratisVencidos` repone esos gratis.
+    ...(contarFallo && lote.planEfectivo === "gratis" ? { fallidos: (lote.fallidos ?? 0) + 1 } : {}),
   });
   if (fuente && cuentaSnap && cuentaSnap.exists) {
     const cuenta = cuentaSnap.data() as Cuenta;
@@ -1698,10 +1755,10 @@ export async function liberarReservaTx(tx: TransaccionLike, loteRef: any, cuenta
 }
 
 /** Envoltorio real: abre la transaccion de Firestore y le pasa las referencias reales. */
-export async function liberarReserva(loteId: string, uid: string): Promise<void> {
+export async function liberarReserva(loteId: string, uid: string, contarFallo = false): Promise<void> {
   const loteRef = db().collection("lotes").doc(loteId);
   const cuentaRef = db().collection("cuentas").doc(uid);
-  await db().runTransaction((tx) => liberarReservaTx(tx, loteRef, cuentaRef));
+  await db().runTransaction((tx) => liberarReservaTx(tx, loteRef, cuentaRef, contarFallo));
 }
 
 // ── 409 de recompra de Paquete (Tarea 15, requisito B.2, decision del Brain 2026-10-06) ────────

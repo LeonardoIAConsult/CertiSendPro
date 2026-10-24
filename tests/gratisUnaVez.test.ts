@@ -1,4 +1,4 @@
-// H8 (decision de Leonardo 2026-10-24): 15 envios gratis DE POR VIDA por cuenta, tras la bandera
+// H8 (decision de Leonardo 2026-10-24): 15 envios gratis DE POR VIDA por CORREO, tras la bandera
 // GRATIS_UNA_VEZ. Sin la bandera, `decidirLote` se comporta exactamente como antes.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -6,11 +6,15 @@ import { Timestamp } from "firebase-admin/firestore";
 import {
   decidirLote,
   crearLoteConConsumoGratis,
+  conciliarGratisVencidos,
+  obtenerGratisUsados,
+  liberarReservaTx,
   gratisUnaVezActivo,
   gratisUsadosDe,
   reponerConsumoGratis,
   _usarFirestoreParaPruebas,
   type Cuenta,
+  type Lote,
 } from "../server/cuentas";
 import { FirestoreFalso } from "./_fakeFirestore";
 
@@ -34,6 +38,7 @@ function cuenta(parcial: Partial<Cuenta> = {}): Cuenta {
 }
 
 const ON = { gratisUnaVez: true };
+const H = "huella-correo-1";
 
 test("gratisUnaVezActivo: solo con GRATIS_UNA_VEZ=1", () => {
   assert.equal(gratisUnaVezActivo({ GRATIS_UNA_VEZ: "1" }), true);
@@ -98,58 +103,6 @@ test("con la bandera: un lote de mas de 15 sin saldo sigue rechazado (igual que 
   assert.equal(d.motivo, "saldo_insuficiente");
 });
 
-test("crearLoteConConsumoGratis: crea la cuenta si no existe, descuenta y deja el lote gratis", async () => {
-  const db = new FirestoreFalso();
-  _usarFirestoreParaPruebas(db);
-  const r = await crearLoteConConsumoGratis("u1", 10);
-  assert.equal(r.ok, true);
-  const cu = (await db.doc("cuentas/u1").get()).data() as Cuenta;
-  assert.equal(cu.gratisUsados, 10);
-  assert.equal(cu.plan, "gratis");
-  if (r.ok === true) {
-    const lote = (await db.doc(`lotes/${r.loteId}`).get()).data() as any;
-    assert.equal(lote.planEfectivo, "gratis");
-    assert.equal(lote.cantidad, 10);
-    assert.equal(lote.uid, "u1");
-  }
-  _usarFirestoreParaPruebas(null);
-});
-
-test("crearLoteConConsumoGratis: no deja pasar de 15 en total y NO crea lote ni descuenta al rechazar", async () => {
-  const db = new FirestoreFalso();
-  _usarFirestoreParaPruebas(db);
-  assert.equal((await crearLoteConConsumoGratis("u2", 10)).ok, true);
-  const rechazado = await crearLoteConConsumoGratis("u2", 6); // 10 + 6 > 15
-  assert.equal(rechazado.ok, false);
-  if (rechazado.ok === false) assert.equal(rechazado.gratisRestantes, 5);
-  assert.equal(((await db.doc("cuentas/u2").get()).data() as Cuenta).gratisUsados, 10);
-  assert.equal((await crearLoteConConsumoGratis("u2", 5)).ok, true);
-  assert.equal(((await db.doc("cuentas/u2").get()).data() as Cuenta).gratisUsados, 15);
-  assert.equal((await crearLoteConConsumoGratis("u2", 1)).ok, false);
-  _usarFirestoreParaPruebas(null);
-});
-
-test("crearLoteConConsumoGratis: dos lotes a la vez NO superan el tope (la transaccion se reintenta)", async () => {
-  const db = new FirestoreFalso();
-  _usarFirestoreParaPruebas(db);
-  const [a, b] = await Promise.all([crearLoteConConsumoGratis("u3", 10), crearLoteConConsumoGratis("u3", 10)]);
-  assert.equal([a.ok, b.ok].filter(Boolean).length, 1); // solo uno entra: 10 + 10 > 15
-  assert.equal(((await db.doc("cuentas/u3").get()).data() as Cuenta).gratisUsados, 10);
-  _usarFirestoreParaPruebas(null);
-});
-
-test("crearLoteConConsumoGratis: una cuenta de pago existente conserva sus datos y suma gratisUsados", async () => {
-  const db = new FirestoreFalso();
-  _usarFirestoreParaPruebas(db);
-  await db.doc("cuentas/u4").set({ ...cuenta({ plan: "porUso", saldoPorUso: 70 }) });
-  const r = await crearLoteConConsumoGratis("u4", 7);
-  assert.equal(r.ok, true);
-  const cu = (await db.doc("cuentas/u4").get()).data() as Cuenta;
-  assert.equal(cu.gratisUsados, 7);
-  assert.equal(cu.saldoPorUso, 70); // update, no set: no pisa el saldo comprado
-  _usarFirestoreParaPruebas(null);
-});
-
 test("gratisUsadosDe: negativo, NaN, string raro o null no regalan cupo; un string numerico cuenta", () => {
   assert.equal(gratisUsadosDe(-5), 0);
   assert.equal(gratisUsadosDe(NaN), 0);
@@ -167,18 +120,192 @@ test("decidirLote con la bandera: gratisUsados negativo o string no da mas de 15
   assert.equal(decidirLote(cuenta({ gratisUsados: "5" as unknown as number }), 11, ahora, ON).permitido, false); // restan 10
 });
 
-test("reponerConsumoGratis: devuelve el cupo, nunca baja de 0 y no pisa el saldo comprado", async () => {
+// ── Contador por HUELLA DE CORREO (`gratisPorCorreo/{huella}`) ───────────────────────────────
+
+async function conDb(fn: (db: FirestoreFalso) => Promise<void>) {
   const db = new FirestoreFalso();
   _usarFirestoreParaPruebas(db);
-  await db.doc("cuentas/u5").set({ ...cuenta({ plan: "porUso", saldoPorUso: 40, gratisUsados: 12 }) });
-  await reponerConsumoGratis("u5", 5);
-  let cu = (await db.doc("cuentas/u5").get()).data() as Cuenta;
-  assert.equal(cu.gratisUsados, 7);
-  assert.equal(cu.saldoPorUso, 40);
-  await reponerConsumoGratis("u5", 100);
-  cu = (await db.doc("cuentas/u5").get()).data() as Cuenta;
-  assert.equal(cu.gratisUsados, 0);
-  await reponerConsumoGratis("no-existe", 3); // sin cuenta: no falla ni crea nada
-  assert.equal((await db.doc("cuentas/no-existe").get()).data(), undefined);
-  _usarFirestoreParaPruebas(null);
-});
+  try {
+    await fn(db);
+  } finally {
+    _usarFirestoreParaPruebas(null);
+  }
+}
+
+test("crearLoteConConsumoGratis: crea el contador del correo, descuenta y deja el lote gratis con su huella", () =>
+  conDb(async (db) => {
+    const r = await crearLoteConConsumoGratis("u1", H, 10);
+    assert.equal(r.ok, true);
+    assert.equal(await obtenerGratisUsados(H), 10);
+    if (r.ok === true) {
+      const lote = (await db.doc(`lotes/${r.loteId}`).get()).data() as Lote;
+      assert.equal(lote.planEfectivo, "gratis");
+      assert.equal(lote.cantidad, 10);
+      assert.equal(lote.uid, "u1");
+      assert.equal(lote.gratisHuella, H);
+    }
+  }));
+
+test("crearLoteConConsumoGratis: no deja pasar de 15 en total y NO crea lote ni descuenta al rechazar", () =>
+  conDb(async () => {
+    assert.equal((await crearLoteConConsumoGratis("u2", H, 10)).ok, true);
+    const rechazado = await crearLoteConConsumoGratis("u2", H, 6); // 10 + 6 > 15
+    assert.equal(rechazado.ok, false);
+    if (rechazado.ok === false) assert.equal(rechazado.gratisRestantes, 5);
+    assert.equal(await obtenerGratisUsados(H), 10);
+    assert.equal((await crearLoteConConsumoGratis("u2", H, 5)).ok, true);
+    assert.equal(await obtenerGratisUsados(H), 15);
+    assert.equal((await crearLoteConConsumoGratis("u2", H, 1)).ok, false);
+  }));
+
+test("crearLoteConConsumoGratis: dos lotes a la vez NO superan el tope (la transaccion se reintenta)", () =>
+  conDb(async () => {
+    const [a, b] = await Promise.all([crearLoteConConsumoGratis("u3", H, 10), crearLoteConConsumoGratis("u3", H, 10)]);
+    assert.equal([a.ok, b.ok].filter(Boolean).length, 1); // solo uno entra: 10 + 10 > 15
+    assert.equal(await obtenerGratisUsados(H), 10);
+  }));
+
+test("H6: eliminar la cuenta y volver a crearla (otro uid, mismo correo) NO repone los gratis", () =>
+  conDb(async (db) => {
+    await db.doc("cuentas/uid-viejo").set({ ...cuenta() });
+    assert.equal((await crearLoteConConsumoGratis("uid-viejo", H, 12)).ok, true);
+    // se "elimina" la cuenta: el contador por correo es otro documento y sobrevive
+    await db.doc("cuentas/uid-viejo").set({}); // simula borrado/pisado de la cuenta
+    // el mismo correo vuelve con un uid nuevo
+    assert.equal(await obtenerGratisUsados(H), 12);
+    const r = await crearLoteConConsumoGratis("uid-nuevo", H, 5);
+    assert.equal(r.ok, false);
+    if (r.ok === false) assert.equal(r.gratisRestantes, 3);
+  }));
+
+test("H6: correos distintos tienen contadores independientes", () =>
+  conDb(async () => {
+    assert.equal((await crearLoteConConsumoGratis("u1", "huella-A", 15)).ok, true);
+    assert.equal((await crearLoteConConsumoGratis("u2", "huella-B", 15)).ok, true);
+    assert.equal(await obtenerGratisUsados("huella-A"), 15);
+    assert.equal(await obtenerGratisUsados("huella-B"), 15);
+  }));
+
+test("reponerConsumoGratis: devuelve el cupo, nunca baja de 0 y no falla si no existe el contador", () =>
+  conDb(async () => {
+    await crearLoteConConsumoGratis("u5", H, 12);
+    await reponerConsumoGratis(H, 5);
+    assert.equal(await obtenerGratisUsados(H), 7);
+    await reponerConsumoGratis(H, 100);
+    assert.equal(await obtenerGratisUsados(H), 0);
+    await reponerConsumoGratis("no-existe", 3);
+    assert.equal(await obtenerGratisUsados("no-existe"), 0);
+  }));
+
+// ── H2: reposicion de gratis por fallas, al vencer el lote ────────────────────────────────────
+
+/** Fuerza el vencimiento del lote y los contadores que dejo el envio (enviados/fallidos). */
+async function simularLote(db: FirestoreFalso, loteId: string, datos: Partial<Lote>) {
+  const ref = db.doc(`lotes/${loteId}`);
+  const actual = (await ref.get()).data() as Lote;
+  await ref.set({ ...actual, ...datos });
+}
+
+test("conciliar: repone los fallidos NO reintentados al vencer; no repone los que el usuario no envio", () =>
+  conDb(async (db) => {
+    const r = await crearLoteConConsumoGratis("u6", H, 10);
+    assert.equal(r.ok, true);
+    if (r.ok !== true) return;
+    // 10 autorizados: 6 enviados, 3 fallaron (Gmail) y no se reintentaron, 1 nunca se intento
+    await simularLote(db, r.loteId, { enviados: 6, fallidos: 3, expira: Timestamp.fromMillis(ahora.getTime() - 1000) });
+    assert.equal(await conciliarGratisVencidos("u6", H, ahora), 3);
+    assert.equal(await obtenerGratisUsados(H), 7); // 10 - 3 repuestos
+    const lote = (await db.doc(`lotes/${r.loteId}`).get()).data() as Lote;
+    assert.equal(lote.gratisConciliado, true);
+    assert.equal(lote.gratisRepuestos, 3);
+  }));
+
+test("conciliar: un fallo que luego se reintento con exito NO se repone (enviados + fallidos > cantidad)", () =>
+  conDb(async (db) => {
+    const r = await crearLoteConConsumoGratis("u7", H, 5);
+    if (r.ok !== true) return assert.fail("lote");
+    // 5 autorizados, 2 fallaron pero se reintentaron y todo salio: enviados = 5
+    await simularLote(db, r.loteId, { enviados: 5, fallidos: 2, expira: Timestamp.fromMillis(ahora.getTime() - 1000) });
+    assert.equal(await conciliarGratisVencidos("u7", H, ahora), 0);
+    assert.equal(await obtenerGratisUsados(H), 5);
+  }));
+
+test("conciliar: nunca repone mas que lo no enviado (min(fallidos, cantidad - enviados))", () =>
+  conDb(async (db) => {
+    const r = await crearLoteConConsumoGratis("u8", H, 6);
+    if (r.ok !== true) return assert.fail("lote");
+    await simularLote(db, r.loteId, { enviados: 4, fallidos: 5, expira: Timestamp.fromMillis(ahora.getTime() - 1000) });
+    assert.equal(await conciliarGratisVencidos("u8", H, ahora), 2); // solo 6 - 4 = 2 quedaron sin enviar
+    assert.equal(await obtenerGratisUsados(H), 4);
+  }));
+
+test("conciliar: es idempotente (una segunda corrida no repone otra vez)", () =>
+  conDb(async (db) => {
+    const r = await crearLoteConConsumoGratis("u9", H, 8);
+    if (r.ok !== true) return assert.fail("lote");
+    await simularLote(db, r.loteId, { enviados: 5, fallidos: 3, expira: Timestamp.fromMillis(ahora.getTime() - 1000) });
+    assert.equal(await conciliarGratisVencidos("u9", H, ahora), 3);
+    assert.equal(await conciliarGratisVencidos("u9", H, ahora), 0);
+    assert.equal(await obtenerGratisUsados(H), 5);
+  }));
+
+test("conciliar: NO toca un lote que aun no vencio ni lotes de otra huella", () =>
+  conDb(async (db) => {
+    const propio = await crearLoteConConsumoGratis("u10", H, 6);
+    const ajeno = await crearLoteConConsumoGratis("u10", "otra-huella", 6);
+    if (propio.ok !== true || ajeno.ok !== true) return assert.fail("lotes");
+    await simularLote(db, propio.loteId, { enviados: 2, fallidos: 4 }); // sigue vigente (expira en 2 h)
+    await simularLote(db, ajeno.loteId, { enviados: 0, fallidos: 6, expira: Timestamp.fromMillis(ahora.getTime() - 1000) });
+    assert.equal(await conciliarGratisVencidos("u10", H, ahora), 0);
+    assert.equal(await obtenerGratisUsados(H), 6);
+    assert.equal(await obtenerGratisUsados("otra-huella"), 6);
+    // una vez vencido el propio (se fuerza su vencimiento), si repone
+    await simularLote(db, propio.loteId, { expira: Timestamp.fromMillis(ahora.getTime() - 1000) });
+    assert.equal(await conciliarGratisVencidos("u10", H, ahora), 4);
+    assert.equal(await obtenerGratisUsados(H), 2);
+  }));
+
+test("conciliar: un lote sin fallidos no repone nada pero queda conciliado", () =>
+  conDb(async (db) => {
+    const r = await crearLoteConConsumoGratis("u11", H, 4);
+    if (r.ok !== true) return assert.fail("lote");
+    await simularLote(db, r.loteId, { enviados: 4, expira: Timestamp.fromMillis(ahora.getTime() - 1000) });
+    assert.equal(await conciliarGratisVencidos("u11", H, ahora), 0);
+    assert.equal(((await db.doc(`lotes/${r.loteId}`).get()).data() as Lote).gratisConciliado, true);
+    assert.equal(await obtenerGratisUsados(H), 4);
+  }));
+
+test("liberarReservaTx: por defecto NO cuenta fallo (errores de validacion del cliente); con contarFallo si, solo en lotes gratis", () =>
+  conDb(async (db) => {
+    const r = await crearLoteConConsumoGratis("u12", H, 5);
+    if (r.ok !== true) return assert.fail("lote");
+    await simularLote(db, r.loteId, { reservados: 3 });
+    const loteRef = db.doc(`lotes/${r.loteId}`);
+    const cuentaRef = db.doc("cuentas/u12");
+    // liberacion "de validacion": libera el cupo pero NO suma fallido (no se puede inflar a voluntad)
+    await db.runTransaction((tx) => liberarReservaTx(tx as any, loteRef, cuentaRef));
+    let lote = (await loteRef.get()).data() as Lote;
+    assert.equal(lote.reservados, 2);
+    assert.equal(lote.fallidos, undefined);
+    // liberacion por fallo real de Gmail/servidor: si cuenta
+    await db.runTransaction((tx) => liberarReservaTx(tx as any, loteRef, cuentaRef, true));
+    lote = (await loteRef.get()).data() as Lote;
+    assert.equal(lote.reservados, 1);
+    assert.equal(lote.fallidos, 1);
+    // lote pagado: aun con contarFallo no se agrega `fallidos`
+    await db.doc("lotes/pagado").set({ ...(lote as any), planEfectivo: "porUso", reservados: 1, reservadosPorUso: 1, fallidos: undefined });
+    await db.doc("cuentas/u13").set({ ...cuenta({ saldoPorUso: 10, reservadosPorUso: 1 }) });
+    await db.runTransaction((tx) => liberarReservaTx(tx as any, db.doc("lotes/pagado"), db.doc("cuentas/u13"), true));
+    assert.equal(((await db.doc("lotes/pagado").get()).data() as Lote).fallidos, undefined);
+  }));
+
+test("conciliar: solo mira lotes GRATIS del uid (la consulta filtra por planEfectivo)", () =>
+  conDb(async (db) => {
+    const r = await crearLoteConConsumoGratis("u14", H, 5);
+    if (r.ok !== true) return assert.fail("lote");
+    await simularLote(db, r.loteId, { enviados: 1, fallidos: 4, expira: Timestamp.fromMillis(ahora.getTime() - 1000) });
+    // un lote pagado vencido del mismo uid, con la misma huella por error de datos: no debe conciliarse
+    await db.doc("lotes/pagado2").set({ uid: "u14", planEfectivo: "porUso", gratisHuella: H, fallidos: 9, enviados: 0, cantidad: 9, expira: Timestamp.fromMillis(ahora.getTime() - 1000) });
+    assert.equal(await conciliarGratisVencidos("u14", H, ahora), 4);
+    assert.equal(((await db.doc("lotes/pagado2").get()).data() as Lote).gratisConciliado, undefined);
+  }));

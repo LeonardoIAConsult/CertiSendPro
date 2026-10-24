@@ -157,3 +157,14 @@ export function puedeCachearPagina(bufferBytes: number, bytesExtraidas: number, 
   const tope = Math.max(64 * 1024 * 1024, bufferBytes * 4);
   return bufferBytes + bytesExtraidas + paginaBytes <= tope;
 }
+
+/**
+ * H8 (REVISOR, ronda 2): un envio fallido de un lote GRATIS solo se repone si el fallo NO lo puede provocar
+ * el usuario a voluntad. `status === null` es un error de red hacia Google (la llamada se intento y no
+ * respondio); 429 (cuota) y 5xx son de Google. Un 400 (correo invalido), 401/403 (token falso o vencido) o un
+ * error ANTES de llamar a Gmail (validacion, tipos mal formados) los puede causar el propio usuario: no cuentan.
+ */
+export function gmailFalloReponible(status: number | null): boolean {
+  if (status === null) return true;
+  return status === 429 || status >= 500;
+}
