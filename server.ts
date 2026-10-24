@@ -54,7 +54,7 @@ import { geminiKeyConForma } from "./server/geminiKey";
 import { procesarWebhookMP, extraerAvisoWebhookMP, registrarResultadoWebhook, type EstadoFallosWebhook } from "./server/webhook";
 import { crearCobroPaquete, crearCobroPorUso, planCobroValido } from "./server/cobroPaquete";
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
-import { contarUsoDiario, hacerEspacioEnCache, urlDescargaCanvaSegura, esIpPrivada, puedeCachearPagina, sanearNombreAdjunto, type ConteoDiario } from "./server/limitesAbuso";
+import { contarUsoDiario, hacerEspacioEnCache, urlDescargaCanvaSegura, esIpPrivada, puedeCachearPagina, sanearNombreAdjunto, gmailFalloReponible, type ConteoDiario } from "./server/limitesAbuso";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { huellaGratis } from "./server/huellaGratis";
 import {
@@ -702,6 +702,8 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
   // true desde que Gmail confirmo el envio (justo tras gmailResponse.ok, bajo vuelta 19): si algo
   // lanza despues, el catch nunca debe liberar la reserva ni responder 500 (el correo ya salio).
   let gmailEnvio = false;
+  // H8: el fallo es REPONIBLE solo si la llamada a Gmail se intento y fallo por red, cuota (429) o 5xx de Google.
+  let falloReponible = false;
   try {
     const { accessToken, to, subject, body, pdfBase64, sessionId, pageIndex, fila, filename, loteId } = req.body;
 
@@ -804,18 +806,25 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       .replace(/\//g, "_")
       .replace(/=+$/, "");
 
-    const gmailResponse = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        raw: base64RawHex
-      })
-    });
+    let gmailResponse: Response;
+    try {
+      gmailResponse = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          raw: base64RawHex
+        })
+      });
+    } catch (errorRed) {
+      falloReponible = gmailFalloReponible(null); // la llamada se intento y no hubo respuesta de Google.
+      throw errorRed;
+    }
 
     if (!gmailResponse.ok) {
+      falloReponible = gmailFalloReponible(gmailResponse.status);
       const errorText = await gmailResponse.text();
       let friendlyError = errorText;
       try {
@@ -889,9 +898,9 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       // El envio no llego a confirmarse (fallo antes de o durante la llamada a Gmail): liberar
       // el cupo reservado para que no bloquee otros envios del mismo lote (M19).
       try {
-        // H8: este es el unico punto donde el fallo es de Gmail/servidor (reponible); los otros
-        // `liberarReserva` son errores de validacion que el cliente puede provocar y NO se cuentan.
-        await liberarReserva(loteReservado, req.uid!, true);
+        // H8: solo se cuenta el fallo si es REPONIBLE (red hacia Google, 429 o 5xx de Gmail); los errores de
+        // validacion o de datos mal formados que el cliente puede provocar a voluntad NO se cuentan.
+        await liberarReserva(loteReservado, req.uid!, falloReponible);
       } catch (liberarError) {
         console.error(`[CONTABILIDAD] No se pudo liberar la reserva. loteId=${loteReservado}:`, liberarError);
       }
