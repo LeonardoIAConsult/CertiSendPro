@@ -16,7 +16,8 @@ import {
   crearLote,
   crearLoteConConsumoGratis,
   reponerConsumoGratis,
-  gratisUsadosDe,
+  obtenerGratisUsados,
+  conciliarGratisVencidos,
   gratisUnaVezActivo,
   LIMITE_GRATIS,
   reservarEnvio,
@@ -55,6 +56,7 @@ import { crearCobroPaquete, crearCobroPorUso, planCobroValido } from "./server/c
 import { evaluarLimite, type EstadoVentana } from "./server/limitador";
 import { contarUsoDiario, hacerEspacioEnCache, urlDescargaCanvaSegura, esIpPrivada, puedeCachearPagina, sanearNombreAdjunto, type ConteoDiario } from "./server/limitesAbuso";
 import { lookup as dnsLookup } from "node:dns/promises";
+import { huellaGratis } from "./server/huellaGratis";
 import {
   enviarCorreo,
   construirAvisoFalloWebhookLeonardo,
@@ -170,11 +172,13 @@ declare global {
     interface Request {
       uid?: string;
       email?: string | null;
+      /** El correo del token viene verificado (`email_verified`): solo asi cuenta para los gratis por correo. */
+      emailVerificado?: boolean;
     }
   }
 }
 
-async function verificarIdToken(req: express.Request, comprobarRevocado = false): Promise<{ uid: string; email: string | null } | null> {
+async function verificarIdToken(req: express.Request, comprobarRevocado = false): Promise<{ uid: string; email: string | null; emailVerificado: boolean } | null> {
   const encabezado = req.headers.authorization || "";
   const match = /^Bearer\s+(.+)$/.exec(encabezado);
   if (!match) return null;
@@ -182,7 +186,7 @@ async function verificarIdToken(req: express.Request, comprobarRevocado = false)
     // En rutas de cobro/envio se comprueba ademas que el token no este revocado (cuenta
     // deshabilitada o sesion cerrada), no solo que no haya caducado.
     const decoded = await getAuth(obtenerFirebaseApp()).verifyIdToken(match[1], comprobarRevocado);
-    return { uid: decoded.uid, email: decoded.email || null };
+    return { uid: decoded.uid, email: decoded.email || null, emailVerificado: decoded.email_verified === true };
   } catch (error) {
     // Token ausente, falso, expirado, o sin red/credenciales para verificarlo: en todos los
     // casos es "no autenticado", nunca un error 500. El detalle va solo al log del servidor.
@@ -199,6 +203,7 @@ const exigirAuth: express.RequestHandler = async (req, res, next) => {
   }
   req.uid = identidad.uid;
   req.email = identidad.email;
+  req.emailVerificado = identidad.emailVerificado;
   next();
 };
 
@@ -209,6 +214,7 @@ const adjuntarAuthSiExiste: express.RequestHandler = async (req, _res, next) => 
   if (identidad) {
     req.uid = identidad.uid;
     req.email = identidad.email;
+    req.emailVerificado = identidad.emailVerificado;
   }
   next();
 };
@@ -883,7 +889,9 @@ app.post("/api/send-email", exigirAuth, async (req, res) => {
       // El envio no llego a confirmarse (fallo antes de o durante la llamada a Gmail): liberar
       // el cupo reservado para que no bloquee otros envios del mismo lote (M19).
       try {
-        await liberarReserva(loteReservado, req.uid!);
+        // H8: este es el unico punto donde el fallo es de Gmail/servidor (reponible); los otros
+        // `liberarReserva` son errores de validacion que el cliente puede provocar y NO se cuentan.
+        await liberarReserva(loteReservado, req.uid!, true);
       } catch (liberarError) {
         console.error(`[CONTABILIDAD] No se pudo liberar la reserva. loteId=${loteReservado}:`, liberarError);
       }
@@ -1378,6 +1386,15 @@ app.get("/api/precios", async (_req, res) => {
 // Endpoint para que el usuario vea su plan, saldo y vencimiento (Tarea 2, 2026-10-05).
 // La cuenta la lee/crea el servidor desde Firestore; el navegador nunca accede directo
 // (ver firestore.rules). Requiere sesion: sin token valido, 401.
+// H8: gratis que le quedan al CORREO (`null` si la regla esta apagada o falta el secreto de huellas).
+async function gratisRestantesDe(uid: string, emailVerificado: string | null | undefined): Promise<number | null> {
+  const secreto = process.env.HUELLA_LOTE_SECRET;
+  if (!gratisUnaVezActivo() || !secreto) return null;
+  const huella = huellaGratis(emailVerificado, uid, secreto);
+  await conciliarGratisVencidos(uid, huella);
+  return Math.max(0, LIMITE_GRATIS - (await obtenerGratisUsados(huella)));
+}
+
 app.get("/api/cuenta", exigirAuth, async (req, res) => {
   try {
     const cuenta = await obtenerCuenta(req.uid!);
@@ -1396,7 +1413,7 @@ app.get("/api/cuenta", exigirAuth, async (req, res) => {
       // `server/cuentas.ts`).
       saldoPorUso: cuenta.saldoPorUso ?? 0,
       // H8: envios gratis que le quedan (solo con GRATIS_UNA_VEZ=1; `null` si la regla esta apagada).
-      gratisRestantes: gratisUnaVezActivo() ? Math.max(0, LIMITE_GRATIS - gratisUsadosDe(cuenta.gratisUsados)) : null,
+      gratisRestantes: await gratisRestantesDe(req.uid!, req.emailVerificado ? req.email : null),
       // G6 (NO-GO del REVISOR_EXTERNO_LAP sobre la Tarea 10, 2026-10-05): el sondeo del regreso
       // de Mercado Pago necesita saber si YA llego un pago NUEVO (no solo que la cuenta tenga
       // algun plan vigente de una compra anterior). Solo id+fecha: nunca el monto ni datos del
@@ -1547,7 +1564,12 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
     const cuenta = await obtenerCuenta(req.uid!);
     // H8: con GRATIS_UNA_VEZ=1, cada cuenta tiene 15 envios gratis de por vida (se descuentan al autorizar).
     const gratisUnaVez = gratisUnaVezActivo();
-    const decision = decidirLote(cuenta, cantidad, new Date(), { gratisUnaVez });
+    // Los gratis se cuentan por CORREO (huella HMAC), no por uid; antes se reponen los gratis de los envios
+    // fallidos de lotes ya vencidos. `secreto` ya se valido arriba (sin el no se llega aqui).
+    const huellaCorreo = huellaGratis(req.emailVerificado ? req.email : null, req.uid!, secreto!);
+    if (gratisUnaVez) await conciliarGratisVencidos(req.uid!, huellaCorreo);
+    const gratisUsados = gratisUnaVez ? await obtenerGratisUsados(huellaCorreo) : undefined;
+    const decision = decidirLote(gratisUsados === undefined ? cuenta : { ...cuenta, gratisUsados }, cantidad, new Date(), { gratisUnaVez });
     const venceISO = decision.vence ? decision.vence.toDate().toISOString() : null;
 
     if (!decision.permitido) {
@@ -1572,7 +1594,7 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
 
     let loteId: string;
     if (decision.consumoGratis !== undefined) {
-      const creado = await crearLoteConConsumoGratis(req.uid!, cantidad);
+      const creado = await crearLoteConConsumoGratis(req.uid!, huellaCorreo, cantidad);
       if (creado.ok === false) {
         // Otro lote gratis abierto a la vez se llevo el cupo entre la decision y la transaccion.
         return res.json({
@@ -1595,7 +1617,7 @@ app.post("/api/lote/iniciar", exigirAuth, async (req, res) => {
     } catch (errorHuella) {
       // H8: el lote gratis quedo sin huella (inutilizable): se devuelve el cupo descontado antes de fallar.
       if (decision.consumoGratis !== undefined) {
-        await reponerConsumoGratis(req.uid!, cantidad).catch((e) => console.error("[LOTE] no se pudo reponer el cupo gratis:", e));
+        await reponerConsumoGratis(huellaCorreo, cantidad).catch((e) => console.error("[LOTE] no se pudo reponer el cupo gratis:", e));
       }
       throw errorHuella;
     }

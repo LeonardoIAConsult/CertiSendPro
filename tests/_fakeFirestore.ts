@@ -18,6 +18,8 @@
 
 export interface DocRefFalso {
   path: string;
+  /** Ultimo segmento del path, como `DocumentReference.id` del SDK real. */
+  id: string;
   /** GRAVE 1 (correccion vuelta 31, 2026-10-06): lectura/escritura DIRECTA (fuera de una
    * transaccion) — mismo patron que `guardarAutorizacionDatos`/`obtenerAutorizacionDatos`,
    * `guardarPreferencia`/`obtenerPreferencia`, etc. de server/cuentas.ts, que nunca abren
@@ -87,13 +89,21 @@ class TransaccionFalsa {
   }
 }
 
+/** Consulta con filtros de igualdad encadenables (`.where().where().get()`), como el SDK real. */
+export interface ConsultaFalsa {
+  where(campo: string, operador: "==", valor: any): ConsultaFalsa;
+  get(): Promise<{ docs: Array<{ id: string; data(): any }> }>;
+}
+
 export class FirestoreFalso {
   private almacen = new Map<string, DocGuardado>();
+  private contadorIdAuto = 0;
 
   doc(path: string): DocRefFalso {
     const almacen = this.almacen;
     return {
       path,
+      id: path.slice(path.lastIndexOf("/") + 1),
       // GRAVE 1: lectura/escritura directa fuera de transaccion (ver la nota del tipo arriba).
       async get() {
         const guardado = almacen.get(path);
@@ -128,25 +138,32 @@ export class FirestoreFalso {
    * tests/acusePorUsoE2E.test.ts).
    */
   collection(nombre: string): {
-    doc(id: string): DocRefFalso;
-    where(campo: string, operador: "==", valor: any): { get(): Promise<{ docs: Array<{ id: string; data(): any }> }> };
+    doc(id?: string): DocRefFalso;
+    where(campo: string, operador: "==", valor: any): ConsultaFalsa;
   } {
     const almacen = this.almacen;
     return {
-      doc: (id: string) => this.doc(`${nombre}/${id}`),
-      where(campo: string, operador: "==", valor: any) {
-        if (operador !== "==") throw new Error(`FirestoreFalso.where: operador no soportado "${operador}"`);
-        return {
+      // Sin id, como `collection().doc()` real: id automatico UNICO (antes todos caian en "undefined").
+      doc: (id?: string) => this.doc(`${nombre}/${id ?? `auto-${++this.contadorIdAuto}`}`),
+      where(campo: string, operador: "==", valor: any): ConsultaFalsa {
+        const filtros: Array<[string, any]> = [];
+        const consulta: ConsultaFalsa = {
+          where(c2: string, op2: "==", v2: any) {
+            if (op2 !== "==") throw new Error(`FirestoreFalso.where: operador no soportado "${op2}"`);
+            filtros.push([c2, v2]);
+            return consulta;
+          },
           async get() {
             const docs: Array<{ id: string; data(): any }> = [];
             for (const [path, guardado] of almacen) {
               if (!path.startsWith(`${nombre}/`) || guardado.data === undefined) continue;
-              if (guardado.data[campo] !== valor) continue;
+              if (!filtros.every(([c3, v3]) => guardado.data![c3] === v3)) continue;
               docs.push({ id: path.slice(nombre.length + 1), data: () => guardado.data });
             }
             return { docs };
           },
         };
+        return consulta.where(campo, operador, valor);
       },
     };
   }
